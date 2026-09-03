@@ -241,7 +241,7 @@ class TelemetryStageMixin:
             return None
 
         worker_nodes = sorted({process.node for process in self.backend_processes})
-        cpu_dir = self.runtime.log_dir / telemetry.storage_subdir / "cpu"
+        cpu_dir = self.runtime.log_dir / cpu_power.storage_subdir
         session = CpuPowerTelemetrySession(
             CpuPowerSessionSettings(
                 cpu_dir=cpu_dir,
