@@ -1052,7 +1052,7 @@ class TestTachometerStageMixin:
 
     @patch("srtctl.cli.mixins.telemetry_stage.start_srun_process")
     @patch("srtctl.cli.mixins.telemetry_stage.generate_tachometer_config", return_value='storage = "/run/tachometer"\n')
-    def test_multinode_exporters_request_one_node_per_taskdef test_multinode_exporters_request_one_node_per_task(self, _mock_config, mock_srun, tmp_path):
+    def test_multinode_exporters_request_one_node_per_task(self, _mock_config, mock_srun, tmp_path):
         """srun rejects --nodes 1 with a longer --nodelist, so the exporter launch
         must size --nodes to the worker set."""
 
