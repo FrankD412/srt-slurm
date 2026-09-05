@@ -455,6 +455,10 @@ def show_config_details(config: SrtConfig) -> None:
             if exporter is not None:
                 details.add_row("telemetry", "dcgm_exporter", f"{exporter.container_image} (port {exporter.port})")
 
+        cpu_exporter = config.telemetry.cpu_power_exporter
+        if cpu_exporter is not None:
+            details.add_row("telemetry", "cpu_power_exporter", str(cpu_exporter.port))
+
         if mooncake_cfg is not None:
             details.add_row("mooncake", "container", mooncake_cfg.container or "<job container>")
             details.add_row("mooncake", "master_port", f"{MOONCAKE_MASTER_PORT} (auto)")
@@ -510,8 +514,8 @@ def validate_setup(srtctl_source: Path, config: SrtConfig | None = None) -> None
     Checks for NATS, etcd, Tachometer, and compute-arch uv binaries. Raises SystemExit
     with a clear error message if anything is missing.
 
-    cpu-power-exporter is only required by recipes that enable
-    telemetry.cpu_power; every other recipe submits without it.
+    cpu-power-exporter is only required by recipes that configure
+    telemetry.cpu_power_exporter; every other recipe submits without it.
     """
     missing = []
 
@@ -524,7 +528,7 @@ def validate_setup(srtctl_source: Path, config: SrtConfig | None = None) -> None
         missing.append("bin/uv (compute-arch uv)")
     if not (srtctl_source / "bin" / "tachometer-scraper").exists():
         missing.append("bin/tachometer-scraper (compute-arch Tachometer scraper)")
-    cpu_power_enabled = config is not None and config.telemetry.enabled and config.telemetry.cpu_power.enabled
+    cpu_power_enabled = config is not None and config.telemetry.cpu_power_exporter is not None
     if cpu_power_enabled:
         problem = _cpu_power_exporter_problem(srtctl_source)
         if problem is not None:

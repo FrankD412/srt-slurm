@@ -4,7 +4,7 @@
 """Trapezoidal energy/J-per-token report for a completed srtslurm run.
 
 Reads the CPU (``power/cpu/samples.csv``) and GPU (``power/samples.csv``)
-power-telemetry CSVs already written by ``cpu_power.py`` / the dcgm-power
+power-telemetry CSVs already written by ``CpuPowerCollector`` / the dcgm-power
 exporter, joins them against the profiling window and token counts of each
 concurrency point in a sa-bench or aiperf/AgentX sweep, and integrates power
 into energy with ``numpy.trapz``.

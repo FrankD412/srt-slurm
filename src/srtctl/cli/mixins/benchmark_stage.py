@@ -680,13 +680,13 @@ class BenchmarkStageMixin:
         # runners retain their historical sorted physical-process list.
         urls = list(dict.fromkeys(urls)) if logical_workers_only else sorted(set(urls))
 
-        # Add ACPI CPU power exporter endpoints (one per worker node) when enabled.
-        cpu_power = getattr(self.config.telemetry, "cpu_power", None)
-        if self.config.telemetry.enabled and cpu_power is not None and cpu_power.enabled and cpu_power.prometheus_port > 0:
+        # Add CPU power exporter endpoints (one per worker node) when configured.
+        cpu_power_exporter = getattr(self.config.telemetry, "cpu_power_exporter", None)
+        if self.config.telemetry.enabled and cpu_power_exporter is not None:
             worker_nodes = sorted({process.node for process in self.backend_processes})
             for node in worker_nodes:
                 host = get_hostname_ip(node, self.runtime.network_interface)
-                urls.append(f"http://{url_host(host)}:{cpu_power.prometheus_port}/metrics")
+                urls.append(f"http://{url_host(host)}:{cpu_power_exporter.port}/metrics")
 
         return {"AIPERF_SERVER_METRICS_URLS": ",".join(urls)}
 

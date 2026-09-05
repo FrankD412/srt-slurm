@@ -773,6 +773,7 @@ class TestRequiredReadinessGate:
         config = MagicMock()
         config.telemetry.enabled = True
         config.telemetry.required = required
+        config.telemetry.cpu_power_exporter = None
         config.frontend.type = "dynamo"
         config.profiling.enabled = False
         runtime = MagicMock()

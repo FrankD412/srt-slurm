@@ -16,7 +16,7 @@ from srtctl.core.power.contract import Reason
 from srtctl.core.processes import ProcessRegistry
 from srtctl.core.schema import (
     BenchmarkConfig,
-    CpuPowerConfig,
+    CpuPowerExporterConfig,
     InfraConfig,
     ModelConfig,
     ObservabilityConfig,
@@ -191,39 +191,7 @@ class TestDcgmPowerConfig:
         assert defaults.request_timeout_seconds == 2.0
         assert defaults.collector_join_timeout_seconds is None
         assert defaults.resolved_collector_join_timeout_seconds == 12.0
-        assert defaults.cpu_power.enabled is False
-        assert defaults.cpu_power.source == "auto"
-
-    def test_accepts_cpu_power_collection(self):
-        config = _make_config(
-            telemetry=_dcgm_power(
-                cpu_power=CpuPowerConfig(
-                    enabled=True,
-                    source="acpi",
-                    sample_interval_seconds=0.1,
-                    startup_timeout_seconds=10.0,
-                    required=True,
-                )
-            ),
-            benchmark=_sa_bench(),
-        )
-
-        assert config.telemetry.cpu_power.enabled is True
-        assert config.telemetry.cpu_power.required is True
-
-    def test_cpu_power_requires_telemetry(self):
-        with pytest.raises(ValidationError, match="telemetry.cpu_power requires telemetry.enabled"):
-            _make_config(telemetry=TelemetryConfig(cpu_power=CpuPowerConfig(enabled=True)))
-
-    @pytest.mark.parametrize("field_name", ["sample_interval_seconds", "startup_timeout_seconds"])
-    def test_cpu_power_intervals_must_be_positive(self, field_name):
-        with pytest.raises(ValidationError, match=f"telemetry.cpu_power.{field_name}"):
-            _make_config(
-                telemetry=_dcgm_power(
-                    cpu_power=CpuPowerConfig(enabled=True, **{field_name: 0.0}),
-                ),
-                benchmark=_sa_bench(),
-            )
+        assert defaults.cpu_power_exporter is None
 
     def test_join_timeout_default_tracks_request_timeout(self):
         config = _make_config(
@@ -376,6 +344,30 @@ class TestDcgmPowerConfig:
             return
 
         assert build().infra.etcd_nats_dedicated_node is dedicated
+
+
+class TestCpuPowerExporterConfig:
+    """The CPU power exporter leg is independent, best-effort, and off by default."""
+
+    def test_absent_by_default(self):
+        config = _make_config(telemetry=_dcgm_power(), benchmark=_sa_bench())
+
+        assert config.telemetry.cpu_power_exporter is None
+
+    def test_accepted_alongside_dcgm_power(self):
+        config = _make_config(
+            telemetry=_dcgm_power(cpu_power_exporter=CpuPowerExporterConfig(port=9405)),
+            benchmark=_sa_bench(),
+        )
+
+        assert config.telemetry.cpu_power_exporter.port == 9405
+
+    def test_rejected_for_an_out_of_range_port(self):
+        with pytest.raises(ValidationError, match="telemetry.cpu_power_exporter.port"):
+            _make_config(
+                telemetry=_dcgm_power(cpu_power_exporter=CpuPowerExporterConfig(port=0)),
+                benchmark=_sa_bench(),
+            )
 
 
 class TestTachometerConfigGeneration:
@@ -996,61 +988,6 @@ class TestTachometerStageMixin:
         assert 'name = "dcgm_node-a"' in (tmp_path / "tachometer_config.toml").read_text()
 
     @patch("srtctl.cli.mixins.telemetry_stage.start_srun_process")
-    def test_cpu_only_telemetry_leaves_tachometers_dcgm_exporter_running(self, mock_srun, tmp_path):
-        """The CPU leg configures no DCGM exporter, so there is nothing to reuse."""
-
-        class Harness(TelemetryStageMixin):
-            def __init__(self):
-                self.config = _make_config(
-                    tachometer=TachometerConfig(
-                        enabled=True,
-                        dcgm_exporter=TelemetryExporterConfig(container_image="dcgm:latest", port=9400),
-                    ),
-                    telemetry=TelemetryConfig(enabled=True, cpu_power=CpuPowerConfig(enabled=True)),
-                )
-                self.runtime = MagicMock()
-                self.runtime.log_dir = tmp_path
-                self.runtime.job_id = "12345"
-                self.runtime.run_name = "test_12345"
-                self.runtime.network_interface = "eth0"
-                self.runtime.nodes.head = "node-a"
-                self.runtime.nodes.het = False
-                self.runtime.srun_options = {}
-                self.runtime.container_mounts = {Path(tmp_path): Path("/logs")}
-                self._backend_processes = [
-                    Process(
-                        node="node-a",
-                        gpu_indices=frozenset({0}),
-                        sys_port=8081,
-                        http_port=30000,
-                        endpoint_mode="agg",
-                        endpoint_index=0,
-                        node_rank=0,
-                    )
-                ]
-
-            @property
-            def backend_processes(self):
-                return self._backend_processes
-
-            def _compute_frontend_topology(self):
-                return FrontendTopology(
-                    nginx_node=None,
-                    frontend_nodes=["node-a"],
-                    frontend_port=8000,
-                    public_port=8000,
-                )
-
-        mock_srun.return_value = _running_exporter()
-        harness = Harness()
-        harness._resolve_tachometer_binary = lambda binary_path: binary_path
-
-        processes = harness.start_tachometer()
-
-        assert [process.name for process in processes] == ["tachometer_dcgm_exporter", "tachometer"]
-        assert 'name = "dcgm_node-a"' in (tmp_path / "tachometer_config.toml").read_text()
-
-    @patch("srtctl.cli.mixins.telemetry_stage.start_srun_process")
     @patch("srtctl.cli.mixins.telemetry_stage.generate_tachometer_config", return_value='storage = "/run/tachometer"\n')
     def test_multinode_exporters_request_one_node_per_task(self, _mock_config, mock_srun, tmp_path):
         """srun rejects --nodes 1 with a longer --nodelist, so the exporter launch
@@ -1297,51 +1234,72 @@ class TestDcgmPowerExporterLaunch:
         assert outcome.exit_nonzero is True
 
 
-class TestCpuPowerCollectorLaunch:
-    """CPU power runs once per backend node on the bare host."""
+class TestCpuPowerExporterLaunch:
+    """Independent, best-effort CPU power exporter: bundled binary with a Python fallback."""
 
-    @patch("srtctl.cli.mixins.telemetry_stage.CpuPowerTelemetrySession.wait_for_readiness", return_value=True)
-    @patch("srtctl.cli.mixins.telemetry_stage.start_srun_process")
-    def test_multinode_launches_native_collectors(self, mock_srun, _mock_ready, tmp_path):
-        mock_srun.return_value = _running_exporter()
-        harness = _power_harness(
-            tmp_path,
-            [_worker("node-a", range(4)), _worker("node-b", range(4), index=1)],
-        )
+    def _with_cpu_power_exporter(self, tmp_path, port=9405):
+        harness = _power_harness(tmp_path, [_worker("node-a", range(4)), _worker("node-b", range(4), index=1)])
         harness.config = _make_config(
             telemetry=_dcgm_power(
                 startup_timeout_seconds=0.2,
                 request_timeout_seconds=0.1,
                 collector_join_timeout_seconds=3.0,
-                cpu_power=CpuPowerConfig(enabled=True, source="auto", required=True),
+                cpu_power_exporter=CpuPowerExporterConfig(port=port),
             ),
             benchmark=_sa_bench(),
         )
+        return harness
+
+    @patch("srtctl.cli.mixins.telemetry_stage.start_srun_process")
+    def test_none_returned_when_not_configured(self, mock_srun, tmp_path):
+        harness = _power_harness(tmp_path, [_worker("node-a", range(4))])
         registry = ProcessRegistry(job_id="12345")
 
-        session = harness.start_cpu_power_telemetry(registry)
+        collector = harness.start_cpu_power_telemetry(registry)
 
-        assert session is not None
-        assert mock_srun.call_count == 1
+        assert collector is None
+        mock_srun.assert_not_called()
+
+    @patch("srtctl.cli.mixins.telemetry_stage.start_srun_process")
+    def test_uses_the_bundled_binary_when_present_and_executable(self, mock_srun, tmp_path):
+        mock_srun.return_value = _running_exporter()
+        harness = self._with_cpu_power_exporter(tmp_path)
+        resolved = tmp_path / "cpu-power-exporter"
+        resolved.write_text("#!/bin/sh\n")
+        resolved.chmod(0o755)
+        harness._resolve_bundled_binary = lambda name: str(resolved)
+        registry = ProcessRegistry(job_id="12345")
+
+        collector = harness.start_cpu_power_telemetry(registry)
+
+        assert collector is not None
         kwargs = mock_srun.call_args.kwargs
-        assert kwargs["nodes"] == 2
-        assert kwargs["ntasks"] == 2
-        assert kwargs["nodelist"] == ["node-a", "node-b"]
+        assert kwargs["command"] == [str(resolved), "--port", "9405"]
         assert kwargs["use_bash_wrapper"] is False
-        assert "container_image" not in kwargs
-        assert kwargs["command"][1:3] == ["-m", "srtctl.core.cpu_power"]
-        assert registry.process_count == 1
-        assert all(proc.critical is False for proc in registry.get_all_processes().values())
+        collector.stop_and_finalize()
 
-    def test_required_cpu_power_failure_blocks_benchmark(self, tmp_path):
-        harness = _power_harness(tmp_path, [_worker("node-a", range(4))])
-        harness.config = _make_config(
-            telemetry=_dcgm_power(cpu_power=CpuPowerConfig(enabled=True, required=True)),
-            benchmark=_sa_bench(),
-        )
-        harness._cpu_power_session = MagicMock()
-        harness._cpu_power_telemetry_ready = False
-        harness._power_session = MagicMock()
-        harness._power_telemetry_ready = True
+    @patch("srtctl.cli.mixins.telemetry_stage.start_srun_process")
+    def test_falls_back_to_the_python_exporter_when_the_binary_is_absent(self, mock_srun, tmp_path):
+        mock_srun.return_value = _running_exporter()
+        harness = self._with_cpu_power_exporter(tmp_path)
+        harness._resolve_bundled_binary = lambda name: name  # bare name: not a file
+        registry = ProcessRegistry(job_id="12345")
 
-        assert harness.power_telemetry_blocks_benchmark() is True
+        collector = harness.start_cpu_power_telemetry(registry)
+
+        assert collector is not None
+        kwargs = mock_srun.call_args.kwargs
+        assert kwargs["command"] == ["python3", "-m", "srtctl.core.cpu_power_exporter", "--port", "9405"]
+        collector.stop_and_finalize()
+
+    @patch("srtctl.cli.mixins.telemetry_stage.start_srun_process")
+    def test_launch_failure_is_absorbed_not_raised(self, mock_srun, tmp_path):
+        mock_srun.side_effect = RuntimeError("srun refused")
+        harness = self._with_cpu_power_exporter(tmp_path)
+        harness._resolve_bundled_binary = lambda name: name
+        registry = ProcessRegistry(job_id="12345")
+
+        collector = harness.start_cpu_power_telemetry(registry)
+
+        assert collector is not None
+        assert registry.process_count == 0

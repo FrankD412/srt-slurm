@@ -13,7 +13,7 @@ import pytest
 from srtctl.cli.submit import validate_setup
 from srtctl.core.schema import (
     BenchmarkConfig,
-    CpuPowerConfig,
+    CpuPowerExporterConfig,
     ModelConfig,
     ResourceConfig,
     SrtConfig,
@@ -113,8 +113,8 @@ class TestValidateSetup:
             resources=ResourceConfig(gpu_type="h100"),
             benchmark=BenchmarkConfig(type="manual"),
             telemetry=TelemetryConfig(
-                enabled=cpu_power_enabled,
-                cpu_power=CpuPowerConfig(enabled=cpu_power_enabled),
+                enabled=False,
+                cpu_power_exporter=CpuPowerExporterConfig() if cpu_power_enabled else None,
             ),
         )
 
