@@ -419,7 +419,8 @@ class TelemetryStageMixin:
         logger.info("Starting Tachometer")
 
         power_telemetry = self.config.telemetry
-        dcgm_exporter = power_telemetry.dcgm_exporter if power_telemetry.enabled else tachometer.resolved_dcgm_exporter
+        shares_dcgm_exporter = power_telemetry.enabled and power_telemetry.dcgm_exporter is not None
+        dcgm_exporter = power_telemetry.dcgm_exporter if shares_dcgm_exporter else tachometer.resolved_dcgm_exporter
         topology = self._compute_frontend_topology()
         config_path = self.runtime.log_dir / "tachometer_config.toml"
         config_path.write_text(
@@ -447,7 +448,7 @@ class TelemetryStageMixin:
         # must never tear down the benchmark. Verified the hard way: a
         # bash-wrapped node-exporter (FROM scratch) died with execve() ENOENT
         # and, as a critical process, killed a 7-node run at startup.
-        if not power_telemetry.enabled and tachometer.resolved_dcgm_exporter is not None:
+        if not shares_dcgm_exporter and tachometer.resolved_dcgm_exporter is not None:
             if tachometer.collect_interval_ms < DCGM_PROVEN_SAFE_INTERVAL_MS:
                 logger.warning(
                     "observability.tachometer.collect_interval_ms=%d drives DCGM NVML "

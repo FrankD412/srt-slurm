@@ -528,7 +528,9 @@ def validate_setup(srtctl_source: Path, config: SrtConfig | None = None) -> None
         missing.append("bin/uv (compute-arch uv)")
     if not (srtctl_source / "bin" / "tachometer-scraper").exists():
         missing.append("bin/tachometer-scraper (compute-arch Tachometer scraper)")
-    cpu_power_enabled = config is not None and config.telemetry.cpu_power_exporter is not None
+    cpu_power_enabled = (
+        config is not None and config.telemetry.enabled and config.telemetry.cpu_power_exporter is not None
+    )
     if cpu_power_enabled:
         problem = _cpu_power_exporter_problem(srtctl_source)
         if problem is not None:

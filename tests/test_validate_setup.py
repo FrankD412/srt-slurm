@@ -113,7 +113,7 @@ class TestValidateSetup:
             resources=ResourceConfig(gpu_type="h100"),
             benchmark=BenchmarkConfig(type="manual"),
             telemetry=TelemetryConfig(
-                enabled=False,
+                enabled=cpu_power_enabled,
                 cpu_power_exporter=CpuPowerExporterConfig() if cpu_power_enabled else None,
             ),
         )
@@ -130,6 +130,20 @@ class TestValidateSetup:
 
         with pytest.raises(SystemExit):
             validate_setup(tmp_path, self._config(cpu_power_enabled=True))
+
+    def test_cpu_power_exporter_is_not_required_when_telemetry_disabled(self, tmp_path: Path):
+        """cpu_power_exporter only matters if telemetry.enabled -- start_cpu_power_telemetry
+        never launches it otherwise, so the preflight check must not demand the binary."""
+        self._setup_tree(tmp_path)
+        config = SrtConfig(
+            name="test",
+            model=ModelConfig(path="/model", container="/image", precision="fp4"),
+            resources=ResourceConfig(gpu_type="h100"),
+            benchmark=BenchmarkConfig(type="manual"),
+            telemetry=TelemetryConfig(enabled=False, cpu_power_exporter=CpuPowerExporterConfig()),
+        )
+
+        validate_setup(tmp_path, config)
 
     @staticmethod
     def _foreign_arch() -> tuple[bytes, str]:

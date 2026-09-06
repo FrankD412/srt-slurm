@@ -2442,16 +2442,19 @@ class SrtConfig:
 
         ``cpu_power_exporter`` is an independent, best-effort leg: it is
         validated whenever telemetry is enabled, regardless of which
-        provider (dcgm-power today) is configured.
+        provider (dcgm-power today) is configured. It is also sufficient on
+        its own -- a recipe may enable telemetry for CPU power alone, with
+        no ``dcgm_exporter`` at all.
         """
         telemetry = self.telemetry
         if telemetry is None or not telemetry.enabled:
             return
         if telemetry.dcgm_exporter is not None:
             self._validate_dcgm_power()
-        else:
+        elif telemetry.cpu_power_exporter is None:
             raise ValidationError(
-                "telemetry.enabled requires telemetry.dcgm_exporter; otherwise there is nothing to collect"
+                "telemetry.enabled requires telemetry.dcgm_exporter or telemetry.cpu_power_exporter; "
+                "otherwise there is nothing to collect"
             )
         self._validate_collector_budget()
         self._validate_cpu_power_exporter()
