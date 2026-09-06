@@ -27,6 +27,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TextIO
 
 import numpy as np
 
@@ -267,19 +268,23 @@ class CpuSamples:
 
 
 def load_cpu_samples(path: Path) -> CpuSamples:
+    with path.open(newline="", encoding="utf-8") as handle:
+        return load_cpu_samples_from(handle)
+
+
+def load_cpu_samples_from(handle: TextIO) -> CpuSamples:
     per_socket: dict[tuple[str, int], list[tuple[float, float]]] = {}
     node_totals: dict[str, dict[float, float]] = {}
-    with path.open(newline="", encoding="utf-8") as handle:
-        for row in csv.DictReader(handle):
-            timestamp = float(row["timestamp_unix"])
-            hostname = row["hostname"]
-            socket_raw = row["socket_id"]
-            if socket_raw != "":
-                per_socket.setdefault((hostname, int(socket_raw)), []).append((timestamp, float(row["power_w"])))
-            # total_power_w is blank whenever an ACPI scrape has no `grace` channel
-            # (see contract.CPU_SAMPLES_HEADER); skip rather than crash on float("").
-            if row["total_power_w"] != "":
-                node_totals.setdefault(hostname, {})[timestamp] = float(row["total_power_w"])
+    for row in csv.DictReader(handle):
+        timestamp = float(row["timestamp_unix"])
+        hostname = row["hostname"]
+        socket_raw = row["socket_id"]
+        if socket_raw != "":
+            per_socket.setdefault((hostname, int(socket_raw)), []).append((timestamp, float(row["power_w"])))
+        # total_power_w is blank whenever an ACPI scrape has no `grace` channel
+        # (see contract.CPU_SAMPLES_HEADER); skip rather than crash on float("").
+        if row["total_power_w"] != "":
+            node_totals.setdefault(hostname, {})[timestamp] = float(row["total_power_w"])
 
     per_node_rows = {host: list(values.items()) for host, values in node_totals.items()}
     return CpuSamples(per_socket=_sorted_series(per_socket), per_node=_sorted_series(per_node_rows))
@@ -302,22 +307,26 @@ def load_gpu_roles(manifest_path: Path) -> dict[tuple[str, int], set[str]]:
 
 
 def load_gpu_samples(path: Path, roles: dict[tuple[str, int], set[str]] | None) -> GpuSamples:
+    with path.open(newline="", encoding="utf-8") as handle:
+        return load_gpu_samples_from(handle, roles)
+
+
+def load_gpu_samples_from(handle: TextIO, roles: dict[tuple[str, int], set[str]] | None) -> GpuSamples:
     per_device: dict[tuple[str, int], list[tuple[float, float]]] = {}
     node_totals: dict[str, dict[float, float]] = {}
     role_totals: dict[str, dict[str, dict[float, float]]] = {}
-    with path.open(newline="", encoding="utf-8") as handle:
-        for row in csv.DictReader(handle):
-            timestamp = float(row["timestamp_unix"])
-            hostname = row["hostname"]
-            gpu_index = int(row["gpu_index"])
-            watts = float(row["power_w"])
-            per_device.setdefault((hostname, gpu_index), []).append((timestamp, watts))
-            node_totals.setdefault(hostname, {})
-            node_totals[hostname][timestamp] = node_totals[hostname].get(timestamp, 0.0) + watts
-            if roles is not None:
-                for role in roles.get((hostname, gpu_index), ()):
-                    by_host = role_totals.setdefault(role, {}).setdefault(hostname, {})
-                    by_host[timestamp] = by_host.get(timestamp, 0.0) + watts
+    for row in csv.DictReader(handle):
+        timestamp = float(row["timestamp_unix"])
+        hostname = row["hostname"]
+        gpu_index = int(row["gpu_index"])
+        watts = float(row["power_w"])
+        per_device.setdefault((hostname, gpu_index), []).append((timestamp, watts))
+        node_totals.setdefault(hostname, {})
+        node_totals[hostname][timestamp] = node_totals[hostname].get(timestamp, 0.0) + watts
+        if roles is not None:
+            for role in roles.get((hostname, gpu_index), ()):
+                by_host = role_totals.setdefault(role, {}).setdefault(hostname, {})
+                by_host[timestamp] = by_host.get(timestamp, 0.0) + watts
 
     per_node_rows = {host: list(values.items()) for host, values in node_totals.items()}
     per_role = {
