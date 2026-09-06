@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from srtctl.core.fingerprint import format_identity_verification, verify_identity
-from srtctl.core.ip_utils import url_host
 from srtctl.core.health import wait_for_model
+from srtctl.core.ip_utils import url_host
 from srtctl.core.lockfile import collect_worker_fingerprints
 from srtctl.core.power.contract import (
     CONTAINER_LOG_DIR,

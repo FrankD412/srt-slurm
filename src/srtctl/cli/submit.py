@@ -59,11 +59,11 @@ from srtctl.core.schema import SrtConfig, installs_dynamo
 from srtctl.core.status import create_job_record
 from srtctl.core.validation import preflight_config_variants
 from srtctl.ports import MOONCAKE_MASTER_PORT
-from srtctl.runtime_scripts.dynamo_wheels import arch_from_binary, detect_target_arch
 from srtctl.render.direct_plan import (
     build_direct_plan_context,
     render_direct_container_shim,
 )
+from srtctl.runtime_scripts.dynamo_wheels import arch_from_binary, detect_target_arch
 
 console = Console()
 logger = logging.getLogger(__name__)

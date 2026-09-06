@@ -26,7 +26,7 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 # Channels we surface; others (NVSwitch rails etc.) are collected but labelled separately.
 _OEM_LABELS = {
@@ -107,10 +107,7 @@ def _build_metrics(sensors: list[dict[str, Any]]) -> str:
         if watts is None:
             continue
         labels = (
-            f'type="{_escape(s["type"])}",'
-            f'socket="{_escape(s["socket"])}",'
-            f'oem_info="{_escape(s["oem"])}",'
-            f'source="acpi"'
+            f'type="{_escape(s["type"])}",socket="{_escape(s["socket"])}",oem_info="{_escape(s["oem"])}",source="acpi"'
         )
         lines.append(f"cpu_power_acpi_watts{{{labels}}} {watts:.6f}")
     lines.append("")
@@ -118,9 +115,9 @@ def _build_metrics(sensors: list[dict[str, Any]]) -> str:
 
 
 class _Handler(BaseHTTPRequestHandler):
-    sensors: list[dict[str, Any]] = []
+    sensors: ClassVar[list[dict[str, Any]]] = []
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         if self.path not in ("/metrics", "/health"):
             self.send_response(404)
             self.end_headers()
