@@ -1228,64 +1228,59 @@ telemetry:
   dcgm_exporter:
     container_image: /containers/dcgm-exporter.sqsh
     port: 9400
-  cpu_power:
-    enabled: true
+  cpu_power_exporter:
+    port: 9405
     source: auto
-    sample_interval_seconds: 0.1
-    startup_timeout_seconds: 30.0
-    required: true
 ```
 
 | Field | Type | Default | Description |
 | ----- | ---- | ------- | ----------- |
 | `enabled` | bool | `false` | Enable DCGM power collection |
 | `dcgm_exporter` | object/null | `null` | DCGM exporter image, port, and optional command; required when enabled |
-| `collect_interval_ms` | int | `1000` | Milliseconds between collector cycles; must be at most `3000` (replaces the retired `default_frequency`, which was seconds despite its name) |
+| `collect_interval_ms` | int | `1000` | Milliseconds between collector cycles (shared by the DCGM and CPU legs); must be at most `3000` (replaces the retired `default_frequency`, which was seconds despite its name) |
 | `storage_subdir` | string | `power` | Output directory below the run log directory |
-| `required` | bool | `false` | Fail the benchmark when publishable power artifacts cannot be produced |
-| `startup_timeout_seconds` | float | `30.0` | Exporter readiness timeout |
-| `request_timeout_seconds` | float | `2.0` | Per-request exporter timeout |
+| `required` | bool | `false` | Fail the benchmark when publishable DCGM power artifacts cannot be produced (CPU power is always best-effort; see below) |
+| `startup_timeout_seconds` | float | `30.0` | Exporter readiness timeout (shared by the DCGM and CPU legs) |
+| `request_timeout_seconds` | float | `2.0` | Per-request exporter timeout (shared by the DCGM and CPU legs) |
 | `collector_join_timeout_seconds` | float/null | `null` | Shutdown join timeout; defaults from `request_timeout_seconds` |
+| `cpu_power_exporter` | object/null | `null` | Enables the independent CPU power leg; see below |
 
 ### CPU power
 
-`telemetry.cpu_power` starts one host-side collector on every backend node and
-writes auditable per-node samples plus an aggregated CSV under
-`<log_dir>/<storage_subdir>/cpu/`. The collector runs outside the model
-container so it can read the host power interfaces. `auto` follows the BTK
-Grace source order: Linux ACPI `power_meter` channels, then DCGM CPU entity
-field 1130.
+`telemetry.cpu_power_exporter` is an independent, best-effort leg: its
+presence (not a separate `enabled` flag) turns CPU power collection on, and it
+can run with or without `dcgm_exporter` alongside it. On each worker node,
+srtctl launches a `cpu-power-exporter` process directly on the bare host
+(outside the model container, so it can read host power interfaces) and
+exposes it on `cpu_power_exporter.port`. It resolves the bundled Rust binary
+installed by `make setup` first, falling back to the ACPI-only Python stdlib
+exporter (`srtctl.core.cpu_power_exporter`) when that binary is absent. A
+head-node collector scrapes every worker's exporter on the shared
+`default_frequency`/`request_timeout_seconds` cadence and writes per-sample
+rows plus a manifest under `<log_dir>/<storage_subdir>/cpu/`
+(`samples.csv`, `cpu_manifest.json`).
 
-The `acpi` source is implemented through Linux's host hwmon interface under
-`/sys/class/hwmon`; it requires the `power_meter` driver. For ACPI firmware that
-exposes socket totals and component rails, the collector records `Total Power`,
-`CPU Rail Power`, `SoC Rail Power`, and `DRAM Power` for each socket. It accepts
-standard `power*_average` channels and falls back to `power*_input` when an
-average is unavailable. Only recognized CPU-side socket-total channels
-contribute to the node-level `total_power_w`; all expected socket totals must
-be readable.
-The component rails are reference breakdowns and are not added again. CPU-rail
-output, cumulative energy, and throttle channels are excluded.
+| CPU power exporter field | Type | Default | Description |
+| ------------------------- | ---- | ------- | ----------- |
+| `port` | int | `9405` | Port the exporter listens on and the head-node collector scrapes |
+| `source` | `auto`/`acpi`/`dcgm` | `auto` | Passed through to the bundled binary's own `--source` flag; `auto` tries DCGM first and falls back to ACPI. Has no effect on the Python fallback exporter, which is ACPI-only |
 
-Discovery is label-driven and does not require explicit CPU-model detection.
-Firmware exposing `Total Power`, `CPU Rail Power`, `SOC Rail Power`, and `DRAM
-Power` labels uses that schema directly. Firmware exposing `Grace Power Socket
-N`, `CPU Power Socket N`, and `SysIO Power Socket N` uses the first as the
-CPU-side socket total and the latter two as CPU and SoC component rails. Only
-the recognized socket-total label contributes to `total_power_w`; component
-rails remain reference breakdowns.
+`samples.csv` carries one row per sensor reading, with columns
+`schema_version, timestamp_unix, hostname, source, sensor, socket_id, power_w,
+total_power_w`. In ACPI mode, `total_power_w` is **not** a sum of the
+`cpu`- and `sysio`-kind rails; whenever a `grace`-kind channel exists for a
+socket, that channel alone is the node-level total (real hardware traces show
+`grace` at roughly 93-104W against `cpu`+`sysio` combined at roughly 53-58W for
+the same socket, i.e. `grace` measures the whole Grace SoC power boundary, not
+literally `cpu + sysio`). When no `grace` channel is present for a scrape,
+`total_power_w` is left blank for that row rather than guessed from the
+component rails; per-socket `power_w` values are always populated regardless.
+In DCGM mode, `total_power_w` is the single already-aggregate value DCGM
+reports per socket.
 
-When DCGM is used as the fallback, field 1130 represents CPU-rail power rather
-than the complete CPU-side socket envelope; the manifest records that narrower
-aggregate scope.
-
-| CPU power field | Type | Default | Description |
-| --------------- | ---- | ------- | ----------- |
-| `enabled` | bool | `false` | Enable host CPU-power collection |
-| `source` | `auto`/`acpi`/`dcgm` | `auto` | Requested host power source; `acpi` reads the ACPI `power_meter` hwmon interface |
-| `sample_interval_seconds` | float | `0.1` | Collector sampling interval |
-| `startup_timeout_seconds` | float | `30.0` | Timeout for all backend nodes to publish source readiness |
-| `required` | bool | `false` | Skip/fail the benchmark if CPU power cannot be collected on every backend node |
+Because collection is always best-effort, there is no `required` knob for the
+CPU leg: a node that fails to expose its exporter (or fails to publish
+readings) simply produces gaps in `samples.csv`, and the run continues.
 
 ---
 

@@ -15,13 +15,13 @@ must be loaded.
 
 ## Proposed configuration contract
 
-Add an optional runtime block beneath `telemetry.cpu_power` only when the DCGM
-runtime feature is implemented:
+Add an optional runtime block beneath `telemetry.cpu_power_exporter` only when
+the DCGM runtime feature is implemented:
 
 ```yaml
 telemetry:
-  cpu_power:
-    enabled: true
+  cpu_power_exporter:
+    port: 9405
     source: dcgm
     dcgm_runtime:
       package_url: https://packages.example.invalid/path/to/dcgm-arm64.deb

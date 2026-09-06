@@ -1,6 +1,7 @@
 # CPU Power Telemetry
 
-Host-side per-socket CPU power collection for NVIDIA Grace nodes, added on the `kylliang/power_study_20260901` branch alongside GPU DCGM power telemetry and audited GPU power limits.
+Host-side CPU power collection for NVIDIA Grace nodes, run alongside GPU DCGM
+power telemetry as an independent, best-effort leg.
 
 ## Table of Contents
 
@@ -8,7 +9,6 @@ Host-side per-socket CPU power collection for NVIDIA Grace nodes, added on the `
 - [Enabling It](#enabling-it)
 - [How It Starts](#how-it-starts)
 - [Collection Sources](#collection-sources)
-- [DCGM Python Bindings](#dcgm-python-bindings)
 - [Output Format](#output-format)
 - [Computing Total Energy Over a Run](#computing-total-energy-over-a-run)
 - [Relationship to GPU Power Telemetry](#relationship-to-gpu-power-telemetry)
@@ -17,97 +17,139 @@ Host-side per-socket CPU power collection for NVIDIA Grace nodes, added on the `
 
 ## Overview
 
-`srtctl.core.cpu_power` is a standalone collector script (not a persistent system daemon) that srtslurm launches via `srun`, one task per allocated worker node, for the lifetime of a job. It samples per-socket CPU power on the host (not inside the model container, since it needs sysfs and the host DCGM install) and writes CSV artifacts under the run's telemetry directory.
+CPU power collection is a scrape-based, head-node-orchestrated design, not an
+in-job daemon per node writing its own files. On each worker node, srtctl
+launches a small HTTP exporter process directly on the bare host (outside the
+model container, so it can read host power interfaces) that serves a
+Prometheus `/metrics` endpoint. A single collector thread on the head node
+(`CpuPowerCollector`, `src/srtctl/core/power/cpu_session.py`) polls every
+worker's exporter on a fixed interval, parses the scrape body, and appends
+rows to one shared `cpu/samples.csv` for the whole run.
 
-It follows BTK's CPU-power source ordering for Grace: Linux ACPI `power_meter` CPU rails first, falling back to DCGM CPU entity field `1130` (`CPU_POWER_FIELD_ID`).
+The leg is fully decoupled from the GPU DCGM power pipeline's lifecycle and is
+always best-effort: an unresolvable node, an unreachable exporter, a malformed
+scrape, or a wedged collector thread is absorbed and logged, never raised into
+the benchmark. There is no `required` flag for CPU power — gaps in
+`samples.csv` are the visible cost of a failure, not a blocked run.
 
 ## Enabling It
 
-Two flags must both be `true` in the recipe YAML — `telemetry.cpu_power.enabled` is not implied by `telemetry.enabled` alone:
+Presence of `telemetry.cpu_power_exporter` (not a separate `enabled` flag)
+turns CPU power collection on:
 
 ```yaml
 telemetry:
-  enabled: true              # master switch; also gates GPU DCGM power telemetry
-  cpu_power:
-    enabled: true              # must be explicit
-    source: auto                 # "auto" | "acpi" | "dcgm"
-    sample_interval_seconds: 0.1
-    startup_timeout_seconds: 30.0
-    required: false               # if true, failed CPU power readiness blocks the benchmark stage
+  enabled: true                # master switch; also gates GPU DCGM power telemetry
+  cpu_power_exporter:
+    port: 9405                 # default; exporter listen port / collector scrape port
+    source: auto                # "auto" | "acpi" | "dcgm", passed to the exporter binary
 ```
 
-Config lives in `CpuPowerConfig` (`src/srtctl/core/schema.py`), nested under `TelemetryConfig.cpu_power`.
+`telemetry.enabled: true` no longer requires `dcgm_exporter` — a recipe may
+configure `cpu_power_exporter` alone with no DCGM leg at all. The sampling
+cadence and timeouts (`default_frequency`, `request_timeout_seconds`,
+`startup_timeout_seconds`, `collector_join_timeout_seconds`) are shared with
+the DCGM leg on `TelemetryConfig`; there is no separate CPU-specific set.
+
+Config lives in `CpuPowerExporterConfig` (`src/srtctl/core/schema.py`), nested
+under `TelemetryConfig.cpu_power_exporter`. Port-collision validation
+(against `dcgm_exporter`, `observability.tachometer`'s exporters, and any
+Dynamo system port) happens in `SrtConfig._validate_cpu_power_exporter`.
 
 ## How It Starts
 
-`start_cpu_power_telemetry()` in `src/srtctl/cli/mixins/telemetry_stage.py` is called from `do_sweep.py` during job startup (alongside the tachometer and GPU DCGM exporter). It builds one `srun` task per worker node (or per het-group chunk) running:
+`start_cpu_power_telemetry()` in `src/srtctl/cli/mixins/telemetry_stage.py` is
+called from the sweep startup path alongside the tachometer and GPU DCGM
+exporter. It resolves the exporter binary, then launches one `srun` task per
+worker node (or per het-group chunk, `use_bash_wrapper=False` — bare host, no
+container):
 
 ```bash
 srun --nodes=<N> --ntasks=<N> --nodelist=<nodes> \
-     --output=<log_dir>/telemetry_cpu_power.%N.out \
+     --output=<log_dir>/telemetry_cpu_power_exporter.%N.out \
      [--het-group=<id>] \
-     python -m srtctl.core.cpu_power \
-       --output-dir <run_dir>/telemetry/power/cpu/nodes \
-       --ready-dir <run_dir>/telemetry/power/cpu/ready \
-       --source auto \
-       --interval-seconds 0.1
+     <cpu-power-exporter binary> --port 9405 --source auto
 ```
 
-`use_bash_wrapper=False` — it runs directly on the host, no container wrapper. There is no separate `srtctl` subcommand for this; it's wired into the sweep lifecycle, not user-invocable directly.
+The binary is resolved via `_resolve_bundled_binary("cpu-power-exporter")` — a
+Rust binary installed by `make setup`. When that binary is absent or not
+executable, srtctl falls back to a Python stdlib exporter
+(`python3 -m srtctl.core.cpu_power_exporter`), which is ACPI-only and has no
+`--source` flag; a non-`auto` `source` request logs a warning in that case
+instead of being silently dropped.
 
-Each node's process writes a `.ready.json` (or `.error.json` on failure) once its reader is initialized. `CpuPowerTelemetrySession.wait_for_readiness()` blocks until all expected nodes report ready or `startup_timeout_seconds` elapses. At job teardown, processes receive `SIGTERM`, `stop_and_finalize()` merges all per-node CSVs into one `samples.csv`, and writes a `manifest.json` with status/reason codes.
+Once the exporter tasks are launched, `CpuPowerCollector.start()` resolves
+each worker's IP (`get_hostname_ip`, respecting `runtime.network_interface`),
+opens the `cpu/samples.csv` writer, and starts a background thread that polls
+every endpoint's `/metrics` on `default_frequency` and appends parsed rows.
+Any launch failure for the exporter tasks themselves is caught and logged; the
+collector object is still returned (with whatever endpoints did resolve) so
+the caller doesn't have to special-case a partial launch.
+
+At job teardown, `stop_and_finalize()` stops the collector thread, closes the
+CSV writer, and writes `cpu_manifest.json` (non-authoritative: per-node
+scrape/error counts and the resolved source mode, for debugging — the CSV is
+the source of truth).
 
 ## Collection Sources
 
-- **`AcpiPowerMeterReader`** — reads Linux ACPI `power_meter` hwmon sysfs channels matching `CPU Power Socket N`. Pure file reads, no DCGM dependency.
-- **`DcgmCpuPowerReader`** — reads DCGM field 1130 for `DCGM_FE_CPU` entities. Connects via `pydcgm.DcgmHandle(ipAddress=None)`, which starts DCGM in **embedded** mode (loads `libdcgm.so` in-process) rather than dialing a separate `nv-hostengine` daemon — no system daemon needs to be running or managed by srtslurm.
+The exporter binary itself decides ACPI vs. DCGM per its own `--source` flag:
 
-  Fixed in `c1c0028c` ("fix: collect Grace CPU power through watched DCGM fields"): DCGM's live-data flag does not implicitly install a watch, so an explicit `DcgmGroup` + `DcgmFieldGroup` watch on field 1130 is created (`WatchFields`, 100ms freq / 60s max age / 600 samples), followed by a forced `dcgmUpdateAllFields` so the first sample is real instead of stale/empty.
+- **`acpi`** — reads Linux ACPI `power_meter` hwmon sysfs channels. Reports
+  per-channel detail: `cpu`, `sysio`, and (where firmware exposes it)
+  `grace`-kind rails per socket.
+- **`dcgm`** — reads DCGM CPU entity power directly, one already-aggregated
+  value per socket.
+- **`auto`** (default) — tries DCGM first, falls back to ACPI when DCGM is
+  unavailable or reports no CPU entities.
 
-`source: auto` tries ACPI first, then DCGM.
-
-## DCGM Python Bindings
-
-DCGM's Python bindings (`dcgm_agent`, `dcgm_fields`, `dcgm_structs`, `pydcgm`) are **not pip-installable**. They ship as part of the DCGM system package (`datacenter-gpu-manager`), installed on disk at a fixed path — not in Python site-packages. `_add_standard_dcgm_binding_path()` in `cpu_power.py` searches known install locations:
-
-- `/usr/share/datacenter-gpu-manager-4/bindings/python3`
-- `/usr/local/dcgm/bindings/python3`
-
-and inserts the first match containing `dcgm_agent.py` onto `sys.path` before importing. If DCGM isn't installed on the node, the import fails and `DcgmCpuPowerReader` raises `CpuPowerSourceUnavailable`, which `collect()` handles by writing a `.error.json` and letting `source: auto` fall through (or failing the session if `dcgm` was forced).
-
-Binding layers:
-
-| Module | Role |
-|---|---|
-| `dcgm_agent` | Thin ctypes wrappers around raw C API calls |
-| `dcgm_fields` | Field ID / entity type constants (`CPU_POWER_FIELD_ID = 1130`, `DCGM_FE_CPU`, ...) |
-| `dcgm_structs` | ctypes struct/enum definitions for marshaling |
-| `pydcgm` | Higher-level OOP wrappers (`DcgmHandle`, `DcgmGroup`, `DcgmFieldGroup`) used by `cpu_power.py` |
+The exporter resolves this once at process startup and serves only one metric
+family (`cpu_power_dcgm_watts` or `cpu_power_acpi_watts`) for its lifetime.
+Client-side parsing (`src/srtctl/core/power/cpu_parser.py`) prefers ACPI
+readings if a scrape body ever contained both, since ACPI carries more detail.
 
 ## Output Format
 
-`samples.csv` under `<run_dir>/<telemetry.storage_subdir>/cpu/` has header:
+`samples.csv` under `<log_dir>/<telemetry.storage_subdir>/cpu/` has header:
 
 ```
-schema_version, timestamp_unix, timestamp_local, hostname, source, sensor, socket_id, power_w, total_power_w
+schema_version, timestamp_unix, hostname, source, sensor, socket_id, power_w, total_power_w
 ```
 
-- **`schema_version`** — `2` as of the addition of `timestamp_local` (previously `1`, an 8-column row without it).
-- **`timestamp_local`** — ISO 8601 wall-clock time with UTC offset for the same sample, e.g. `2026-09-03T14:32:07.891234-07:00`, derived from `timestamp_unix` via `datetime.fromtimestamp(ts).astimezone()` (the collector process's local timezone). Exists so a consumer that only has a benchmark log's local `HH:MM:SS`-style timestamps (no timezone) can read the real UTC offset for that node straight from this column instead of guessing the cluster's timezone.
-- **`power_w`** — one socket's power reading. `sensor` names look like `CPU0:cpuPowerUsageW` — granularity is per-socket, not per-core.
-- **`total_power_w`** — sum of `power_w` across all sockets on that node, computed once per timestamp and duplicated on every sensor row at that timestamp. It is instantaneous power, not a running/cumulative energy total.
+- **`power_w`** — one sensor's power reading for that scrape. `sensor` names
+  look like `CPU0:cpuPowerUsageW` (ACPI) or a DCGM field label; granularity is
+  per-socket.
+- **`total_power_w`** — the node-level total for that scrape, duplicated on
+  every sensor row at the same `(hostname, timestamp_unix)`. In DCGM mode this
+  is the sum of the per-socket DCGM values. In ACPI mode it is **not** a sum of
+  the `cpu`- and `sysio`-kind rails: whenever a `grace`-kind channel exists for
+  a socket, that channel alone is the total. Real hardware traces show `grace`
+  at roughly 93-104W against `cpu`+`sysio` combined at roughly 53-58W for the
+  same socket — `grace` measures the whole Grace SoC power boundary, not
+  literally `cpu + sysio`. **When no `grace` channel is present for a scrape,
+  `total_power_w` is left blank** for every row from that scrape rather than
+  guessed from the component rails; per-sensor `power_w` values are still
+  populated. Consumers reading this CSV (e.g.
+  `srtctl.analysis.power_energy_report.load_cpu_samples`) must skip blank
+  `total_power_w` rows rather than treat them as `0`.
 
-A `manifest.json` and per-node `*.metadata.json` (sensor provenance, driver/semantics info) accompany the samples.
+`cpu_manifest.json` alongside it is non-authoritative debugging metadata:
+per-node scrape/error counts and the resolved source mode, plus start/stop
+timestamps and the producer's git commit.
 
 ## Computing Total Energy Over a Run
 
-The collector intentionally never integrates power into energy — same philosophy as the GPU power artifact contract (`src/srtctl/core/power/__init__.py`: *"It never integrates power into energy; that belongs to consumers of the artifact contract."*). To get run-total energy:
+The collector intentionally never integrates power into energy — same
+philosophy as the GPU power artifact contract
+(`src/srtctl/core/power/contract.py`: it never integrates power into energy;
+that belongs to consumers of the artifact contract). To get run-total energy:
 
 ```python
 import pandas as pd
 import numpy as np
 
 df = pd.read_csv("samples.csv")
+df = df[df["total_power_w"] != ""]  # skip scrapes with no grace channel
 
 # total_power_w repeats across every sensor row for the same (hostname, timestamp);
 # dedupe before integrating or sockets get double-counted.
@@ -118,16 +160,29 @@ per_node_ts = (
 )
 
 def energy_joules(group: pd.DataFrame) -> float:
-    return float(np.trapezoid(group["total_power_w"], x=group["timestamp_unix"]))
+    return float(np.trapezoid(group["total_power_w"].astype(float), x=group["timestamp_unix"]))
 
 energy_per_node_j = per_node_ts.groupby("hostname").apply(energy_joules)
 run_total_wh = energy_per_node_j.sum() / 3600
 ```
 
-Use trapezoidal integration (`np.trapezoid`; `np.trapz` was removed in numpy 2.0), not `mean(power) * duration` — the sample loop is not perfectly uniform (`time.sleep(max(0, next_sample - now))`), and read failures leave gaps. For per-socket energy instead of per-node, group by `(hostname, socket_id)` on `power_w` instead of `total_power_w`.
+Use trapezoidal integration (`np.trapezoid`; `np.trapz` was removed in numpy
+2.0), not `mean(power) * duration` — the scrape loop is not perfectly uniform,
+and scrape failures leave gaps. For per-sensor energy instead of per-node,
+group by `(hostname, sensor)` (or `(hostname, socket_id)`) on `power_w`
+instead of `total_power_w`.
 
 ## Relationship to GPU Power Telemetry
 
-GPU power telemetry (`start_gpu_power_telemetry`, same mixin) works differently: it launches an actual **DCGM exporter container** (`telemetry_dcgm_exporter`) as a sidecar via `_start_exporter_container`, i.e. a real DCGM Prometheus-exporter process scraped over its own protocol. CPU power skips the exporter and talks to DCGM directly in-process via the Python bindings — a lighter-weight, embedded approach rather than a scraped-service approach.
+GPU power telemetry (`start_gpu_power_telemetry`, same mixin) works
+similarly in shape — an exporter process per worker node scraped by a
+head-node collector — but the exporter is a containerized DCGM exporter
+sidecar (`telemetry.dcgm_exporter`, launched via `_start_exporter_container`)
+rather than a bare-host process, and it is not best-effort by default:
+`telemetry.required` (which applies to the DCGM leg) can fail the benchmark
+stage if publishable GPU power artifacts can't be produced. CPU power has no
+equivalent `required` semantics; it is always best-effort.
 
-GPU power *limits* (apply/restore audited caps, `src/srtctl/core/gpu_power_limit.py`, added in `dc9a5fcb`) are a separate, unrelated top-level config (`gpu_power_limits`) — not part of `telemetry.cpu_power`.
+GPU power *limits* (apply/restore audited caps, `src/srtctl/core/gpu_power_limit.py`)
+are a separate, unrelated top-level config (`gpu_power_limits`) — not part of
+`telemetry.cpu_power_exporter`.
