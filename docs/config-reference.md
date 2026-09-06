@@ -555,7 +555,7 @@ backend:
 | Value      | Process layout                                                               |
 | ---------- | ---------------------------------------------------------------------------- |
 | `per_node` | One process per node (default); supports node-local or distributed TP/PP      |
-| `per_gpu`  | One process per DP rank/GPU (deprecated compatibility mode)                   |
+| `per_gpu`  | One process per DP rank (TP×PP GPUs each; deprecated compatibility mode)     |
 
 Set `backend.dp_launch_mode: per_gpu` only when temporarily preserving the
 legacy process layout. srtslurm emits a configuration-time deprecation warning
