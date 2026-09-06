@@ -17,6 +17,7 @@ from srtctl.core.processes import ProcessRegistry
 from srtctl.core.schema import (
     BenchmarkConfig,
     CpuPowerExporterConfig,
+    FrontendConfig,
     InfraConfig,
     ModelConfig,
     ObservabilityConfig,
@@ -381,6 +382,88 @@ class TestCpuPowerExporterConfig:
 
         assert config.telemetry.dcgm_exporter is None
         assert config.telemetry.cpu_power_exporter.port == 9405
+
+    def test_rejected_for_an_invalid_source(self):
+        with pytest.raises(ValidationError, match="telemetry.cpu_power_exporter.source"):
+            _make_config(
+                telemetry=_dcgm_power(cpu_power_exporter=CpuPowerExporterConfig(port=9405, source="nvml")),
+                benchmark=_sa_bench(),
+            )
+
+    def test_accepts_each_valid_source(self):
+        for source in ("auto", "acpi", "dcgm"):
+            config = _make_config(
+                telemetry=_dcgm_power(cpu_power_exporter=CpuPowerExporterConfig(port=9405, source=source)),
+                benchmark=_sa_bench(),
+            )
+            assert config.telemetry.cpu_power_exporter.source == source
+
+    def test_rejected_for_colliding_with_dcgm_exporter_port(self):
+        with pytest.raises(ValidationError, match="telemetry.cpu_power_exporter.port=9401"):
+            _make_config(
+                telemetry=_dcgm_power(cpu_power_exporter=CpuPowerExporterConfig(port=9401)),
+                benchmark=_sa_bench(),
+            )
+
+    def test_rejected_for_colliding_with_tachometer_dcgm_exporter_port(self):
+        with pytest.raises(ValidationError, match="telemetry.cpu_power_exporter.port=9411"):
+            SrtConfig(
+                name="test",
+                model=ModelConfig(path="/model", container="/image", precision="fp4"),
+                resources=ResourceConfig(gpu_type="h100"),
+                benchmark=_sa_bench(),
+                observability=ObservabilityConfig(
+                    enabled=True,
+                    tachometer=TachometerConfig(
+                        enabled=True,
+                        dcgm_exporter=TelemetryExporterConfig(container_image="dcgm:latest", port=9411),
+                        storage_subdir="tachometer",
+                    ),
+                ),
+                telemetry=TelemetryConfig(
+                    enabled=True,
+                    storage_subdir="power",
+                    cpu_power_exporter=CpuPowerExporterConfig(port=9411),
+                ),
+            )
+
+    def test_rejected_for_colliding_with_tachometer_node_exporter_port(self):
+        with pytest.raises(ValidationError, match="telemetry.cpu_power_exporter.port=9101"):
+            SrtConfig(
+                name="test",
+                model=ModelConfig(path="/model", container="/image", precision="fp4"),
+                resources=ResourceConfig(gpu_type="h100"),
+                benchmark=_sa_bench(),
+                observability=ObservabilityConfig(
+                    enabled=True,
+                    tachometer=TachometerConfig(
+                        enabled=True,
+                        node_exporter=TelemetryExporterConfig(container_image="node:latest", port=9101),
+                        storage_subdir="tachometer",
+                    ),
+                ),
+                telemetry=TelemetryConfig(
+                    enabled=True,
+                    storage_subdir="power",
+                    cpu_power_exporter=CpuPowerExporterConfig(port=9101),
+                ),
+            )
+
+    def test_rejected_for_colliding_with_a_dynamo_system_port(self):
+        """Dynamo backend processes bind DYN_SYSTEM_PORT (base 7500) on every worker node."""
+        with pytest.raises(ValidationError, match="telemetry.cpu_power_exporter.port=7500"):
+            SrtConfig(
+                name="test",
+                model=ModelConfig(path="/model", container="/image", precision="fp4"),
+                resources=ResourceConfig(gpu_type="h100", gpus_per_node=8, agg_nodes=1, agg_workers=1),
+                benchmark=_sa_bench(),
+                frontend=FrontendConfig(type="dynamo"),
+                telemetry=TelemetryConfig(
+                    enabled=True,
+                    storage_subdir="power",
+                    cpu_power_exporter=CpuPowerExporterConfig(port=7500),
+                ),
+            )
 
 
 class TestTachometerConfigGeneration:

@@ -276,7 +276,10 @@ def load_cpu_samples(path: Path) -> CpuSamples:
             socket_raw = row["socket_id"]
             if socket_raw != "":
                 per_socket.setdefault((hostname, int(socket_raw)), []).append((timestamp, float(row["power_w"])))
-            node_totals.setdefault(hostname, {})[timestamp] = float(row["total_power_w"])
+            # total_power_w is blank whenever an ACPI scrape has no `grace` channel
+            # (see contract.CPU_SAMPLES_HEADER); skip rather than crash on float("").
+            if row["total_power_w"] != "":
+                node_totals.setdefault(hostname, {})[timestamp] = float(row["total_power_w"])
 
     per_node_rows = {host: list(values.items()) for host, values in node_totals.items()}
     return CpuSamples(per_socket=_sorted_series(per_socket), per_node=_sorted_series(per_node_rows))

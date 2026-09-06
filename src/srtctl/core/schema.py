@@ -1252,6 +1252,13 @@ class CpuPowerExporterConfig:
     """
 
     port: int = 9405
+    source: str = "auto"
+    """Power reading back-end passed through to the bundled Rust binary's own
+    ``--source`` flag (``auto`` | ``acpi`` | ``dcgm``). ``auto`` tries DCGM
+    first and falls back to ACPI when libdcgm.so is absent or reports no CPU
+    entities. Has no effect when the Python stdlib fallback exporter is used
+    instead of the binary -- that fallback is ACPI-only.
+    """
 
     Schema: ClassVar[type[Schema]] = Schema
 
@@ -2399,6 +2406,28 @@ class SrtConfig:
             return
         if not 1 <= exporter.port <= 65535:
             raise ValidationError("telemetry.cpu_power_exporter.port must be in 1..65535")
+        if exporter.source not in ("auto", "acpi", "dcgm"):
+            raise ValidationError('telemetry.cpu_power_exporter.source must be one of: "auto", "acpi", "dcgm"')
+
+        neighbours = [("telemetry.dcgm_exporter", self.telemetry.dcgm_exporter)]
+        if self.observability.tachometer_enabled:
+            tachometer = self.observability.tachometer
+            neighbours += [
+                ("observability.tachometer.dcgm_exporter", tachometer.dcgm_exporter),
+                ("observability.tachometer.node_exporter", tachometer.node_exporter),
+            ]
+        for name, neighbour_exporter in neighbours:
+            if neighbour_exporter is not None and neighbour_exporter.port == exporter.port:
+                raise ValidationError(
+                    f"telemetry.cpu_power_exporter.port={exporter.port} collides with "
+                    f"{name}.port; both run on every worker node"
+                )
+
+        if exporter.port in self._dynamo_system_ports():
+            raise ValidationError(
+                f"telemetry.cpu_power_exporter.port={exporter.port} collides with a Dynamo system port "
+                "assigned to a backend process on a worker node"
+            )
 
     def _validate_observability(self):
         """Validate Tachometer collection under observability."""
