@@ -317,6 +317,21 @@ class TestDryRunExecutionExtensions:
         assert "cpu_power_exporter" in output
         assert "9405" in output
 
+    def test_cpu_power_exporter_details_hidden_when_telemetry_disabled(self, capsys):
+        """A cpu_power_exporter block that will never actually launch must not be displayed."""
+        config = _make_config(
+            {
+                "benchmark": {"type": "sa-bench", "isl": 8192, "osl": 1024, "concurrencies": [4]},
+                "telemetry": {
+                    "enabled": False,
+                    "cpu_power_exporter": {"port": 9405},
+                },
+            }
+        )
+        show_config_details(config)
+        output = capsys.readouterr().out
+        assert "cpu_power_exporter" not in output
+
     def test_mooncake_kv_store_details_shown(self, capsys):
         """mooncake_kv_store should appear in env vars and execution extensions."""
         config = _make_config(

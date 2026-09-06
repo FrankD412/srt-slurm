@@ -1425,8 +1425,61 @@ class TestCpuPowerExporterLaunch:
 
         assert collector is not None
         kwargs = mock_srun.call_args.kwargs
-        assert kwargs["command"] == [str(resolved), "--port", "9405"]
+        assert kwargs["command"] == [str(resolved), "--port", "9405", "--source", "auto"]
         assert kwargs["use_bash_wrapper"] is False
+        collector.stop_and_finalize()
+
+    @patch("srtctl.cli.mixins.telemetry_stage.start_srun_process")
+    def test_passes_source_through_to_the_bundled_binary(self, mock_srun, tmp_path):
+        mock_srun.return_value = _running_exporter()
+        harness = _power_harness(tmp_path, [_worker("node-a", range(4)), _worker("node-b", range(4), index=1)])
+        harness.config = _make_config(
+            telemetry=_dcgm_power(
+                startup_timeout_seconds=0.2,
+                request_timeout_seconds=0.1,
+                collector_join_timeout_seconds=3.0,
+                cpu_power_exporter=CpuPowerExporterConfig(port=9405, source="acpi"),
+            ),
+            benchmark=_sa_bench(),
+        )
+        resolved = tmp_path / "cpu-power-exporter"
+        resolved.write_text("#!/bin/sh\n")
+        resolved.chmod(0o755)
+        harness._resolve_bundled_binary = lambda name: str(resolved)
+        registry = ProcessRegistry(job_id="12345")
+
+        collector = harness.start_cpu_power_telemetry(registry)
+
+        assert collector is not None
+        kwargs = mock_srun.call_args.kwargs
+        assert kwargs["command"] == [str(resolved), "--port", "9405", "--source", "acpi"]
+        collector.stop_and_finalize()
+
+    @patch("srtctl.cli.mixins.telemetry_stage.start_srun_process")
+    def test_warns_when_a_non_auto_source_cannot_be_honored_by_the_fallback(self, mock_srun, tmp_path, caplog):
+        import logging
+
+        mock_srun.return_value = _running_exporter()
+        harness = _power_harness(tmp_path, [_worker("node-a", range(4)), _worker("node-b", range(4), index=1)])
+        harness.config = _make_config(
+            telemetry=_dcgm_power(
+                startup_timeout_seconds=0.2,
+                request_timeout_seconds=0.1,
+                collector_join_timeout_seconds=3.0,
+                cpu_power_exporter=CpuPowerExporterConfig(port=9405, source="acpi"),
+            ),
+            benchmark=_sa_bench(),
+        )
+        harness._resolve_bundled_binary = lambda name: name  # bare name: not a file, triggers fallback
+        registry = ProcessRegistry(job_id="12345")
+
+        with caplog.at_level(logging.WARNING, logger="srtctl.cli.mixins.telemetry_stage"):
+            collector = harness.start_cpu_power_telemetry(registry)
+
+        assert collector is not None
+        kwargs = mock_srun.call_args.kwargs
+        assert kwargs["command"] == ["python3", "-m", "srtctl.core.cpu_power_exporter", "--port", "9405"]
+        assert "cannot be honored" in caplog.text
         collector.stop_and_finalize()
 
     @patch("srtctl.cli.mixins.telemetry_stage.start_srun_process")
@@ -1454,3 +1507,30 @@ class TestCpuPowerExporterLaunch:
 
         assert collector is not None
         assert registry.process_count == 0
+
+    @patch("srtctl.cli.mixins.telemetry_stage.start_srun_process")
+    def test_unresolvable_het_node_is_absorbed_not_raised(self, mock_srun, tmp_path):
+        """Regression: het-group resolution failures must not escape as an unabsorbed RuntimeError."""
+        harness = _power_harness(
+            tmp_path,
+            [_worker("node-a", range(4)), _worker("node-b", range(4), index=1)],
+            het=True,
+            het_groups={},  # node-a/node-b resolve to no het component
+        )
+        harness.config = _make_config(
+            telemetry=_dcgm_power(
+                startup_timeout_seconds=0.2,
+                request_timeout_seconds=0.1,
+                collector_join_timeout_seconds=3.0,
+                cpu_power_exporter=CpuPowerExporterConfig(port=9405),
+            ),
+            benchmark=_sa_bench(),
+        )
+        harness._resolve_bundled_binary = lambda name: name
+        registry = ProcessRegistry(job_id="12345")
+
+        collector = harness.start_cpu_power_telemetry(registry)
+
+        assert collector is not None
+        assert registry.process_count == 0
+        mock_srun.assert_not_called()

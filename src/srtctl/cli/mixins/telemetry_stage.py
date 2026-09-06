@@ -259,26 +259,33 @@ class TelemetryStageMixin:
         self._cpu_power_collector = collector
 
         port = telemetry.cpu_power_exporter.port
+        source = telemetry.cpu_power_exporter.source
         resolved = self._resolve_bundled_binary("cpu-power-exporter")
         if Path(resolved).is_file() and os.access(resolved, os.X_OK):
-            exporter_command = [resolved, "--port", str(port)]
+            exporter_command = [resolved, "--port", str(port), "--source", source]
             logger.info("CPU power exporter: using Rust binary %s", resolved)
         else:
             exporter_command = ["python3", "-m", "srtctl.core.cpu_power_exporter", "--port", str(port)]
             logger.info("CPU power exporter: Rust binary not found, falling back to Python exporter")
-
-        if self.runtime.nodes.het:
-            groups: dict[int, list[str]] = {}
-            for node in worker_nodes:
-                group_id = self.runtime.nodes.het_group_for(node)
-                if group_id is None:
-                    raise RuntimeError(f"node {node!r} not in any het component")
-                groups.setdefault(group_id, []).append(node)
-            chunks = sorted(groups.items())
-        else:
-            chunks = [(-1, worker_nodes)]
+            if source != "auto":
+                logger.warning(
+                    "telemetry.cpu_power_exporter.source=%r requested, but the Python fallback exporter is "
+                    "ACPI-only and has no --source flag; this request cannot be honored",
+                    source,
+                )
 
         try:
+            if self.runtime.nodes.het:
+                groups: dict[int, list[str]] = {}
+                for node in worker_nodes:
+                    group_id = self.runtime.nodes.het_group_for(node)
+                    if group_id is None:
+                        raise RuntimeError(f"node {node!r} not in any het component")
+                    groups.setdefault(group_id, []).append(node)
+                chunks = sorted(groups.items())
+            else:
+                chunks = [(-1, worker_nodes)]
+
             for group_id, nodes in chunks:
                 suffix = "" if len(chunks) == 1 else f".g{group_id}"
                 log_file = self.runtime.log_dir / f"telemetry_cpu_power_exporter{suffix}.%N.out"

@@ -64,10 +64,11 @@ benchmark:
 
 telemetry:
   enabled: true
-  cpu_power:
-    enabled: true
-    # ACPI is mandatory here: the point of the recipe is to prove the rails are
-    # collected, so a node without them must fail rather than quietly skip.
+  cpu_power_exporter:
+    # CPU power collection is always best-effort now (there is no `required`
+    # flag any more). `source: "acpi"` is still set deliberately: the point
+    # of this recipe is to prove the ACPI rails are collected, so we force
+    # ACPI rather than "auto" (which would silently prefer DCGM, or fall
+    # back and quietly skip on a node without the rails).
     source: "acpi"
-    required: true
-    prometheus_port: 9405
+    port: 9405
