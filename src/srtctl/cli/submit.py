@@ -457,7 +457,9 @@ def show_config_details(config: SrtConfig) -> None:
 
             cpu_exporter = config.telemetry.cpu_power_exporter
             if cpu_exporter is not None:
-                details.add_row("telemetry", "cpu_power_exporter", f"{cpu_exporter.port} (source {cpu_exporter.source})")
+                details.add_row(
+                    "telemetry", "cpu_power_exporter", f"{cpu_exporter.port} (source {cpu_exporter.source})"
+                )
 
         if mooncake_cfg is not None:
             details.add_row("mooncake", "container", mooncake_cfg.container or "<job container>")
