@@ -12,6 +12,13 @@ The design is a periodic idempotent rescan -- each poll re-runs the same
 and writes out any case that is complete and not yet emitted. That makes it
 benchmark-agnostic by construction: whatever the terminal report can discover,
 this discovers.
+
+The "idempotent" guarantee above is per-process only: the co-located
+``power_energy_c<N>.json`` file is overwrite-idempotent, but
+``power_energy_report.jsonl`` is append-only against an in-memory set, so a
+job requeued into the same log dir will append duplicate concurrency rows to
+the index on restart. Consumers of the index should dedupe by ``concurrency``,
+keeping the row with the latest ``emitted_at_unix``.
 """
 
 from __future__ import annotations
