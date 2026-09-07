@@ -83,6 +83,40 @@ def test_poll_is_idempotent(tmp_path):
     assert len(lines) == 1
 
 
+def test_two_concurrency_points_emit_independently_as_they_become_covered(tmp_path):
+    """Exercises the emit loop in poll() with more than one pending case.
+
+    Concurrency 4 covers [1000, 1010], concurrency 8 covers [1015, 1025] --
+    sequential, non-overlapping windows like a real sweep. Samples initially
+    bracket only the first case, so the second must be withheld without
+    aborting the pass over the first (a regression here would either drop
+    the first case's emission or over-add both to ``_emitted``).
+    """
+    log_dir = _make_sa_bench_log_dir(
+        tmp_path,
+        sample_times=(999.5, 1002.0, 1005.0, 1008.0, 1010.5),
+        cases=((4, 1000.0, 1010.0), (8, 1015.0, 1025.0)),
+    )
+    emitter = IncrementalPowerEmitter(log_dir)
+
+    assert emitter.poll() == (4,)
+    lines = (log_dir / "power_energy_report.jsonl").read_text().splitlines()
+    assert len(lines) == 1
+    assert (log_dir / "sa-bench_isl_128_osl_128" / "power_energy_c4.json").is_file()
+    assert not (log_dir / "sa-bench_isl_128_osl_128" / "power_energy_c8.json").exists()
+
+    # Samples catch up to cover the second case too.
+    (log_dir / "power" / "samples.csv").write_text(
+        GPU_HEADER + _gpu_rows((999.5, 1002.0, 1005.0, 1008.0, 1010.5, 1015.5, 1020.0, 1025.5))
+    )
+    assert emitter.poll() == (8,)
+    lines = (log_dir / "power_energy_report.jsonl").read_text().splitlines()
+    assert len(lines) == 2
+    assert {json.loads(line)["concurrency"] for line in lines} == {4, 8}
+    assert (log_dir / "sa-bench_isl_128_osl_128" / "power_energy_c4.json").is_file()
+    assert (log_dir / "sa-bench_isl_128_osl_128" / "power_energy_c8.json").is_file()
+
+
 def test_case_is_withheld_until_samples_bracket_the_window(tmp_path):
     # Samples stop at 1004, but the window ends at 1010 -- a 6s gap, beyond
     # MAX_SAMPLE_GAP_SECONDS, so integration must be refused.
@@ -192,6 +226,48 @@ def test_emits_an_aiperf_case_beside_its_own_source(tmp_path):
     # inside aiperf_artifacts/, not the conc_8/ directory above it.
     assert (log_dir / "conc_8" / "aiperf_artifacts" / "power_energy_c8.json").is_file()
     assert not (log_dir / "conc_8" / "power_energy_c8.json").exists()
+
+
+def test_a_permanently_uncovered_case_is_marked_dead_and_warned_once(tmp_path, caplog):
+    # Window ends at 1010; MAX_SAMPLE_GAP_SECONDS is 3.0s. The nearest sample
+    # to the window end is 1005 (5s gap, refused), and the newest sample seen
+    # overall is 1990 -- 976s past the window end, far beyond any tolerance
+    # -- so no future sample (which can only be newer still) can shrink the
+    # gap at the window's end. This case can never be bracketed.
+    log_dir = _make_sa_bench_log_dir(tmp_path, sample_times=(999.5, 1002.0, 1005.0, 1990.0))
+    emitter = IncrementalPowerEmitter(log_dir)
+
+    with caplog.at_level("WARNING", logger="srtctl.analysis.incremental_power"):
+        assert emitter.poll() == ()
+    assert not (log_dir / "power_energy_report.jsonl").exists()
+    assert not (log_dir / "sa-bench_isl_128_osl_128" / "power_energy_c4.json").exists()
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "concurrency 4" in warnings[0].message or "concurrency 4" in warnings[0].getMessage()
+
+    # Subsequent polls do no work for this case: no new warning, still no output.
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="srtctl.analysis.incremental_power"):
+        assert emitter.poll() == ()
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    assert not (log_dir / "power_energy_report.jsonl").exists()
+
+
+def test_a_merely_not_yet_covered_case_is_not_marked_dead(tmp_path, caplog):
+    # Window ends at 1010; samples stop at 1004 (a 6s gap, refused -- same
+    # shape as test_case_is_withheld_until_samples_bracket_the_window). The
+    # newest sample seen (1004) is nowhere near window.end_unix (1010) plus
+    # the gap tolerance, so this must stay merely pending, not be judged dead.
+    log_dir = _make_sa_bench_log_dir(tmp_path, sample_times=(999.5, 1002.0, 1004.0))
+    emitter = IncrementalPowerEmitter(log_dir)
+
+    with caplog.at_level("WARNING", logger="srtctl.analysis.incremental_power"):
+        assert emitter.poll() == ()
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+    # The collector catches up; the case is still alive and now emits.
+    (log_dir / "power" / "samples.csv").write_text(GPU_HEADER + _gpu_rows((999.5, 1002.0, 1005.0, 1008.0, 1010.5)))
+    assert emitter.poll() == (4,)
 
 
 def test_matches_the_terminal_report_for_the_same_case(tmp_path):

@@ -25,6 +25,7 @@ from pathlib import Path
 
 from srtctl.analysis.power_energy_report import (
     ConcurrencyReport,
+    ConcurrencyWindow,
     CpuSamples,
     GpuSamples,
     PowerReportError,
@@ -38,7 +39,7 @@ from srtctl.analysis.power_energy_report import (
     report_to_dict,
     sa_bench_window,
 )
-from srtctl.core.power.contract import atomic_write_json
+from srtctl.core.power.contract import MAX_SAMPLE_GAP_SECONDS, atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,32 @@ _NOT_READY = (
 )
 
 
+def _newest_sample_timestamp(cpu_samples: CpuSamples | None, gpu_samples: GpuSamples | None) -> float | None:
+    """The newest ``timestamp_unix`` across every loaded series, or None if nothing was loaded.
+
+    Each series in ``CpuSamples``/``GpuSamples`` is already sorted ascending
+    by ``_sorted_series``, so the newest sample per series is its last point.
+    """
+    newest: float | None = None
+
+    def scan(series_map: dict) -> None:
+        nonlocal newest
+        for times, _watts in series_map.values():
+            if len(times) == 0:
+                continue
+            candidate = float(times[-1])
+            if newest is None or candidate > newest:
+                newest = candidate
+
+    if cpu_samples is not None:
+        scan(cpu_samples.per_socket)
+        scan(cpu_samples.per_node)
+    if gpu_samples is not None:
+        scan(gpu_samples.per_device)
+        scan(gpu_samples.per_node)
+    return newest
+
+
 class IncrementalPowerEmitter:
     """Writes each benchmark case's energy result as soon as that case completes.
 
@@ -89,10 +116,27 @@ class IncrementalPowerEmitter:
 
     def __init__(self, log_dir: Path):
         self._log_dir = log_dir
-        self._emitted: set[int] = set()
+        # Keyed on source path (not concurrency alone): discover_run's sources
+        # come from an rglob, so two sources could in principle share a
+        # concurrency (nested run dirs, an archived run copied under log_dir,
+        # a future multi-ISL layout). Keying on concurrency would silently
+        # drop the second one.
+        self._emitted: set[Path] = set()
+        # Cases that can never become integrable -- e.g. the collector died
+        # before the window closed, so the end-gap never shrinks. Tracked the
+        # same way as ``_emitted`` so they are excluded from ``pending`` on
+        # every later tick instead of re-parsing the full samples.csv forever.
+        self._dead: set[Path] = set()
 
     @property
     def index_path(self) -> Path:
+        """Path to the append-only ``power_energy_report.jsonl`` index.
+
+        Append-only against an in-memory set, so it is idempotent only within
+        a single process's lifetime -- a requeued job writing into the same
+        log dir appends duplicate concurrency rows. Consumers should dedupe by
+        ``concurrency``, last-wins by ``emitted_at_unix``.
+        """
         return self._log_dir / INDEX_FILENAME
 
     def poll(self) -> tuple[int, ...]:
@@ -103,7 +147,7 @@ class IncrementalPowerEmitter:
             logger.debug("Incremental power: run not discoverable yet: %s", exc)
             return ()
 
-        pending = sorted((c, s) for c, s in paths.concurrency_sources if c not in self._emitted)
+        pending = sorted((c, s) for c, s in paths.concurrency_sources if s not in self._emitted and s not in self._dead)
         if not pending:
             return ()
 
@@ -112,23 +156,55 @@ class IncrementalPowerEmitter:
         except _NOT_READY as exc:
             logger.debug("Incremental power: samples not readable yet: %s", exc)
             return ()
+        newest_sample_unix = _newest_sample_timestamp(cpu_samples, gpu_samples)
 
         emitted: list[int] = []
         for concurrency, source in pending:
-            report = self._try_build(concurrency, source, cpu_samples, gpu_samples)
+            window = self._build_window(concurrency, source)
+            if window is None:
+                continue  # window itself not ready yet; cannot judge dead-ness without it
+
+            report = self._try_build_report(window, cpu_samples, gpu_samples)
             if report is None:
+                if self._is_dead(window, newest_sample_unix):
+                    self._dead.add(source)
+                    logger.warning(
+                        "Incremental power: concurrency %d will never be covered by samples "
+                        "(newest sample at %.3f is past window end %.3f + %.1fs gap tolerance); "
+                        "giving up on this case",
+                        concurrency,
+                        newest_sample_unix,
+                        window.end_unix,
+                        MAX_SAMPLE_GAP_SECONDS,
+                    )
                 continue
+
             try:
                 self._write(concurrency, source, report)
             except Exception:
                 logger.warning("Incremental power: failed writing concurrency %d", concurrency, exc_info=True)
                 continue
-            self._emitted.add(concurrency)
+            self._emitted.add(source)
             emitted.append(concurrency)
 
         if emitted:
             logger.info("Incremental power: emitted concurrency point(s) %s", emitted)
         return tuple(emitted)
+
+    @staticmethod
+    def _is_dead(window: ConcurrencyWindow, newest_sample_unix: float | None) -> bool:
+        """A case is permanently unready once samples have grown past its window with no coverage.
+
+        Samples only ever grow forward in time, so once the newest sample seen
+        is already more than ``MAX_SAMPLE_GAP_SECONDS`` past the window end,
+        no future poll can shrink that gap -- this case can never become
+        integrable. Only decidable once samples have actually been loaded
+        (``newest_sample_unix is not None``); a run with no samples loaded yet
+        is merely not-ready, not dead.
+        """
+        if newest_sample_unix is None:
+            return False
+        return newest_sample_unix > window.end_unix + MAX_SAMPLE_GAP_SECONDS
 
     def _load_samples(self, paths: RunPaths) -> tuple[CpuSamples | None, GpuSamples | None]:
         """Load whichever sample series discovery found.
@@ -156,10 +232,25 @@ class IncrementalPowerEmitter:
 
         return cpu_samples, gpu_samples
 
-    def _try_build(
+    def _build_window(self, concurrency: int, source: Path) -> ConcurrencyWindow | None:
+        """Build the case's window, or None if its own artifact is not ready yet.
+
+        Split out from report building so a case whose window we *can* already
+        read (start/end/token fields present) but whose samples don't cover it
+        yet can still be judged for dead-ness against ``window.end_unix`` --
+        which requires the window even when the report itself is not ready.
+        """
+        try:
+            if source.name == "profile_export.jsonl":
+                return aiperf_window(concurrency, source)
+            return sa_bench_window(concurrency, source)
+        except _NOT_READY as exc:
+            logger.debug("Incremental power: concurrency %d window not ready: %s", concurrency, exc)
+            return None
+
+    def _try_build_report(
         self,
-        concurrency: int,
-        source: Path,
+        window: ConcurrencyWindow,
         cpu_samples: CpuSamples | None,
         gpu_samples: GpuSamples | None,
     ) -> ConcurrencyReport | None:
@@ -172,13 +263,9 @@ class IncrementalPowerEmitter:
         -- which is exactly the completeness guarantee we want.
         """
         try:
-            if source.name == "profile_export.jsonl":
-                window = aiperf_window(concurrency, source)
-            else:
-                window = sa_bench_window(concurrency, source)
             return build_concurrency_report(window, cpu_samples, gpu_samples)
         except _NOT_READY as exc:
-            logger.debug("Incremental power: concurrency %d not ready: %s", concurrency, exc)
+            logger.debug("Incremental power: concurrency %d not ready: %s", window.concurrency, exc)
             return None
 
     def _write(self, concurrency: int, source: Path, report: ConcurrencyReport) -> None:
