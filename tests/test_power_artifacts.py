@@ -450,7 +450,7 @@ class TestSampleArtifact:
             assert next(csv.reader(handle)) == list(SAMPLES_HEADER)
         assert reasons == ()
         assert writer.row_count == 3
-        assert [row.schema_version for row in rows] == [SCHEMA_VERSION] * 3
+        assert [row.schema_version for row in rows] == [SAMPLES_SCHEMA_VERSION] * 3
         observed = derive_observed_devices(rows)
         assert [(d.hostname, d.gpu_index, d.gpu_uuids) for d in observed] == [
             ("node-a", 0, ("GPU-aaa",)),
@@ -498,10 +498,16 @@ class TestSampleArtifact:
     @pytest.mark.parametrize(
         ("bad_row", "reason"),
         [
-            ("1,1000.0,0,node-a,0,GPU-aaa,not-a-number", Reason.SAMPLES_CSV_MALFORMED),
-            ("1,1000.0,0,node-a,0,GPU-aaa,NaN", Reason.SAMPLES_CSV_MALFORMED),
-            ("1,1000.0,0,node-a,0,GPU-aaa,-5", Reason.SAMPLES_CSV_MALFORMED),
-            ("1,1000.0,0,node-a,0,GPU-aaa", Reason.SAMPLES_CSV_MALFORMED),
+            ("2,1000.0,0,node-a,0,GPU-aaa,not-a-number,,", Reason.SAMPLES_CSV_MALFORMED),
+            ("2,1000.0,0,node-a,0,GPU-aaa,NaN,,", Reason.SAMPLES_CSV_MALFORMED),
+            ("2,1000.0,0,node-a,0,GPU-aaa,-5,,", Reason.SAMPLES_CSV_MALFORMED),
+            ("2,1000.0,0,node-a,0,GPU-aaa", Reason.SAMPLES_CSV_MALFORMED),
+            ("1,1000.0,0,node-a,0,GPU-aaa,400.0,,", Reason.SAMPLES_CSV_MALFORMED),
+            ("2,1000.0,0,node-a,0,GPU-aaa,400.0,abc,", Reason.SAMPLES_CSV_MALFORMED),
+            ("2,1000.0,0,node-a,0,GPU-aaa,400.0,101,", Reason.SAMPLES_CSV_MALFORMED),
+            ("2,1000.0,0,node-a,0,GPU-aaa,400.0,-1,", Reason.SAMPLES_CSV_MALFORMED),
+            ("2,1000.0,0,node-a,0,GPU-aaa,400.0,,1.5", Reason.SAMPLES_CSV_MALFORMED),
+            ("2,1000.0,0,node-a,0,GPU-aaa,400.0,,nan", Reason.SAMPLES_CSV_MALFORMED),
         ],
     )
     def test_malformed_rows_are_reported(self, tmp_path, bad_row, reason):
@@ -516,7 +522,7 @@ class TestSampleArtifact:
     def test_duplicate_row_key_is_reported(self, tmp_path):
         path = tmp_path / SAMPLES_FILENAME
         path.write_text(
-            ",".join(SAMPLES_HEADER) + "\n1,1000.0,0,node-a,0,GPU-aaa,400.0\n1,1000.5,0,node-a,0,GPU-aaa,401.0\n"
+            ",".join(SAMPLES_HEADER) + "\n2,1000.0,0,node-a,0,GPU-aaa,400.0,,\n2,1000.5,0,node-a,0,GPU-aaa,401.0,,\n"
         )
 
         _, reasons = read_samples(path)
@@ -526,7 +532,7 @@ class TestSampleArtifact:
     def test_non_monotonic_device_timestamps_are_reported(self, tmp_path):
         path = tmp_path / SAMPLES_FILENAME
         path.write_text(
-            ",".join(SAMPLES_HEADER) + "\n1,1001.0,0,node-a,0,GPU-aaa,400.0\n1,1000.0,1,node-a,0,GPU-aaa,401.0\n"
+            ",".join(SAMPLES_HEADER) + "\n2,1001.0,0,node-a,0,GPU-aaa,400.0,,\n2,1000.0,1,node-a,0,GPU-aaa,401.0,,\n"
         )
 
         _, reasons = read_samples(path)
@@ -536,7 +542,7 @@ class TestSampleArtifact:
     def test_equal_device_timestamps_are_allowed(self, tmp_path):
         path = tmp_path / SAMPLES_FILENAME
         path.write_text(
-            ",".join(SAMPLES_HEADER) + "\n1,1000.0,0,node-a,0,GPU-aaa,400.0\n1,1000.0,1,node-a,0,GPU-aaa,401.0\n"
+            ",".join(SAMPLES_HEADER) + "\n2,1000.0,0,node-a,0,GPU-aaa,400.0,,\n2,1000.0,1,node-a,0,GPU-aaa,401.0,,\n"
         )
 
         _, reasons = read_samples(path)
@@ -545,7 +551,7 @@ class TestSampleArtifact:
 
     def test_invalid_utf8_bytes_are_reported(self, tmp_path):
         path = tmp_path / SAMPLES_FILENAME
-        path.write_bytes(",".join(SAMPLES_HEADER).encode() + b"\n1,1000.0,0,node-\xff\xfe,0,GPU-aaa,400.0\n")
+        path.write_bytes(",".join(SAMPLES_HEADER).encode() + b"\n2,1000.0,0,node-\xff\xfe,0,GPU-aaa,400.0,,\n")
 
         rows, reasons = read_samples(path)
 
@@ -555,7 +561,7 @@ class TestSampleArtifact:
     def test_oversized_field_is_reported(self, tmp_path):
         path = tmp_path / SAMPLES_FILENAME
         giant = "x" * (csv.field_size_limit() + 1)
-        path.write_text(",".join(SAMPLES_HEADER) + f"\n1,1000.0,0,{giant},0,GPU-aaa,400.0\n")
+        path.write_text(",".join(SAMPLES_HEADER) + f"\n2,1000.0,0,{giant},0,GPU-aaa,400.0,,\n")
 
         rows, reasons = read_samples(path)
 
@@ -568,6 +574,64 @@ class TestSampleArtifact:
 
         assert Reason.SAMPLES_CSV_HEADER_MISMATCH in read_samples(wrong)[1]
         assert Reason.SAMPLES_CSV_MISSING in read_samples(tmp_path / "nope.csv")[1]
+
+    def test_utilization_round_trips_including_empty_cells(self, tmp_path):
+        path = tmp_path / SAMPLES_FILENAME
+        writer = SampleWriter(path)
+        writer.append(
+            [
+                SampleRow(1000.0, 0, "node-a", 0, "GPU-aaa", 400.0, gpu_util_pct=87.0, sm_active=0.73),
+                SampleRow(1000.0, 0, "node-a", 1, "GPU-bbb", 401.0, gpu_util_pct=12.5),
+                SampleRow(1000.0, 0, "node-a", 2, "GPU-ccc", 402.0, sm_active=0.0),
+                SampleRow(1000.0, 0, "node-a", 3, "GPU-ddd", 403.0),
+            ]
+        )
+        writer.close()
+
+        rows, reasons = read_samples(path)
+
+        assert reasons == ()
+        assert [(r.gpu_index, r.gpu_util_pct, r.sm_active) for r in rows] == [
+            (0, 87.0, 0.73),
+            (1, 12.5, None),
+            (2, None, 0.0),
+            (3, None, None),
+        ]
+        text = path.read_text().splitlines()
+        assert text[0] == ",".join(SAMPLES_HEADER)
+        assert text[4].endswith(",403.0,,")
+
+    def test_v1_file_reads_with_utilization_none(self, tmp_path):
+        path = tmp_path / SAMPLES_FILENAME
+        path.write_text(
+            ",".join(SAMPLES_HEADER_V1) + "\n1,1000.0,0,node-a,0,GPU-aaa,400.0\n1,1001.0,1,node-a,0,GPU-aaa,401.0\n"
+        )
+
+        rows, reasons = read_samples(path)
+
+        assert reasons == ()
+        assert [(r.schema_version, r.power_w, r.gpu_util_pct, r.sm_active) for r in rows] == [
+            (SAMPLES_SCHEMA_VERSION_V1, 400.0, None, None),
+            (SAMPLES_SCHEMA_VERSION_V1, 401.0, None, None),
+        ]
+        assert [d.gpu_uuids for d in derive_observed_devices(rows)] == [("GPU-aaa",)]
+
+    @pytest.mark.parametrize(
+        ("header", "row"),
+        [
+            (SAMPLES_HEADER_V1, "1,1000.0,0,node-a,0,GPU-aaa,400.0,,"),
+            (SAMPLES_HEADER_V1, "2,1000.0,0,node-a,0,GPU-aaa,400.0"),
+            (SAMPLES_HEADER, "1,1000.0,0,node-a,0,GPU-aaa,400.0"),
+        ],
+    )
+    def test_row_shape_must_match_its_header_version(self, tmp_path, header, row):
+        path = tmp_path / SAMPLES_FILENAME
+        path.write_text(",".join(header) + "\n" + row + "\n")
+
+        rows, reasons = read_samples(path)
+
+        assert rows == ()
+        assert reasons == (Reason.SAMPLES_CSV_MALFORMED,)
 
 
 class TestDeviceValidation:
