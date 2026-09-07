@@ -14,8 +14,21 @@ def _gpu_rows(timestamps):
     return "".join(f"1,{t},{i},node-a,0,GPU-aaa,100.0\n" for i, t in enumerate(timestamps))
 
 
-def _make_sa_bench_log_dir(tmp_path, *, concurrency=4, sample_times=(999.5, 1002.0, 1005.0, 1008.0, 1010.5)):
-    """A log dir shaped like a real sa-bench run: benchmark.out + results + power CSV."""
+def _make_sa_bench_log_dir(
+    tmp_path,
+    *,
+    concurrency=4,
+    sample_times=(999.5, 1002.0, 1005.0, 1008.0, 1010.5),
+    cases=None,
+):
+    """A log dir shaped like a real sa-bench run: benchmark.out + results + power CSV.
+
+    ``cases``, when given, overrides ``concurrency`` and is an iterable of
+    ``(concurrency, start_unix, end_unix)`` tuples, one results file each --
+    letting a test model a real sweep's sequential, non-overlapping windows.
+    ``sample_times`` still governs the single shared power/samples.csv, so
+    callers can control which case(s) are actually bracketed.
+    """
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
     (log_dir / "benchmark.out").write_text("Successful requests: 100\n")
@@ -26,16 +39,17 @@ def _make_sa_bench_log_dir(tmp_path, *, concurrency=4, sample_times=(999.5, 1002
 
     results_dir = log_dir / "sa-bench_isl_128_osl_128"
     results_dir.mkdir()
-    (results_dir / f"results_concurrency_{concurrency}_gpus_8.json").write_text(
-        json.dumps(
-            {
-                "benchmark_start_time_unix": 1000.0,
-                "benchmark_end_time_unix": 1010.0,
-                "total_input_tokens": 1000,
-                "total_output_tokens": 2000,
-            }
+    for conc, start, end in cases if cases is not None else ((concurrency, 1000.0, 1010.0),):
+        (results_dir / f"results_concurrency_{conc}_gpus_8.json").write_text(
+            json.dumps(
+                {
+                    "benchmark_start_time_unix": start,
+                    "benchmark_end_time_unix": end,
+                    "total_input_tokens": 1000,
+                    "total_output_tokens": 2000,
+                }
+            )
         )
-    )
     return log_dir
 
 
