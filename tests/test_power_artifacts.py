@@ -738,6 +738,12 @@ class TestManifest:
         assert payload["producer"] == "srt-slurm.dcgm-power"
         assert payload["source_metric"] == "DCGM_FI_DEV_POWER_USAGE"
         assert payload["unit"] == "W"
+        assert payload["schema_version"] == 1
+        assert payload["samples_schema_version"] == SAMPLES_SCHEMA_VERSION
+        assert payload["utilization_metrics"] == [
+            {"column": "gpu_util_pct", "source_metric": "DCGM_FI_DEV_GPU_UTIL", "unit": "percent"},
+            {"column": "sm_active", "source_metric": "DCGM_FI_PROF_SM_ACTIVE", "unit": "fraction"},
+        ]
         assert payload["timestamp_source"] == "head_node_unix_clock"
         assert payload["status"] == "starting"
         assert payload["publication_valid"] is None
