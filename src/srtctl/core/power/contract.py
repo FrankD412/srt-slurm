@@ -10,10 +10,15 @@ import json
 import math
 import os
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, TypeGuard, cast
 
 SCHEMA_VERSION = 1
+# The samples CSV is versioned independently: SCHEMA_VERSION is shared with
+# manifest.json and with measurement-window files whose writer keeps its own copy.
+SAMPLES_SCHEMA_VERSION_V1 = 1
+SAMPLES_SCHEMA_VERSION = 2
 
 PRODUCER = "srt-slurm.dcgm-power"
 POWER_METRIC = "DCGM_FI_DEV_POWER_USAGE"
@@ -21,11 +26,30 @@ POWER_UNIT = "W"
 POWER_SCOPE = "gpu_device_board_as_reported_by_dcgm"
 CLOCK_SOURCE = "head_node_unix_clock"
 
+GPU_UTIL_METRIC = "DCGM_FI_DEV_GPU_UTIL"
+SM_ACTIVE_METRIC = "DCGM_FI_PROF_SM_ACTIVE"
+
+
+@dataclass(frozen=True)
+class UtilizationMetric:
+    """An optional per-GPU utilization column and the DCGM field that feeds it."""
+
+    column: str
+    metric: str
+    unit: str
+    max_value: float
+
+
+UTILIZATION_METRICS: tuple[UtilizationMetric, ...] = (
+    UtilizationMetric(column="gpu_util_pct", metric=GPU_UTIL_METRIC, unit="percent", max_value=100.0),
+    UtilizationMetric(column="sm_active", metric=SM_ACTIVE_METRIC, unit="fraction", max_value=1.0),
+)
+
 MANIFEST_FILENAME = "manifest.json"
 SAMPLES_FILENAME = "samples.csv"
 WINDOWS_DIRNAME = "windows"
 
-SAMPLES_HEADER = (
+SAMPLES_HEADER_V1 = (
     "schema_version",
     "timestamp_unix",
     "scrape_seq",
@@ -34,6 +58,7 @@ SAMPLES_HEADER = (
     "gpu_uuid",
     "power_w",
 )
+SAMPLES_HEADER = (*SAMPLES_HEADER_V1, *(metric.column for metric in UTILIZATION_METRICS))
 
 CPU_SCHEMA_VERSION = 1
 CPU_SAMPLES_FILENAME = "samples.csv"  # written under <power_dir>/cpu/

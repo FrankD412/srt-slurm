@@ -13,10 +13,16 @@ import pytest
 
 import srtctl.core.power.parser as power_parser
 from srtctl.core.power.contract import (
+    GPU_UTIL_METRIC,
     MANIFEST_FILENAME,
     SAMPLES_FILENAME,
     SAMPLES_HEADER,
+    SAMPLES_HEADER_V1,
+    SAMPLES_SCHEMA_VERSION,
+    SAMPLES_SCHEMA_VERSION_V1,
     SCHEMA_VERSION,
+    SM_ACTIVE_METRIC,
+    UTILIZATION_METRICS,
     WINDOWS_DIRNAME,
     Reason,
     atomic_write_json,
@@ -262,9 +268,9 @@ class TestExpectedTopology:
 class TestSampleArtifact:
     """samples.csv round trip."""
 
-    def test_header_constant_is_pinned(self):
-        """Writer and reader both consume the constant, so pin it literally."""
-        assert SAMPLES_HEADER == (
+    def test_header_constants_are_pinned(self):
+        """Writer and reader both consume the constants, so pin them literally."""
+        assert SAMPLES_HEADER_V1 == (
             "schema_version",
             "timestamp_unix",
             "scrape_seq",
@@ -273,6 +279,20 @@ class TestSampleArtifact:
             "gpu_uuid",
             "power_w",
         )
+        assert (*SAMPLES_HEADER_V1, "gpu_util_pct", "sm_active") == SAMPLES_HEADER
+        assert SAMPLES_SCHEMA_VERSION_V1 == 1
+        assert SAMPLES_SCHEMA_VERSION == 2
+        assert SCHEMA_VERSION == 1
+
+    def test_utilization_metrics_are_pinned(self):
+        """Parser, reader, and manifest all key off this tuple; pin it in column order."""
+        assert [(m.column, m.metric, m.unit, m.max_value) for m in UTILIZATION_METRICS] == [
+            ("gpu_util_pct", GPU_UTIL_METRIC, "percent", 100.0),
+            ("sm_active", SM_ACTIVE_METRIC, "fraction", 1.0),
+        ]
+        assert GPU_UTIL_METRIC == "DCGM_FI_DEV_GPU_UTIL"
+        assert SM_ACTIVE_METRIC == "DCGM_FI_PROF_SM_ACTIVE"
+        assert tuple(m.column for m in UTILIZATION_METRICS) == SAMPLES_HEADER[len(SAMPLES_HEADER_V1) :]
 
     def test_round_trip_preserves_rows_and_derives_devices(self, tmp_path):
         path = tmp_path / SAMPLES_FILENAME
