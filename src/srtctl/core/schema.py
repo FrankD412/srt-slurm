@@ -1096,10 +1096,9 @@ class TelemetryExporterConfig:
 DEFAULT_DCGM_EXPORTER = TelemetryExporterConfig(
     container_image="nvcr.io#nvidia/k8s/dcgm-exporter:3.3.9-3.6.1-ubuntu22.04",
     port=9401,
-    # 100ms collection (the power-telemetry template's interval) costs ~2% ITL
-    # p50 on GB300 decode; 5000ms is measured at parity with no telemetry.
-    # Values repeat across consecutive 1 Hz scrapes, which panels tolerate.
-    command="dcgm-exporter --collect-interval=5000 --address :{port}",
+    # No command: the tachometer launch derives --collect-interval from
+    # observability.tachometer.collect_interval_ms so the exporter samples
+    # exactly as often as it is scraped. An explicit command still wins.
 )
 DEFAULT_NODE_EXPORTER = TelemetryExporterConfig(
     container_image="quay.io#prometheus/node-exporter:v1.8.2",
@@ -1127,7 +1126,10 @@ class TachometerConfig:
 
     enabled: bool | None = None
     binary_path: str = "tachometer-scraper"
-    default_frequency: float = 1.0
+    # Milliseconds between scrapes of every endpoint — the same unit and name
+    # as dcgm-exporter's --collect-interval. Replaces the retired Hz-based
+    # ``default_frequency`` (1000ms == the old 1.0 Hz default).
+    collect_interval_ms: int = 1000
     sync_interval_secs: int = 120
     compaction_threads: int = 4
     storage_subdir: str = "tachometer"
@@ -1244,7 +1246,10 @@ class TelemetryConfig:
 
     enabled: bool = False
     dcgm_exporter: TelemetryExporterConfig | None = None
-    default_frequency: float = 1.0
+    # Milliseconds between collector cycles. Replaces the retired
+    # ``default_frequency``, which despite its name was a period in seconds
+    # (1000ms == the old 1.0 default).
+    collect_interval_ms: int = 1000
     storage_subdir: str = "power"
     required: bool = False
     startup_timeout_seconds: float = 30.0
@@ -2284,15 +2289,17 @@ class SrtConfig:
         if not 1 <= exporter.port <= 65535:
             raise ValidationError("telemetry.dcgm_exporter.port must be in 1..65535")
 
-        for name in ("default_frequency", "startup_timeout_seconds", "request_timeout_seconds"):
+        for name in ("startup_timeout_seconds", "request_timeout_seconds"):
             if not _is_finite_positive(getattr(telemetry, name)):
                 raise ValidationError(f"telemetry.{name} must be finite and positive")
-        if telemetry.default_frequency > _DCGM_POWER_MAX_SAMPLE_GAP_SECONDS:
+        if telemetry.collect_interval_ms <= 0:
+            raise ValidationError("telemetry.collect_interval_ms must be positive")
+        if telemetry.collect_interval_ms > _DCGM_POWER_MAX_SAMPLE_GAP_SECONDS * 1000:
             raise ValidationError(
-                f"telemetry.default_frequency={telemetry.default_frequency} exceeds the "
+                f"telemetry.collect_interval_ms={telemetry.collect_interval_ms} exceeds the "
                 f"{_DCGM_POWER_MAX_SAMPLE_GAP_SECONDS}s max sample gap the power validator accepts; "
                 "every window would fail sample_gap_exceeded. Set it to the intended collector "
-                "period (e.g. 1.0)."
+                "period (e.g. 1000)."
             )
         worst_case_join_seconds = 2 * (
             2 * telemetry.request_timeout_seconds + _DCGM_POWER_COLLECT_CYCLE_TIMEOUT_GRACE_SECONDS
@@ -2354,8 +2361,8 @@ class SrtConfig:
                 raise ValidationError(f"observability.tachometer.{name}.port must be in 1..65535")
         if not tachometer.binary_path:
             raise ValidationError("observability.tachometer.binary_path must be non-empty")
-        if tachometer.default_frequency <= 0:
-            raise ValidationError("observability.tachometer.default_frequency must be positive")
+        if tachometer.collect_interval_ms <= 0:
+            raise ValidationError("observability.tachometer.collect_interval_ms must be positive")
         if tachometer.sync_interval_secs < 0:
             raise ValidationError("observability.tachometer.sync_interval_secs must be >= 0")
         if tachometer.compaction_threads < 0:

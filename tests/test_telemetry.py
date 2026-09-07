@@ -53,7 +53,7 @@ def _sa_bench(**overrides) -> BenchmarkConfig:
 def _dcgm_power(**overrides) -> TelemetryConfig:
     fields: dict = {
         "enabled": True,
-        "default_frequency": 1.0,
+        "collect_interval_ms": 1000,
         "storage_subdir": "power",
         "required": True,
         "startup_timeout_seconds": 30.0,
@@ -93,24 +93,54 @@ class TestTachometerConfig:
         assert tachometer.resolved_node_exporter.port == 9101
         assert "node-exporter" in tachometer.resolved_node_exporter.container_image
 
-    def test_default_dcgm_exporter_samples_gently(self):
-        """The built-in DCGM exporter must NOT inherit the power-telemetry
-        template's 100ms collect interval: 10 Hz NVML sampling measured ~2%
-        ITL p50 overhead on GB300 decode, while 5000ms measured at parity
-        with no telemetry (A/B/C/D/E isolation runs, 2026-09-06). The power
-        path keeps 100ms — high-rate sampling is its purpose."""
+    def test_dcgm_sampling_follows_the_scrape_knob(self):
+        """One knob rules both cadences: the tachometer-owned DCGM exporter
+        samples NVML exactly as often as tachometer scrapes it. It must NOT
+        inherit the power template's 100ms — 10 Hz NVML sampling measured
+        ~2% ITL p50 overhead on GB300 decode (isolation runs, 2026-09-06);
+        the power path keeps 100ms because dense sampling is its purpose."""
         from srtctl.cli.mixins.telemetry_stage import (
             DCGM_EXPORTER_COMMAND_TEMPLATE,
             resolve_exporter_command,
+            tachometer_dcgm_command_template,
         )
 
-        tachometer = TachometerConfig()
+        default = TachometerConfig()
         cmd = resolve_exporter_command(
-            tachometer.resolved_dcgm_exporter, DCGM_EXPORTER_COMMAND_TEMPLATE
+            default.resolved_dcgm_exporter, tachometer_dcgm_command_template(default)
         )
-        assert "--collect-interval=5000" in cmd
+        assert "--collect-interval=1000" in cmd
         assert ":9401" in cmd
+
+        slow = TachometerConfig(collect_interval_ms=5000)
+        assert "--collect-interval=5000" in tachometer_dcgm_command_template(slow)
+
+        # An explicit recipe command must still win over the derived template.
+        custom = TachometerConfig(
+            dcgm_exporter=TelemetryExporterConfig(
+                container_image="dcgm:latest", port=9401, command="dcgm-exporter --custom --address :{port}"
+            )
+        )
+        assert resolve_exporter_command(
+            custom.resolved_dcgm_exporter, tachometer_dcgm_command_template(custom)
+        ) == "dcgm-exporter --custom --address :9401"
+
         assert "--collect-interval=100 " in DCGM_EXPORTER_COMMAND_TEMPLATE
+
+    def test_host_sampler_follows_the_scrape_knob(self, tmp_path):
+        """The host sampler's cadence derives from the same single knob."""
+        import threading
+
+        from srtctl.analysis.host_sampler import try_start_host_sampler
+
+        config = _make_config(tachometer=TachometerConfig(enabled=True, collect_interval_ms=4000))
+        sampler = try_start_host_sampler(tmp_path, config.observability, threading.Event())
+        try:
+            assert sampler is not None
+            assert sampler.interval_seconds == 4.0
+        finally:
+            if sampler is not None:
+                sampler.stop()
 
     def test_default_exporters_false_disables_built_ins(self):
         tachometer = TachometerConfig(default_exporters=False)
@@ -123,13 +153,13 @@ class TestTachometerConfig:
         assert tachometer.resolved_dcgm_exporter is custom
         assert tachometer.resolved_node_exporter.port == 9101
 
-    def test_default_frequency_is_one_hz(self):
-        """1 Hz matches the retired RAW scraper's cadence; 5 Hz produced ~9M
+    def test_default_collect_interval_is_one_second(self):
+        """1000ms matches the retired RAW scraper's cadence; 200ms produced ~9M
         rows in a 25-minute run with no analysis consuming the extra
         resolution, and scrape load on worker endpoints is not free."""
         config = _make_config(tachometer=TachometerConfig(enabled=True))
 
-        assert config.observability.tachometer.default_frequency == 1.0
+        assert config.observability.tachometer.collect_interval_ms == 1000
 
     def test_scraper_requires_nonempty_binary_path(self):
         with pytest.raises(ValidationError, match="observability.tachometer.binary_path"):
@@ -154,7 +184,7 @@ class TestDcgmPowerConfig:
     def test_defaults_are_stable(self):
         defaults = TelemetryConfig()
 
-        assert defaults.default_frequency == 1.0
+        assert defaults.collect_interval_ms == 1000
         assert defaults.required is False
         assert defaults.startup_timeout_seconds == 30.0
         assert defaults.request_timeout_seconds == 2.0
@@ -211,10 +241,9 @@ class TestDcgmPowerConfig:
                 None,
                 "port",
             ),
-            ({"default_frequency": 0.0}, None, "default_frequency"),
-            ({"default_frequency": float("nan")}, None, "default_frequency"),
-            ({"default_frequency": float("inf")}, None, "default_frequency"),
-            ({"default_frequency": 3.5}, None, "sample_gap_exceeded"),
+            ({"collect_interval_ms": 0}, None, "collect_interval_ms"),
+            ({"collect_interval_ms": -1}, None, "collect_interval_ms"),
+            ({"collect_interval_ms": 3500}, None, "sample_gap_exceeded"),
             ({"startup_timeout_seconds": 0.0}, None, "startup_timeout_seconds"),
             ({"request_timeout_seconds": -1.0}, None, "request_timeout_seconds"),
             ({"collector_join_timeout_seconds": 2.0}, None, "collector_join_timeout_seconds"),
@@ -243,7 +272,7 @@ class TestDcgmPowerConfig:
     def test_dcgm_power_rejects_a_sample_interval_above_the_contract_limit(self):
         telemetry = TelemetryConfig(
             enabled=True,
-            default_frequency=5.0,
+            collect_interval_ms=5000,
             storage_subdir="power",
             required=True,
             startup_timeout_seconds=30.0,
