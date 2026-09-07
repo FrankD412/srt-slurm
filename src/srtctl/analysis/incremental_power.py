@@ -19,6 +19,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 
@@ -191,3 +192,61 @@ class IncrementalPowerEmitter:
         with self.index_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload) + "\n")
             handle.flush()
+
+
+# Deliberately much slower than the power collectors' own sampling cadence: the
+# only deadline this must beat is "before the job dies", not any human-facing
+# latency requirement.
+DEFAULT_TICK_SECONDS = 30.0
+DEFAULT_JOIN_TIMEOUT_SECONDS = 30.0
+
+
+class IncrementalPowerWatcher:
+    """Daemon thread that drives ``IncrementalPowerEmitter.poll()`` on a fixed tick.
+
+    Lifecycle mirrors ``CpuPowerCollector``: nothing here raises into the
+    caller, and a wedged thread cannot hang the job -- teardown joins with a
+    timeout and moves on.
+    """
+
+    def __init__(
+        self,
+        emitter: IncrementalPowerEmitter,
+        tick_seconds: float = DEFAULT_TICK_SECONDS,
+        join_timeout_seconds: float = DEFAULT_JOIN_TIMEOUT_SECONDS,
+    ):
+        self._emitter = emitter
+        self._tick_seconds = tick_seconds
+        self._join_timeout_seconds = join_timeout_seconds
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, name="IncrementalPowerWatcher", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self._poll_once()
+            self._stop.wait(self._tick_seconds)
+
+    def _poll_once(self) -> None:
+        try:
+            self._emitter.poll()
+        except Exception:
+            logger.exception("Incremental power poll failed; continuing")
+
+    def stop_and_finalize(self) -> None:
+        """Stop the thread, then run one final poll against now-closed sample files.
+
+        The final pass is what guarantees the index file is complete on a normal
+        exit, not only after a crash.
+        """
+        self._stop.set()
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=self._join_timeout_seconds)
+            if thread.is_alive():
+                logger.warning("Incremental power watcher did not stop within %.1fs", self._join_timeout_seconds)
+                return  # a live thread still owns the emitter; do not race it
+        self._poll_once()
