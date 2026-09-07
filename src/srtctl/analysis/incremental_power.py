@@ -285,7 +285,7 @@ class IncrementalPowerEmitter:
 # only deadline this must beat is "before the job dies", not any human-facing
 # latency requirement.
 DEFAULT_TICK_SECONDS = 30.0
-DEFAULT_JOIN_TIMEOUT_SECONDS = 30.0
+DEFAULT_JOIN_TIMEOUT_SECONDS = 10.0
 
 
 class IncrementalPowerWatcher:

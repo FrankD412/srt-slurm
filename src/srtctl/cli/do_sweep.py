@@ -856,14 +856,22 @@ class SweepOrchestrator(
             # NOTE: finalize before registry.cleanup() so samples and manifest are durable.
             exit_code = self.finalize_power_telemetry(exit_code, interrupted=stop_event.is_set())
             exit_code = self.finalize_cpu_power_telemetry(exit_code, interrupted=stop_event.is_set())
-            # Never rebinds exit_code: incremental power emission is best-effort.
-            self.finalize_incremental_power_report()
             stop_event.set()
             registry.cleanup()
             # After cleanup so the GPUs are idle before node state is reverted.
             self._run_host_teardown()
             if exit_code != 0:
                 registry.print_failure_details()
+            # Deliberately AFTER _run_host_teardown(): the final pass plus its
+            # thread-join can take up to DEFAULT_JOIN_TIMEOUT_SECONDS, and on
+            # the SLURM walltime-kill path this feature exists to survive
+            # there's a fixed grace clock running -- node-state reversion must
+            # not wait behind it. Its own ordering requirement (run after
+            # finalize_power_telemetry / finalize_cpu_power_telemetry so it
+            # reads closed, durable CSVs) is still satisfied since both of
+            # those already ran above. Never rebinds exit_code: incremental
+            # power emission is best-effort.
+            self.finalize_incremental_power_report()
             # Post-process first: generate rollup, upload logs to S3, eagerly
             # push logs_url to the status API. Runs before report_completed so
             # the final PUT can reassert the artifact pointer.
