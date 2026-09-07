@@ -72,7 +72,16 @@ def _metric(gpu, uuid, value, **labels):
     return f"DCGM_FI_DEV_POWER_USAGE{{{label_text}}} {value}"
 
 
+def _util(gpu, uuid, value, metric="DCGM_FI_DEV_GPU_UTIL", **labels):
+    label_text = ",".join(
+        [f'gpu="{gpu}"', f'UUID="{uuid}"', *[f'{k}="{v}"' for k, v in labels.items()]],
+    )
+    return f"{metric}{{{label_text}}} {value}"
+
+
 PREAMBLE = "# HELP DCGM_FI_DEV_POWER_USAGE Power draw (in W).\n# TYPE DCGM_FI_DEV_POWER_USAGE gauge\n"
+
+UTIL_PREAMBLE = "# TYPE DCGM_FI_DEV_GPU_UTIL gauge\n# TYPE DCGM_FI_PROF_SM_ACTIVE gauge\n"
 
 
 def _scrape(*metrics, preamble=PREAMBLE):
@@ -194,6 +203,135 @@ class TestDcgmParser:
 
         with pytest.raises(KeyboardInterrupt):
             parse_power_scrape("malformed")
+
+    def test_utilization_attaches_to_matching_power_reading(self):
+        text = _scrape(
+            _metric(0, "GPU-aaa", 400.0),
+            _metric(1, "GPU-bbb", 401.0),
+            _util(0, "GPU-aaa", 87),
+            _util(1, "GPU-bbb", 12.5),
+            _util(0, "GPU-aaa", 0.73, metric="DCGM_FI_PROF_SM_ACTIVE"),
+            preamble=PREAMBLE + UTIL_PREAMBLE,
+        )
+
+        scrape = parse_power_scrape(text)
+
+        assert [(r.gpu_index, r.power_w, r.gpu_util_pct, r.sm_active) for r in scrape.readings] == [
+            (0, 400.0, 87.0, 0.73),
+            (1, 401.0, 12.5, None),
+        ]
+        assert scrape.reason_codes == ()
+
+    def test_absent_utilization_families_leave_fields_none_without_reasons(self):
+        scrape = parse_power_scrape(_scrape(_metric(0, "GPU-aaa", 400.0)))
+
+        assert [(r.gpu_util_pct, r.sm_active) for r in scrape.readings] == [(None, None)]
+        assert scrape.reason_codes == ()
+
+    @pytest.mark.parametrize(
+        ("metric", "value"),
+        [
+            ("DCGM_FI_DEV_GPU_UTIL", "NaN"),
+            ("DCGM_FI_DEV_GPU_UTIL", "-1"),
+            ("DCGM_FI_DEV_GPU_UTIL", "100.5"),
+            ("DCGM_FI_PROF_SM_ACTIVE", "1.01"),
+            ("DCGM_FI_PROF_SM_ACTIVE", "-0.1"),
+            ("DCGM_FI_PROF_SM_ACTIVE", "+Inf"),
+        ],
+    )
+    def test_out_of_range_utilization_is_dropped_silently(self, metric, value):
+        text = _scrape(
+            _metric(0, "GPU-aaa", 400.0),
+            _util(0, "GPU-aaa", value, metric=metric),
+            preamble=PREAMBLE + UTIL_PREAMBLE,
+        )
+
+        scrape = parse_power_scrape(text)
+
+        assert [(r.gpu_index, r.gpu_util_pct, r.sm_active) for r in scrape.readings] == [(0, None, None)]
+        assert scrape.reason_codes == ()
+
+    @pytest.mark.parametrize("metric", ["DCGM_FI_DEV_GPU_UTIL", "DCGM_FI_PROF_SM_ACTIVE"])
+    def test_range_bounds_are_inclusive(self, metric):
+        high = "100" if metric == "DCGM_FI_DEV_GPU_UTIL" else "1"
+        text = _scrape(
+            _metric(0, "GPU-aaa", 400.0),
+            _metric(1, "GPU-bbb", 401.0),
+            _util(0, "GPU-aaa", "0", metric=metric),
+            _util(1, "GPU-bbb", high, metric=metric),
+            preamble=PREAMBLE + UTIL_PREAMBLE,
+        )
+
+        scrape = parse_power_scrape(text)
+
+        field = "gpu_util_pct" if metric == "DCGM_FI_DEV_GPU_UTIL" else "sm_active"
+        assert [getattr(r, field) for r in scrape.readings] == [0.0, float(high)]
+
+    def test_duplicate_utilization_for_one_gpu_is_dropped_silently(self):
+        text = _scrape(
+            _metric(0, "GPU-aaa", 400.0),
+            _util(0, "GPU-aaa", 10),
+            _util(0, "GPU-aaa", 20),
+            _util(0, "GPU-aaa", 0.5, metric="DCGM_FI_PROF_SM_ACTIVE"),
+            preamble=PREAMBLE + UTIL_PREAMBLE,
+        )
+
+        scrape = parse_power_scrape(text)
+
+        assert [(r.gpu_index, r.power_w, r.gpu_util_pct, r.sm_active) for r in scrape.readings] == [
+            (0, 400.0, None, 0.5)
+        ]
+        assert scrape.reason_codes == ()
+
+    def test_utilization_without_power_produces_no_row(self):
+        text = _scrape(
+            _metric(0, "GPU-aaa", 400.0),
+            _util(1, "GPU-bbb", 50),
+            preamble=PREAMBLE + UTIL_PREAMBLE,
+        )
+
+        scrape = parse_power_scrape(text)
+
+        assert [r.gpu_index for r in scrape.readings] == [0]
+        assert scrape.reason_codes == ()
+
+    def test_mig_utilization_is_dropped_silently(self):
+        text = _scrape(
+            _metric(0, "GPU-aaa", 400.0),
+            _util(0, "GPU-aaa", 50, GPU_I_ID="3", GPU_I_PROFILE="1g.10gb"),
+            preamble=PREAMBLE + UTIL_PREAMBLE,
+        )
+
+        scrape = parse_power_scrape(text)
+
+        assert [(r.gpu_index, r.gpu_util_pct) for r in scrape.readings] == [(0, None)]
+        assert scrape.reason_codes == ()
+
+    def test_utilization_with_bad_gpu_label_is_dropped_silently(self):
+        text = _scrape(
+            _metric(0, "GPU-aaa", 400.0),
+            'DCGM_FI_DEV_GPU_UTIL{UUID="GPU-aaa"} 50',
+            'DCGM_FI_DEV_GPU_UTIL{gpu="x",UUID="GPU-aaa"} 50',
+            preamble=PREAMBLE + UTIL_PREAMBLE,
+        )
+
+        scrape = parse_power_scrape(text)
+
+        assert [(r.gpu_index, r.gpu_util_pct) for r in scrape.readings] == [(0, None)]
+        assert scrape.reason_codes == ()
+
+    def test_duplicate_power_still_drops_the_row_even_with_utilization(self):
+        text = _scrape(
+            _metric(0, "GPU-aaa", 100.0),
+            _metric(0, "GPU-aaa", 101.0),
+            _util(0, "GPU-aaa", 50),
+            preamble=PREAMBLE + UTIL_PREAMBLE,
+        )
+
+        scrape = parse_power_scrape(text)
+
+        assert scrape.readings == ()
+        assert Reason.DUPLICATE_POWER_METRIC in scrape.reason_codes
 
 
 class TestExpectedTopology:
