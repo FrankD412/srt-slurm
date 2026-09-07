@@ -313,6 +313,35 @@ class PostProcessStageMixin:
             output_path,
         )
 
+    def start_incremental_power_report(self) -> None:
+        """Start per-case energy emission for the duration of the benchmark.
+
+        Strictly additive to ``_build_power_energy_report``: this writes each
+        case's result as soon as that case completes, so a job killed mid-sweep
+        keeps the results it already earned. Every failure is absorbed -- power
+        post-processing must never affect the sweep or its exit code.
+        """
+        try:
+            from srtctl.analysis.incremental_power import IncrementalPowerEmitter, IncrementalPowerWatcher
+
+            emitter = IncrementalPowerEmitter(self.runtime.log_dir)
+            watcher = IncrementalPowerWatcher(emitter)
+            watcher.start()
+            self._incremental_power_watcher = watcher
+            logger.info("Incremental power report started (index: %s)", emitter.index_path)
+        except Exception as e:  # noqa: BLE001 - never fatal
+            logger.warning("Incremental power report unavailable: %s", e)
+
+    def finalize_incremental_power_report(self) -> None:
+        """Stop the watcher and run a final pass against the now-closed sample files."""
+        watcher = getattr(self, "_incremental_power_watcher", None)
+        if watcher is None:
+            return
+        try:
+            watcher.stop_and_finalize()
+        except Exception as e:  # noqa: BLE001 - never fatal
+            logger.warning("Incremental power report finalization failed: %s", e)
+
     def _generate_rollup(self) -> None:
         """Run benchmark-specific rollup script to generate benchmark-rollup.json.
 
