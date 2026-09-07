@@ -40,6 +40,10 @@ class UtilizationMetric:
     max_value: float
 
 
+# Load-bearing in two ways: each ``column`` must equal a field name on both
+# ``parser.PowerReading`` and ``samples.SampleRow`` (they are splatted in as
+# keyword arguments), and tuple order defines the trailing SAMPLES_HEADER columns.
+# ``test_utilization_metrics_are_pinned`` fails if either coupling is broken.
 UTILIZATION_METRICS: tuple[UtilizationMetric, ...] = (
     UtilizationMetric(column="gpu_util_pct", metric=GPU_UTIL_METRIC, unit="percent", max_value=100.0),
     UtilizationMetric(column="sm_active", metric=SM_ACTIVE_METRIC, unit="fraction", max_value=1.0),

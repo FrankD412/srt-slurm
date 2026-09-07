@@ -281,11 +281,11 @@ class TestCollection:
     def test_utilization_is_persisted_when_the_exporter_reports_it(self, tmp_path, exporters):
         a = exporters(_body("a", utilization=True))
         b = exporters(_body("b"))
-        session = _session(tmp_path, _endpoints(("node-a", a.url), ("node-b", b.url)))
+        session = _session(tmp_path, _endpoints(("node-a", a.url), ("node-b", b.url)), windows=[])
         session.initialize()
 
         session.collect_once()
-        session.stop_and_finalize()
+        outcome = session.stop_and_finalize()
 
         rows, reasons = read_samples(session.power_dir / SAMPLES_FILENAME)
         assert reasons == ()
@@ -297,6 +297,8 @@ class TestCollection:
             (float(10 * index), 0.1 * index) for index in range(GPUS_PER_NODE)
         ]
         assert all(row.gpu_util_pct is None and row.sm_active is None for row in by_host["node-b"])
+        assert outcome.status == "complete"
+        assert outcome.reason_codes == ()
 
     def test_hostname_comes_from_the_endpoint_map(self, tmp_path, exporters):
         a = exporters(_body("a"))
