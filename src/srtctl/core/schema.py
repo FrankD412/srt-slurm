@@ -2412,9 +2412,11 @@ class SrtConfig:
         neighbours = [("telemetry.dcgm_exporter", self.telemetry.dcgm_exporter)]
         if self.observability.tachometer_enabled:
             tachometer = self.observability.tachometer
+            # Compare against the *resolved* exporters: with no explicit block the
+            # tachometer still launches its built-in DCGM/node exporters (#358).
             neighbours += [
-                ("observability.tachometer.dcgm_exporter", tachometer.dcgm_exporter),
-                ("observability.tachometer.node_exporter", tachometer.node_exporter),
+                ("observability.tachometer.dcgm_exporter", tachometer.resolved_dcgm_exporter),
+                ("observability.tachometer.node_exporter", tachometer.resolved_node_exporter),
             ]
         for name, neighbour_exporter in neighbours:
             if neighbour_exporter is not None and neighbour_exporter.port == exporter.port:

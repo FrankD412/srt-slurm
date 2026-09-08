@@ -405,6 +405,31 @@ class TestCpuPowerExporterConfig:
                 benchmark=_sa_bench(),
             )
 
+    @pytest.mark.parametrize(
+        ("port", "default_name"),
+        [(9401, "dcgm_exporter"), (9101, "node_exporter")],
+    )
+    def test_rejected_for_colliding_with_a_built_in_tachometer_exporter_port(self, port, default_name):
+        """#358 launches DCGM (9401) and node (9101) exporters by default with no
+        explicit tachometer block; the collision check must see those resolved
+        defaults, not just the raw (None) fields."""
+        with pytest.raises(ValidationError, match=f"telemetry.cpu_power_exporter.port={port}.*{default_name}"):
+            SrtConfig(
+                name="test",
+                model=ModelConfig(path="/model", container="/image", precision="fp4"),
+                resources=ResourceConfig(gpu_type="h100"),
+                benchmark=_sa_bench(),
+                observability=ObservabilityConfig(
+                    enabled=True,
+                    tachometer=TachometerConfig(enabled=True, storage_subdir="tachometer"),
+                ),
+                telemetry=TelemetryConfig(
+                    enabled=True,
+                    storage_subdir="power",
+                    cpu_power_exporter=CpuPowerExporterConfig(port=port),
+                ),
+            )
+
     def test_rejected_for_colliding_with_tachometer_dcgm_exporter_port(self):
         with pytest.raises(ValidationError, match="telemetry.cpu_power_exporter.port=9411"):
             SrtConfig(
