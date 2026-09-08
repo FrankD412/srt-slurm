@@ -240,5 +240,23 @@ warning rather than an error. Note that `sm_active` is only populated when the
 DCGM exporter is configured to emit `DCGM_FI_PROF_SM_ACTIVE`; the default
 counter set does not include it.
 
+Each window also carries **perf/W** and a **timing comparison**:
+
+- `perf_per_watt`: output and total tokens/s over the computed window, GPU
+  average watts and CPU+GPU combined average watts (joules / duration), and
+  the four ratios tokens/s per watt. These are the reciprocal of the J/token
+  figures and are computed from the same window. The combined variants are
+  null, with a warning, unless both a CPU and a GPU leg produced samples, so
+  they never silently equal the GPU-only number.
+- `timing.computed`: the window the report integrates over (aiperf: earliest
+  request start to latest request end across profiling records; sa-bench: its
+  wall-clock start/end). `timing.reported`: the benchmark's own account, for
+  comparison only, never validation -- sa-bench's `duration`, aiperf's
+  aggregate `benchmark_duration`/`start_time`/`end_time`, or, failing that,
+  the profiling-phase NOTICE lines in `benchmark.out` when exactly one phase
+  ran (time-of-day only, so no absolute start/end). `timing.coverage`: the
+  first and last power samples the trapezoid actually spanned. Every
+  breakdown row records its own `sample_start_unix`/`sample_end_unix`/`samples`.
+
 The two legs may be enabled together. They share no ports or directories and
 neither one's failure affects the other.

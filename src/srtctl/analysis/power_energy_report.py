@@ -32,6 +32,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import TextIO, TypeVar
 
@@ -48,6 +49,13 @@ GPU_UTILIZATION_COLUMNS = tuple(metric.column for metric in UTILIZATION_METRICS)
 CPU_SAMPLES_DIRNAMES = ("cpu", "cpu_power")
 
 _AIPERF_PHASE_RE = re.compile(r"Phase \w+ \(profiling\) (started|complete)")
+# Full NOTICE line: time-of-day stamp, then the phase event. "sending complete"
+# is deliberately excluded (it is not the phase end). ``elapsed=`` is optional.
+_AIPERF_PHASE_LINE_RE = re.compile(
+    r"^(?P<stamp>\d{2}:\d{2}:\d{2}\.\d{3}) NOTICE\s+Phase \w+ \(profiling\) (?P<event>started|complete)\b"
+    r"(?P<rest>.*)$"
+)
+_AIPERF_ELAPSED_RE = re.compile(r"elapsed=(?P<seconds>\d+(?:\.\d+)?)s")
 _SA_BENCH_MARKERS = ("Serving Benchmark Result", "Successful requests:")
 _CONC_DIR_RE = re.compile(r"^conc_(\d+)$")
 _RESULT_FILE_RE = re.compile(r"^results_concurrency_(\d+)_")
@@ -184,6 +192,35 @@ def _discover_sa_bench_sources(log_dir: Path) -> list[tuple[int, Path]]:
 # ---------------------------------------------------------------------------
 
 
+REPORTED_UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True)
+class ReportedTiming:
+    """The benchmark's own account of its measurement window.
+
+    Comparison only, never a validation input: the report integrates power
+    over the *computed* window (``ConcurrencyWindow.start_unix``/``end_unix``)
+    and carries this alongside so a reader can see how far the benchmark's
+    self-reported duration sits from the record-derived one.
+
+    ``source`` names where it came from: ``sa-bench-json`` (the result JSON's
+    ``duration`` plus its wall-clock start/end), ``aiperf-json`` (the aggregate
+    ``benchmark_duration`` plus ``start_time``/``end_time``), ``aiperf-phase-log``
+    (the profiling-phase NOTICE lines in ``benchmark.out``; time-of-day only, so
+    no absolute start/end), or ``unavailable``.
+    """
+
+    source: str
+    start_unix: float | None = None
+    end_unix: float | None = None
+    duration_seconds: float | None = None
+    note: str | None = None
+
+
+REPORTED_TIMING_UNAVAILABLE = ReportedTiming(source=REPORTED_UNAVAILABLE)
+
+
 @dataclass(frozen=True)
 class ConcurrencyWindow:
     benchmark_type: str
@@ -193,9 +230,89 @@ class ConcurrencyWindow:
     output_tokens: float
     input_tokens: float
     source: Path
+    reported: ReportedTiming = REPORTED_TIMING_UNAVAILABLE
+
+    @property
+    def duration_seconds(self) -> float:
+        return self.end_unix - self.start_unix
 
 
-def aiperf_window(concurrency: int, profile_jsonl: Path) -> ConcurrencyWindow:
+def _local_iso_to_unix(stamp: object) -> float | None:
+    """aiperf writes naive local-time ISO stamps; interpret them in this host's zone."""
+    if not isinstance(stamp, str):
+        return None
+    try:
+        return datetime.fromisoformat(stamp).astimezone().timestamp()
+    except ValueError:
+        return None
+
+
+def reported_timing_from_aiperf_json(aggregate: dict) -> ReportedTiming:
+    duration = aggregate.get("benchmark_duration")
+    duration_seconds = duration.get("avg") if isinstance(duration, dict) else duration
+    start_unix = _local_iso_to_unix(aggregate.get("start_time"))
+    end_unix = _local_iso_to_unix(aggregate.get("end_time"))
+    if duration_seconds is None and start_unix is None and end_unix is None:
+        return REPORTED_TIMING_UNAVAILABLE
+    return ReportedTiming(
+        source="aiperf-json",
+        start_unix=start_unix,
+        end_unix=end_unix,
+        duration_seconds=float(duration_seconds) if duration_seconds is not None else None,
+        note="start/end are aiperf's naive local ISO stamps converted in this host's timezone",
+    )
+
+
+def _time_of_day_seconds(stamp: str) -> float:
+    """``HH:MM:SS.mmm`` -> seconds since midnight (no date, no timezone)."""
+    hours, minutes, seconds = stamp.split(":")
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def reported_timing_from_phase_log(benchmark_out: Path) -> ReportedTiming:
+    """Profiling-phase duration from aiperf's NOTICE lines, when exactly one phase ran.
+
+    The stamps are time-of-day only, so absolute start/end stay None and the
+    duration comes from ``elapsed=`` on the complete line, falling back to the
+    difference of the two stamps (midnight wrap tolerated). With several
+    profiling phases in one log there is no safe way to pair them to a
+    concurrency, so the result is ``unavailable`` rather than a guess.
+    """
+    starts: list[str] = []
+    completes: list[tuple[str, str]] = []
+    with benchmark_out.open(encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            match = _AIPERF_PHASE_LINE_RE.match(line.rstrip("\n"))
+            if match is None:
+                continue
+            if match.group("event") == "started":
+                starts.append(match.group("stamp"))
+            else:
+                completes.append((match.group("stamp"), match.group("rest")))
+    if not starts or not completes:
+        return REPORTED_TIMING_UNAVAILABLE
+    if len(starts) != 1 or len(completes) != 1:
+        count = max(len(starts), len(completes))
+        return ReportedTiming(
+            source=REPORTED_UNAVAILABLE,
+            note=f"{count} profiling phases in {benchmark_out.name}; cannot pair them to one concurrency",
+        )
+    start_stamp, (end_stamp, rest) = starts[0], completes[0]
+    elapsed = _AIPERF_ELAPSED_RE.search(rest)
+    if elapsed is not None:
+        duration_seconds = float(elapsed.group("seconds"))
+    else:
+        duration_seconds = _time_of_day_seconds(end_stamp) - _time_of_day_seconds(start_stamp)
+        if duration_seconds < 0:
+            duration_seconds += 24 * 3600.0  # the phase crossed midnight
+    return ReportedTiming(
+        source="aiperf-phase-log",
+        duration_seconds=duration_seconds,
+        note=f"phase started {start_stamp}, complete {end_stamp} (time-of-day only)",
+    )
+
+
+def aiperf_window(concurrency: int, profile_jsonl: Path, *, benchmark_out: Path | None = None) -> ConcurrencyWindow:
     """Real epoch-second window from ``time.time_ns()`` per-record timestamps.
 
     Uses only profiling-phase, non-error rows -- the same filter
@@ -228,6 +345,10 @@ def aiperf_window(concurrency: int, profile_jsonl: Path) -> ConcurrencyWindow:
     output_tokens = aggregate["total_osl"]["avg"]
     input_tokens = aggregate["total_isl"]["avg"]
 
+    reported = reported_timing_from_aiperf_json(aggregate)
+    if reported.source == REPORTED_UNAVAILABLE and benchmark_out is not None and benchmark_out.is_file():
+        reported = reported_timing_from_phase_log(benchmark_out)
+
     return ConcurrencyWindow(
         benchmark_type=BENCHMARK_TYPE_AIPERF,
         concurrency=concurrency,
@@ -236,6 +357,7 @@ def aiperf_window(concurrency: int, profile_jsonl: Path) -> ConcurrencyWindow:
         output_tokens=output_tokens,
         input_tokens=input_tokens,
         source=profile_jsonl,
+        reported=reported,
     )
 
 
@@ -253,6 +375,7 @@ def sa_bench_window(concurrency: int, result_json: Path) -> ConcurrencyWindow:
     for key in ("benchmark_start_time_unix", "benchmark_end_time_unix", "total_input_tokens", "total_output_tokens"):
         if key not in result:
             raise PowerReportError(f"{result_json}: missing required field {key!r}")
+    duration = result.get("duration")
     return ConcurrencyWindow(
         benchmark_type=BENCHMARK_TYPE_SA_BENCH,
         concurrency=concurrency,
@@ -261,6 +384,13 @@ def sa_bench_window(concurrency: int, result_json: Path) -> ConcurrencyWindow:
         output_tokens=result["total_output_tokens"],
         input_tokens=result["total_input_tokens"],
         source=result_json,
+        reported=ReportedTiming(
+            source="sa-bench-json",
+            start_unix=float(result["benchmark_start_time_unix"]),
+            end_unix=float(result["benchmark_end_time_unix"]),
+            duration_seconds=float(duration) if duration is not None else None,
+            note=None if duration is not None else "result JSON has no 'duration' field",
+        ),
     )
 
 
@@ -268,7 +398,7 @@ def load_concurrency_windows(paths: RunPaths) -> list[ConcurrencyWindow]:
     windows = []
     for concurrency, source in paths.concurrency_sources:
         if source.name == "profile_export.jsonl":
-            windows.append(aiperf_window(concurrency, source))
+            windows.append(aiperf_window(concurrency, source, benchmark_out=paths.benchmark_out))
         else:
             windows.append(sa_bench_window(concurrency, source))
     return windows
@@ -414,6 +544,11 @@ class EnergyBreakdown:
     label: str
     joules: float
     avg_power_w: float
+    # The samples the trapezoid actually spanned, so a reader can compare the
+    # power data's edges against the benchmark's own window.
+    sample_start_unix: float | None = None
+    sample_end_unix: float | None = None
+    samples: int = 0
 
 
 def _nearest_index(times: np.ndarray, target: float) -> int:
@@ -450,7 +585,14 @@ def windowed_energy(label: str, times: np.ndarray, watts: np.ndarray, start: flo
 
     joules = float(np.trapezoid(watts[start_i : end_i + 1], x=times[start_i : end_i + 1]))
     duration = end - start
-    return EnergyBreakdown(label=label, joules=joules, avg_power_w=joules / duration if duration > 0 else 0.0)
+    return EnergyBreakdown(
+        label=label,
+        joules=joules,
+        avg_power_w=joules / duration if duration > 0 else 0.0,
+        sample_start_unix=float(times[start_i]),
+        sample_end_unix=float(times[end_i]),
+        samples=int(end_i - start_i + 1),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -555,6 +697,85 @@ class ConcurrencyReport:
         total_tokens = self.window.output_tokens + self.window.input_tokens
         return self.combined_total_joules / total_tokens if total_tokens else None
 
+    # -- perf/W ---------------------------------------------------------------
+    # tokens/s divided by average watts is tokens per joule, i.e. the
+    # reciprocal of the J/token figures above. Both are kept because readers
+    # ask for both; they must never be computed from different windows.
+
+    @property
+    def has_gpu_power(self) -> bool:
+        return bool(self.gpu_per_node)
+
+    @property
+    def has_cpu_power(self) -> bool:
+        return bool(self.cpu_per_node)
+
+    @property
+    def duration_seconds(self) -> float:
+        return self.window.duration_seconds
+
+    @property
+    def output_tokens_per_second(self) -> float | None:
+        return self.window.output_tokens / self.duration_seconds if self.duration_seconds > 0 else None
+
+    @property
+    def total_tokens_per_second(self) -> float | None:
+        if self.duration_seconds <= 0:
+            return None
+        return (self.window.output_tokens + self.window.input_tokens) / self.duration_seconds
+
+    @property
+    def gpu_avg_power_w(self) -> float | None:
+        if not self.has_gpu_power or self.duration_seconds <= 0:
+            return None
+        return self.gpu_total_joules / self.duration_seconds
+
+    @property
+    def combined_avg_power_w(self) -> float | None:
+        """CPU+GPU average watts; None unless *both* legs contributed, so it never silently equals GPU-only."""
+        if not (self.has_gpu_power and self.has_cpu_power) or self.duration_seconds <= 0:
+            return None
+        return self.combined_total_joules / self.duration_seconds
+
+    @staticmethod
+    def _per_watt(rate: float | None, watts: float | None) -> float | None:
+        return rate / watts if rate is not None and watts else None
+
+    @property
+    def output_tokens_per_second_per_gpu_watt(self) -> float | None:
+        return self._per_watt(self.output_tokens_per_second, self.gpu_avg_power_w)
+
+    @property
+    def output_tokens_per_second_per_combined_watt(self) -> float | None:
+        return self._per_watt(self.output_tokens_per_second, self.combined_avg_power_w)
+
+    @property
+    def total_tokens_per_second_per_gpu_watt(self) -> float | None:
+        return self._per_watt(self.total_tokens_per_second, self.gpu_avg_power_w)
+
+    @property
+    def total_tokens_per_second_per_combined_watt(self) -> float | None:
+        return self._per_watt(self.total_tokens_per_second, self.combined_avg_power_w)
+
+    # -- sample coverage -------------------------------------------------------
+
+    @property
+    def coverage_start_unix(self) -> float | None:
+        starts = [
+            b.sample_start_unix for b in (*self.cpu_per_node, *self.gpu_per_node) if b.sample_start_unix is not None
+        ]
+        return min(starts) if starts else None
+
+    @property
+    def coverage_end_unix(self) -> float | None:
+        ends = [b.sample_end_unix for b in (*self.cpu_per_node, *self.gpu_per_node) if b.sample_end_unix is not None]
+        return max(ends) if ends else None
+
+    @property
+    def coverage_duration_seconds(self) -> float | None:
+        start, end = self.coverage_start_unix, self.coverage_end_unix
+        return end - start if start is not None and end is not None else None
+
 
 def build_concurrency_report(
     window: ConcurrencyWindow,
@@ -627,6 +848,9 @@ def build_concurrency_report(
     else:
         gpu_utilization = ()
 
+    if gpu_samples is not None and cpu_samples is None:
+        warnings.append("combined perf/W unavailable: no CPU power leg in this run (GPU-only figures reported)")
+
     return ConcurrencyReport(
         window=window,
         cpu_per_socket=cpu_per_socket,
@@ -676,6 +900,8 @@ def render_table(reports: list[ConcurrencyReport]) -> str:
         lines.append(f"  tokens: output={w.output_tokens:,.0f} input={w.input_tokens:,.0f}")
         lines.append(f"  J/output-token: {_fmt(report.joules_per_output_token())}")
         lines.append(f"  J/total-token:  {_fmt(report.joules_per_total_token())}")
+        lines.append(f"  timing: {_render_timing(report)}")
+        lines.append(f"  perf/W: {_render_perf_per_watt(report)}")
         for breakdown in (*report.cpu_per_socket, *report.gpu_per_device, *report.gpu_per_role):
             lines.append(f"    {breakdown.label}: {breakdown.joules:,.2f} J ({breakdown.avg_power_w:,.2f} W avg)")
         for label, columns in _utilization_by_label((*report.cpu_utilization, *report.gpu_utilization)).items():
@@ -684,6 +910,58 @@ def render_table(reports: list[ConcurrencyReport]) -> str:
         total_energy += report.combined_total_joules
     lines.append(f"\ntotal energy across all concurrency points: {total_energy:,.2f} J")
     return "\n".join(lines)
+
+
+def _fmt_unix(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.3f}"
+
+
+def _render_timing(report: ConcurrencyReport) -> str:
+    w = report.window
+    parts = [f"computed start={_fmt_unix(w.start_unix)} end={_fmt_unix(w.end_unix)} duration={w.duration_seconds:.2f}s"]
+    reported = w.reported
+    if reported.source == REPORTED_UNAVAILABLE:
+        parts.append("reported: n/a" + (f" ({reported.note})" if reported.note else ""))
+    else:
+        cells = [f"reported[{reported.source}]"]
+        if reported.start_unix is not None or reported.end_unix is not None:
+            cells.append(f"start={_fmt_unix(reported.start_unix)} end={_fmt_unix(reported.end_unix)}")
+        if reported.duration_seconds is not None:
+            delta = w.duration_seconds - reported.duration_seconds
+            cells.append(f"duration={reported.duration_seconds:.2f}s (computed-reported={delta:+.2f}s)")
+        parts.append(" ".join(cells))
+    if report.coverage_duration_seconds is not None:
+        parts.append(
+            f"samples cover {_fmt_unix(report.coverage_start_unix)}..{_fmt_unix(report.coverage_end_unix)} "
+            f"({report.coverage_duration_seconds:.2f}s)"
+        )
+    return " | ".join(parts)
+
+
+def _render_perf_per_watt(report: ConcurrencyReport) -> str:
+    def per_watt(output: float | None, total: float | None) -> str:
+        if output is None and total is None:
+            return "n/a"
+        return f"output {output:.4f} tok/s/W, total {total:.4f} tok/s/W"
+
+    parts = [f"output={_fmt(report.output_tokens_per_second)} tok/s total={_fmt(report.total_tokens_per_second)} tok/s"]
+    if report.gpu_avg_power_w is not None:
+        parts.append(
+            f"gpu avg={report.gpu_avg_power_w:,.2f} W -> "
+            + per_watt(report.output_tokens_per_second_per_gpu_watt, report.total_tokens_per_second_per_gpu_watt)
+        )
+    else:
+        parts.append("gpu: n/a")
+    if report.combined_avg_power_w is not None:
+        parts.append(
+            f"combined avg={report.combined_avg_power_w:,.2f} W -> "
+            + per_watt(
+                report.output_tokens_per_second_per_combined_watt, report.total_tokens_per_second_per_combined_watt
+            )
+        )
+    else:
+        parts.append("combined: n/a")
+    return " | ".join(parts)
 
 
 def _utilization_by_label(summaries: tuple[UtilizationSummary, ...]) -> dict[str, list[UtilizationSummary]]:
@@ -697,7 +975,17 @@ def report_to_dict(report: ConcurrencyReport) -> dict:
     w = report.window
 
     def dump(breakdowns: tuple[EnergyBreakdown, ...]) -> list[dict]:
-        return [{"label": b.label, "joules": b.joules, "avg_power_w": b.avg_power_w} for b in breakdowns]
+        return [
+            {
+                "label": b.label,
+                "joules": b.joules,
+                "avg_power_w": b.avg_power_w,
+                "sample_start_unix": b.sample_start_unix,
+                "sample_end_unix": b.sample_end_unix,
+                "samples": b.samples,
+            }
+            for b in breakdowns
+        ]
 
     def dump_utilization(summaries: tuple[UtilizationSummary, ...]) -> list[dict]:
         return [
@@ -722,6 +1010,31 @@ def report_to_dict(report: ConcurrencyReport) -> dict:
         "combined_total_joules": report.combined_total_joules,
         "joules_per_output_token": report.joules_per_output_token(),
         "joules_per_total_token": report.joules_per_total_token(),
+        "timing": {
+            "computed": {"start_unix": w.start_unix, "end_unix": w.end_unix, "duration_seconds": w.duration_seconds},
+            "reported": {
+                "source": w.reported.source,
+                "start_unix": w.reported.start_unix,
+                "end_unix": w.reported.end_unix,
+                "duration_seconds": w.reported.duration_seconds,
+                "note": w.reported.note,
+            },
+            "coverage": {
+                "sample_start_unix": report.coverage_start_unix,
+                "sample_end_unix": report.coverage_end_unix,
+                "duration_seconds": report.coverage_duration_seconds,
+            },
+        },
+        "perf_per_watt": {
+            "output_tokens_per_second": report.output_tokens_per_second,
+            "total_tokens_per_second": report.total_tokens_per_second,
+            "gpu_avg_power_w": report.gpu_avg_power_w,
+            "combined_avg_power_w": report.combined_avg_power_w,
+            "output_tokens_per_second_per_gpu_watt": report.output_tokens_per_second_per_gpu_watt,
+            "output_tokens_per_second_per_combined_watt": report.output_tokens_per_second_per_combined_watt,
+            "total_tokens_per_second_per_gpu_watt": report.total_tokens_per_second_per_gpu_watt,
+            "total_tokens_per_second_per_combined_watt": report.total_tokens_per_second_per_combined_watt,
+        },
         "cpu_utilization": dump_utilization(report.cpu_utilization),
         "gpu_utilization": dump_utilization(report.gpu_utilization),
         "warnings": list(report.warnings),

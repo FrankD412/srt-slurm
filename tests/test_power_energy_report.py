@@ -13,8 +13,12 @@ import numpy as np
 import pytest
 
 from srtctl.analysis.power_energy_report import (
+    ConcurrencyReport,
+    ConcurrencyWindow,
+    EnergyBreakdown,
     PowerReportError,
     aiperf_window,
+    build_concurrency_report,
     build_reports,
     detect_benchmark_type,
     discover_run,
@@ -23,6 +27,7 @@ from srtctl.analysis.power_energy_report import (
     load_gpu_samples,
     render_table,
     report_to_dict,
+    reported_timing_from_phase_log,
     sa_bench_window,
     windowed_energy,
     windowed_utilization,
@@ -691,3 +696,245 @@ def test_build_reports_warns_when_utilization_has_no_window_coverage(tmp_path: P
     assert any(
         "cpu/node-a/socket0 cpu_util_total" in warning and "no samples" in warning for warning in report.warnings
     )
+
+
+# ---------------------------------------------------------------------------
+# Reported timing (comparison only) + perf/W
+# ---------------------------------------------------------------------------
+
+
+def _aiperf_case(tmp_path: Path, aggregate_extra: dict) -> Path:
+    conc_dir = tmp_path / "conc_8" / "aiperf_artifacts"
+    jsonl_path = conc_dir / "profile_export.jsonl"
+    _write_jsonl(
+        jsonl_path,
+        [
+            {
+                "metadata": {
+                    "benchmark_phase": "profiling",
+                    "request_start_ns": 1_000_000_000_000,
+                    "request_end_ns": 1_100_000_000_000,
+                }
+            },
+        ],
+    )
+    (conc_dir / "profile_export_aiperf.json").write_text(
+        json.dumps({"total_osl": {"avg": 42.0}, "total_isl": {"avg": 7.0}, **aggregate_extra})
+    )
+    return jsonl_path
+
+
+def test_aiperf_window_reads_reported_timing_from_aggregate_json(tmp_path: Path) -> None:
+    jsonl_path = _aiperf_case(
+        tmp_path,
+        {
+            "benchmark_duration": {"unit": "sec", "avg": 99.5},
+            "start_time": "2026-09-06T14:32:00.646759",
+            "end_time": "2026-09-06T14:33:40.146759",
+        },
+    )
+
+    window = aiperf_window(8, jsonl_path)
+
+    assert window.duration_seconds == pytest.approx(100.0)
+    reported = window.reported
+    assert reported.source == "aiperf-json"
+    assert reported.duration_seconds == pytest.approx(99.5)
+    # naive ISO stamps are aiperf's local wall clock; the report keeps them as a
+    # local-time conversion and never treats them as authoritative.
+    assert reported.end_unix - reported.start_unix == pytest.approx(99.5)
+
+
+def test_aiperf_window_falls_back_to_a_single_phase_log_pair(tmp_path: Path) -> None:
+    jsonl_path = _aiperf_case(tmp_path, {})
+    benchmark_out = tmp_path / "benchmark.out"
+    benchmark_out.write_text(
+        "22:09:07.432 NOTICE   Phase profiling (profiling) started | phase_index=0 | target: 1200.0s duration (runner.py:593)\n"
+        "22:29:07.432 NOTICE   Phase profiling (profiling) sending complete | sent=63 (runner.py:1039)\n"
+        "22:29:07.932 NOTICE   Phase profiling (profiling) complete | completed=63 | elapsed=1200.50s (runner.py:1162)\n"
+    )
+
+    window = aiperf_window(8, jsonl_path, benchmark_out=benchmark_out)
+
+    assert window.reported.source == "aiperf-phase-log"
+    assert window.reported.duration_seconds == pytest.approx(1200.5)
+    assert window.reported.start_unix is None  # time-of-day stamps carry no date
+    assert "22:09:07.432" in window.reported.note and "22:29:07.932" in window.reported.note
+
+
+def test_phase_log_fallback_derives_duration_from_stamps_when_elapsed_is_absent(tmp_path: Path) -> None:
+    benchmark_out = tmp_path / "benchmark.out"
+    benchmark_out.write_text(
+        "23:59:00.000 NOTICE   Phase profiling (profiling) started (runner.py:593)\n"
+        "00:01:00.000 NOTICE   Phase profiling (profiling) complete | completed=1 (runner.py:1162)\n"
+    )
+
+    reported = reported_timing_from_phase_log(benchmark_out)
+
+    assert reported.source == "aiperf-phase-log"
+    assert reported.duration_seconds == pytest.approx(120.0)  # wraps midnight
+
+
+def test_phase_log_fallback_is_unavailable_when_ambiguous(tmp_path: Path) -> None:
+    benchmark_out = tmp_path / "benchmark.out"
+    benchmark_out.write_text(
+        "10:00:00.000 NOTICE   Phase profiling (profiling) started (runner.py:593)\n"
+        "10:10:00.000 NOTICE   Phase profiling (profiling) complete | elapsed=600.00s (runner.py:1162)\n"
+        "10:20:00.000 NOTICE   Phase profiling (profiling) started (runner.py:593)\n"
+        "10:30:00.000 NOTICE   Phase profiling (profiling) complete | elapsed=600.00s (runner.py:1162)\n"
+    )
+
+    reported = reported_timing_from_phase_log(benchmark_out)
+
+    assert reported.source == "unavailable"
+    assert reported.duration_seconds is None
+    assert "2 profiling phases" in reported.note
+
+
+def test_aiperf_window_without_any_reported_source_is_unavailable(tmp_path: Path) -> None:
+    jsonl_path = _aiperf_case(tmp_path, {})
+
+    window = aiperf_window(8, jsonl_path)
+
+    assert window.reported.source == "unavailable"
+    assert window.reported.duration_seconds is None
+
+
+def test_sa_bench_window_reports_its_own_duration(tmp_path: Path) -> None:
+    result_json = tmp_path / "results_concurrency_4_gpus_8.json"
+    result_json.write_text(
+        json.dumps(
+            {
+                "benchmark_start_time_unix": 100.0,
+                "benchmark_end_time_unix": 160.0,
+                "duration": 59.7,
+                "total_input_tokens": 1000,
+                "total_output_tokens": 500,
+            }
+        )
+    )
+
+    window = sa_bench_window(4, result_json)
+
+    assert window.duration_seconds == pytest.approx(60.0)
+    assert window.reported.source == "sa-bench-json"
+    assert window.reported.duration_seconds == pytest.approx(59.7)
+    assert window.reported.start_unix == 100.0 and window.reported.end_unix == 160.0
+
+
+def test_windowed_energy_records_the_samples_it_actually_integrated() -> None:
+    times = np.array([0.0, 0.9, 2.1, 3.0])
+    watts = np.array([10.0, 10.0, 10.0, 10.0])
+
+    result = windowed_energy("label", times, watts, start=1.0, end=2.0)
+
+    assert result.sample_start_unix == 0.9
+    assert result.sample_end_unix == 2.1
+    assert result.samples == 2
+
+
+def _window(*, output_tokens: float = 500.0, input_tokens: float = 1500.0) -> ConcurrencyWindow:
+    return ConcurrencyWindow(
+        benchmark_type="sa-bench",
+        concurrency=4,
+        start_unix=100.0,
+        end_unix=110.0,
+        output_tokens=output_tokens,
+        input_tokens=input_tokens,
+        source=Path("results.json"),
+    )
+
+
+def _flat_series(watts: float) -> tuple[np.ndarray, np.ndarray]:
+    times = np.arange(99.0, 112.0, 1.0)
+    return times, np.full(len(times), watts)
+
+
+def test_perf_per_watt_is_tokens_per_joule_and_needs_both_legs_for_combined() -> None:
+    from srtctl.analysis.power_energy_report import CpuSamples, GpuSamples
+
+    gpu = GpuSamples(
+        per_device={("node-a", 0): _flat_series(400.0)},
+        per_node={"node-a": _flat_series(400.0)},
+        per_role={},
+    )
+
+    gpu_only = build_concurrency_report(_window(), None, gpu)
+
+    assert gpu_only.duration_seconds == pytest.approx(10.0)
+    assert gpu_only.output_tokens_per_second == pytest.approx(50.0)
+    assert gpu_only.total_tokens_per_second == pytest.approx(200.0)
+    assert gpu_only.gpu_avg_power_w == pytest.approx(400.0)
+    assert gpu_only.output_tokens_per_second_per_gpu_watt == pytest.approx(50.0 / 400.0)
+    assert gpu_only.output_tokens_per_second_per_gpu_watt == pytest.approx(1.0 / gpu_only.joules_per_output_token())
+    assert gpu_only.total_tokens_per_second_per_gpu_watt == pytest.approx(200.0 / 400.0)
+    assert gpu_only.combined_avg_power_w is None
+    assert gpu_only.output_tokens_per_second_per_combined_watt is None
+    assert any("combined perf/W unavailable" in w for w in gpu_only.warnings)
+
+    cpu = CpuSamples(per_socket={("node-a", 0): _flat_series(100.0)}, per_node={"node-a": _flat_series(100.0)})
+    both = build_concurrency_report(_window(), cpu, gpu)
+
+    assert both.combined_avg_power_w == pytest.approx(500.0)
+    assert both.output_tokens_per_second_per_combined_watt == pytest.approx(50.0 / 500.0)
+    assert both.total_tokens_per_second_per_combined_watt == pytest.approx(200.0 / 500.0)
+    assert not any("combined perf/W" in w for w in both.warnings)
+    assert both.coverage_start_unix == 100.0 and both.coverage_end_unix == 110.0
+
+
+def test_perf_per_watt_is_none_without_a_gpu_leg() -> None:
+    from srtctl.analysis.power_energy_report import CpuSamples
+
+    cpu = CpuSamples(per_socket={("node-a", 0): _flat_series(100.0)}, per_node={"node-a": _flat_series(100.0)})
+
+    report = build_concurrency_report(_window(), cpu, None)
+
+    assert report.gpu_avg_power_w is None
+    assert report.output_tokens_per_second_per_gpu_watt is None
+    assert report.total_tokens_per_second_per_gpu_watt is None
+
+
+def test_render_and_json_carry_timing_and_perf_per_watt() -> None:
+    from srtctl.analysis.power_energy_report import GpuSamples, ReportedTiming
+
+    window = ConcurrencyWindow(
+        benchmark_type="sa-bench",
+        concurrency=4,
+        start_unix=100.0,
+        end_unix=110.0,
+        output_tokens=500.0,
+        input_tokens=1500.0,
+        source=Path("results.json"),
+        reported=ReportedTiming(source="sa-bench-json", start_unix=100.0, end_unix=110.0, duration_seconds=9.8),
+    )
+    gpu = GpuSamples(
+        per_device={("node-a", 0): _flat_series(400.0)}, per_node={"node-a": _flat_series(400.0)}, per_role={}
+    )
+    report = build_concurrency_report(window, None, gpu)
+
+    text = render_table([report])
+    assert "timing: computed start=100.000 end=110.000 duration=10.00s" in text
+    assert "reported[sa-bench-json] start=100.000 end=110.000 duration=9.80s (computed-reported=+0.20s)" in text
+    assert "samples cover 100.000..110.000 (10.00s)" in text
+    assert "perf/W: output=50.00 tok/s total=200.00 tok/s | gpu avg=400.00 W" in text
+    assert "output 0.1250 tok/s/W" in text and "total 0.5000 tok/s/W" in text
+    assert "combined: n/a" in text
+
+    payload = report_to_dict(report)
+    assert payload["timing"]["computed"] == {"start_unix": 100.0, "end_unix": 110.0, "duration_seconds": 10.0}
+    assert payload["timing"]["reported"]["source"] == "sa-bench-json"
+    assert payload["timing"]["reported"]["duration_seconds"] == 9.8
+    assert payload["timing"]["coverage"]["duration_seconds"] == 10.0
+    assert payload["perf_per_watt"]["output_tokens_per_second_per_gpu_watt"] == pytest.approx(0.125)
+    assert payload["perf_per_watt"]["output_tokens_per_second_per_combined_watt"] is None
+    assert payload["gpu_per_device"][0]["samples"] == 11
+    assert payload["gpu_per_device"][0]["sample_start_unix"] == 100.0
+
+
+def test_concurrency_report_defaults_keep_older_constructors_working() -> None:
+    report = ConcurrencyReport(window=_window())
+
+    assert report.gpu_avg_power_w is None
+    assert report.combined_avg_power_w is None
+    assert report.coverage_start_unix is None
+    assert EnergyBreakdown(label="x", joules=1.0, avg_power_w=1.0).samples == 0
