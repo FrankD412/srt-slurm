@@ -26,15 +26,40 @@ import time
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 CPU_POWER_FIELD_ID = 1130
-SAMPLES_SCHEMA_VERSION = 2
 DCGM_PYTHON_BINDING_DIRS = (
     Path("/usr/share/datacenter-gpu-manager-4/bindings/python3"),
     Path("/usr/local/dcgm/bindings/python3"),
 )
-SAMPLES_HEADER = (
+
+
+class CpuUtilizationField(NamedTuple):
+    """One optional per-socket utilization column and the DCGM CPU entity field that feeds it."""
+
+    column: str
+    field_id: int
+    field_name: str
+
+
+# DCGM CPU entity utilization fields (same entities as power field 1130). DCGM
+# reports them as fractions of the socket's CPU time; ACPI has no equivalent,
+# so ACPI rows leave these columns blank. Tuple order defines the trailing
+# SAMPLES_HEADER columns.
+CPU_UTILIZATION_FIELDS: tuple[CpuUtilizationField, ...] = (
+    CpuUtilizationField("cpu_util_total", 1100, "DCGM_FI_DEV_CPU_UTIL_TOTAL"),
+    CpuUtilizationField("cpu_util_user", 1101, "DCGM_FI_DEV_CPU_UTIL_USER"),
+    CpuUtilizationField("cpu_util_nice", 1102, "DCGM_FI_DEV_CPU_UTIL_NICE"),
+    CpuUtilizationField("cpu_util_sys", 1103, "DCGM_FI_DEV_CPU_UTIL_SYS"),
+    CpuUtilizationField("cpu_util_irq", 1104, "DCGM_FI_DEV_CPU_UTIL_IRQ"),
+)
+UTILIZATION_COLUMNS = tuple(field.column for field in CPU_UTILIZATION_FIELDS)
+_UTILIZATION_COLUMN_BY_FIELD_ID = {field.field_id: field.column for field in CPU_UTILIZATION_FIELDS}
+
+# v2 added timestamp_local; v3 appends the optional utilization columns.
+SAMPLES_SCHEMA_VERSION = 3
+SAMPLES_HEADER_V2 = (
     "schema_version",
     "timestamp_unix",
     "timestamp_local",
@@ -45,6 +70,7 @@ SAMPLES_HEADER = (
     "power_w",
     "total_power_w",
 )
+SAMPLES_HEADER = (*SAMPLES_HEADER_V2, *UTILIZATION_COLUMNS)
 
 
 def format_local_timestamp(timestamp: float) -> str:
@@ -64,6 +90,14 @@ class CpuPowerReader(ABC):
     @abstractmethod
     def read_watts(self) -> dict[str, float | None]:
         """Return watts by stable sensor name."""
+
+    def read_utilization(self) -> dict[int, dict[str, float]]:
+        """Return utilization columns by socket id from the most recent ``read_watts``.
+
+        Providers without utilization data (ACPI) return an empty mapping and
+        the sample rows leave the columns blank.
+        """
+        return {}
 
     @abstractmethod
     def aggregate_watts(self, readings: dict[str, float | None]) -> float | None:
@@ -274,6 +308,8 @@ class DcgmCpuPowerReader(CpuPowerReader):
         self._agent = dcgm_agent
         self._fields = dcgm_fields
         self._structs = dcgm_structs
+        self._field_ids = [CPU_POWER_FIELD_ID, *(field.field_id for field in CPU_UTILIZATION_FIELDS)]
+        self._last_utilization: dict[int, dict[str, float]] = {}
         try:
             self._handle = pydcgm.DcgmHandle(ipAddress=None)
             flags = getattr(dcgm_structs, "DCGM_GEGE_FLAG_ONLY_SUPPORTED", 0)
@@ -303,7 +339,7 @@ class DcgmCpuPowerReader(CpuPowerReader):
             self._field_group = pydcgm.DcgmFieldGroup(
                 self._handle,
                 name=f"srtctl_cpu_power_fields_{unique_suffix}",
-                fieldIds=[CPU_POWER_FIELD_ID],
+                fieldIds=list(self._field_ids),
             )
             self._group.samples.WatchFields(
                 self._field_group,
@@ -320,23 +356,37 @@ class DcgmCpuPowerReader(CpuPowerReader):
 
     def read_watts(self) -> dict[str, float | None]:
         readings = {f"CPU{cpu_id}:cpuPowerUsageW": None for cpu_id in self._cpu_ids}
+        utilization: dict[int, dict[str, float]] = {}
         try:
             values = self._agent.dcgmEntitiesGetLatestValues(
                 self._handle.handle,
                 self._entities,
-                [CPU_POWER_FIELD_ID],
+                list(self._field_ids),
                 0,
             )
         except Exception as exc:
+            self._last_utilization = {}
             raise CpuPowerSourceUnavailable(f"DCGM CPU power read failed: {exc}") from exc
         for value in values:
             if value.status != getattr(self._structs, "DCGM_ST_OK", 0):
                 continue
-            watts = float(value.value.dbl)
-            key = f"CPU{value.entityId}:cpuPowerUsageW"
-            if key in readings and math.isfinite(watts) and watts > 0:
-                readings[key] = watts
+            field_id = getattr(value, "fieldId", CPU_POWER_FIELD_ID)
+            number = float(value.value.dbl)
+            if not math.isfinite(number):
+                continue
+            if field_id == CPU_POWER_FIELD_ID:
+                key = f"CPU{value.entityId}:cpuPowerUsageW"
+                if key in readings and number > 0:
+                    readings[key] = number
+                continue
+            column = _UTILIZATION_COLUMN_BY_FIELD_ID.get(field_id)
+            if column is not None and value.entityId in self._cpu_ids:
+                utilization.setdefault(int(value.entityId), {})[column] = number
+        self._last_utilization = utilization
         return readings
+
+    def read_utilization(self) -> dict[int, dict[str, float]]:
+        return self._last_utilization
 
     def aggregate_watts(self, readings: dict[str, float | None]) -> float | None:
         valid = [watts for watts in readings.values() if watts is not None]
@@ -351,6 +401,11 @@ class DcgmCpuPowerReader(CpuPowerReader):
             "sensors": [{"name": f"CPU{cpu_id}:cpuPowerUsageW", "cpu_entity_id": cpu_id} for cpu_id in self._cpu_ids],
             "total_method": "sum of available DCGM CPU entities",
             "aggregate_scope": "cpu_rail_only",
+            "utilization_fields": [
+                {"column": field.column, "field_id": field.field_id, "field_name": field.field_name}
+                for field in CPU_UTILIZATION_FIELDS
+            ],
+            "utilization_unit": "fraction of socket CPU time (0-1) as reported by DCGM",
         }
 
     def close(self) -> None:
@@ -445,9 +500,11 @@ def collect(*, output_dir: Path, ready_dir: Path, source: str, interval_seconds:
                 readings = {}
             valid = {name: watts for name, watts in readings.items() if watts is not None}
             total = reader.aggregate_watts(valid)
+            utilization = reader.read_utilization()
             for sensor, watts in sorted(valid.items()):
                 socket_match = re.match(r"CPU(\d+):", sensor)
                 socket_id = int(socket_match.group(1)) if socket_match else ""
+                socket_utilization = utilization.get(socket_id, {}) if socket_id != "" else {}
                 writer.writerow(
                     (
                         SAMPLES_SCHEMA_VERSION,
@@ -459,6 +516,10 @@ def collect(*, output_dir: Path, ready_dir: Path, source: str, interval_seconds:
                         socket_id,
                         repr(watts),
                         repr(total),
+                        *(
+                            repr(socket_utilization[column]) if column in socket_utilization else ""
+                            for column in UTILIZATION_COLUMNS
+                        ),
                     )
                 )
                 sample_count += 1

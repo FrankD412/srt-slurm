@@ -15,7 +15,11 @@ import pytest
 
 from srtctl.core import cpu_power
 from srtctl.core.cpu_power import (
+    CPU_UTILIZATION_FIELDS,
     SAMPLES_HEADER,
+    SAMPLES_HEADER_V2,
+    SAMPLES_SCHEMA_VERSION,
+    UTILIZATION_COLUMNS,
     AcpiPowerMeterReader,
     CpuPowerSourceUnavailable,
     _add_standard_dcgm_binding_path,
@@ -241,9 +245,17 @@ def test_dcgm_reader_watches_cpu_power_before_reading(monkeypatch: pytest.Monkey
     )
     fake_fields = types.SimpleNamespace(DCGM_FE_CPU=7)
 
-    def fake_latest_values(_handle: object, _entities: object, _fields: object, flags: int) -> list[object]:
-        events.append(("latest", flags))
-        return []
+    def fake_latest_values(_handle: object, _entities: object, fields: object, flags: int) -> list[object]:
+        events.append(("latest", flags, list(fields)))
+        return [
+            _fake_value(0, cpu_power.CPU_POWER_FIELD_ID, 120.5),
+            _fake_value(1, cpu_power.CPU_POWER_FIELD_ID, 130.0),
+            _fake_value(0, 1100, 0.42),
+            _fake_value(0, 1101, 0.30),
+            _fake_value(0, 1103, 0.10),
+            _fake_value(1, 1100, 0.05),
+            _fake_value(1, 1104, float("nan")),  # non-finite: dropped
+        ]
 
     fake_agent = types.SimpleNamespace(
         dcgmGetEntityGroupEntities=lambda *_args: [0, 1],
@@ -265,16 +277,104 @@ def test_dcgm_reader_watches_cpu_power_before_reading(monkeypatch: pytest.Monkey
     monkeypatch.setattr(cpu_power.importlib, "import_module", modules.__getitem__)
 
     reader = cpu_power.DcgmCpuPowerReader()
-    reader.read_watts()
+    watts = reader.read_watts()
+    utilization = reader.read_utilization()
     reader.close()
 
+    expected_fields = [cpu_power.CPU_POWER_FIELD_ID, *(field.field_id for field in CPU_UTILIZATION_FIELDS)]
     assert ("entity", 7, 0) in events
     assert ("entity", 7, 1) in events
-    assert ("field_group", [cpu_power.CPU_POWER_FIELD_ID]) in events
+    assert ("field_group", expected_fields) in events
     assert ("watch", 100_000, 60.0, 600) in events
     assert ("update", True) in events
-    assert ("latest", 0) in events
+    assert ("latest", 0, expected_fields) in events
     assert events[-4:] == ["unwatch", "field_group_delete", "group_delete", "shutdown"]
+    assert watts == {"CPU0:cpuPowerUsageW": 120.5, "CPU1:cpuPowerUsageW": 130.0}
+    assert utilization == {
+        0: {"cpu_util_total": 0.42, "cpu_util_user": 0.30, "cpu_util_sys": 0.10},
+        1: {"cpu_util_total": 0.05},
+    }
+    metadata = reader.metadata()
+    assert [field["column"] for field in metadata["utilization_fields"]] == list(UTILIZATION_COLUMNS)
+    assert metadata["utilization_fields"][0]["field_id"] == 1100
+
+
+def _fake_value(entity_id: int, field_id: int, dbl: float) -> object:
+    return types.SimpleNamespace(entityId=entity_id, fieldId=field_id, status=0, value=types.SimpleNamespace(dbl=dbl))
+
+
+def test_samples_header_pins_utilization_columns_after_v2() -> None:
+    assert SAMPLES_SCHEMA_VERSION == 3
+    assert SAMPLES_HEADER[: len(SAMPLES_HEADER_V2)] == SAMPLES_HEADER_V2
+    assert SAMPLES_HEADER[len(SAMPLES_HEADER_V2) :] == UTILIZATION_COLUMNS
+    assert UTILIZATION_COLUMNS == ("cpu_util_total", "cpu_util_user", "cpu_util_nice", "cpu_util_sys", "cpu_util_irq")
+    assert [field.field_id for field in CPU_UTILIZATION_FIELDS] == [1100, 1101, 1102, 1103, 1104]
+
+
+class _FakeReader(cpu_power.CpuPowerReader):
+    source_name = "fake"
+
+    def __init__(self, utilization: dict[int, dict[str, float]] | None = None) -> None:
+        self._utilization = utilization or {}
+
+    def read_watts(self) -> dict[str, float | None]:
+        return {"CPU0:cpuSidePowerUsageW": 100.0, "CPU1:cpuSidePowerUsageW": 110.0}
+
+    def read_utilization(self) -> dict[int, dict[str, float]]:
+        return self._utilization
+
+    def aggregate_watts(self, readings: dict[str, float | None]) -> float | None:
+        return sum(watts for watts in readings.values() if watts is not None)
+
+    def metadata(self) -> dict[str, object]:
+        return {"source": self.source_name}
+
+    def close(self) -> None:
+        pass
+
+
+def _run_collect_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, reader: cpu_power.CpuPowerReader) -> Path:
+    handlers: dict[int, object] = {}
+    monkeypatch.setattr(cpu_power.signal, "signal", lambda signum, handler: handlers.__setitem__(signum, handler))
+    monkeypatch.setattr(cpu_power, "create_reader", lambda _source: reader)
+    monkeypatch.setattr(cpu_power.os, "umask", lambda _mask: 0)
+    monkeypatch.setenv("SLURMD_NODENAME", "node-a")
+
+    def stop_after_first_sample(_seconds: float) -> None:
+        handlers[cpu_power.signal.SIGTERM](cpu_power.signal.SIGTERM, None)
+
+    monkeypatch.setattr(cpu_power.time, "sleep", stop_after_first_sample)
+    output_dir = tmp_path / "nodes"
+    rc = cpu_power.collect(output_dir=output_dir, ready_dir=tmp_path / "ready", source="auto", interval_seconds=0.1)
+    assert rc == 0
+    return output_dir / "node-a.csv"
+
+
+def test_collect_writes_socket_utilization_columns(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    reader = _FakeReader({0: {"cpu_util_total": 0.5, "cpu_util_sys": 0.1}})
+
+    csv_path = _run_collect_once(monkeypatch, tmp_path, reader)
+
+    with csv_path.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert list(rows[0].keys()) == list(SAMPLES_HEADER)
+    assert [row["socket_id"] for row in rows] == ["0", "1"]
+    assert rows[0]["schema_version"] == "3"
+    assert rows[0]["cpu_util_total"] == "0.5"
+    assert rows[0]["cpu_util_sys"] == "0.1"
+    assert rows[0]["cpu_util_user"] == ""
+    assert all(rows[1][column] == "" for column in UTILIZATION_COLUMNS)
+    metadata = json.loads(csv_path.with_name("node-a.metadata.json").read_text())
+    assert metadata["schema_version"] == 3
+
+
+def test_collect_leaves_utilization_blank_without_a_provider(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    csv_path = _run_collect_once(monkeypatch, tmp_path, _FakeReader())
+
+    with csv_path.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 2
+    assert all(row[column] == "" for row in rows for column in UTILIZATION_COLUMNS)
 
 
 class _FakeProcess:
@@ -295,7 +395,21 @@ def _write_node_csv(path: Path, hostname: str, timestamp: float, watts: float) -
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(SAMPLES_HEADER)
-        writer.writerow((2, timestamp, timestamp_local, hostname, "acpi", "CPU0:cpuPowerUsageW", 0, watts, watts))
+        blanks = ("",) * len(UTILIZATION_COLUMNS)
+        writer.writerow(
+            (
+                SAMPLES_SCHEMA_VERSION,
+                timestamp,
+                timestamp_local,
+                hostname,
+                "acpi",
+                "CPU0:cpuPowerUsageW",
+                0,
+                watts,
+                watts,
+            )
+            + blanks
+        )
 
 
 def test_session_aggregates_every_expected_node(tmp_path: Path) -> None:

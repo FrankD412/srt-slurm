@@ -3,11 +3,17 @@
 
 """Trapezoidal energy/J-per-token report for a completed srtslurm run.
 
-Reads the CPU (``power/cpu/samples.csv``) and GPU (``power/samples.csv``)
-power-telemetry CSVs already written by ``CpuPowerCollector`` / the dcgm-power
-exporter, joins them against the profiling window and token counts of each
-concurrency point in a sa-bench or aiperf/AgentX sweep, and integrates power
-into energy with ``numpy.trapz``.
+Reads the CPU (``power/cpu/samples.csv`` from the head-node scraper, or
+``cpu_power/samples.csv`` from the host-side collector) and GPU
+(``power/samples.csv``) power-telemetry CSVs, joins them against the profiling
+window and token counts of each concurrency point in a sa-bench or
+aiperf/AgentX sweep, and integrates power into energy with ``numpy.trapz``.
+
+Utilization columns are optional on both CSVs (``gpu_util_pct``/``sm_active``
+per GPU; ``cpu_util_*`` per socket from the DCGM host collector). When present
+and populated they are summarized as a windowed mean/max next to the joules;
+when absent or blank they are simply not reported. Power stays authoritative:
+missing utilization coverage is a warning, never an error.
 
 Timestamps are never reconstructed from ``benchmark.out`` log text: aiperf's
 ``profile_export.jsonl`` already carries ``time.time_ns()`` wall-clock
@@ -25,13 +31,21 @@ import csv
 import json
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TextIO
+from typing import TextIO, TypeVar
 
 import numpy as np
 
-from srtctl.core.power.contract import MAX_SAMPLE_GAP_SECONDS
+from srtctl.core.cpu_power import UTILIZATION_COLUMNS as CPU_UTILIZATION_COLUMNS
+from srtctl.core.power.contract import MAX_SAMPLE_GAP_SECONDS, UTILIZATION_METRICS
+
+GPU_UTILIZATION_COLUMNS = tuple(metric.column for metric in UTILIZATION_METRICS)
+
+# Directory names whose samples.csv is CPU power: "cpu" is the head-node
+# scraper's power/cpu/, "cpu_power" is the host-side collector's default
+# telemetry.cpu_power.storage_subdir. Anything else is the GPU leg.
+CPU_SAMPLES_DIRNAMES = ("cpu", "cpu_power")
 
 _AIPERF_PHASE_RE = re.compile(r"Phase \w+ \(profiling\) (started|complete)")
 _SA_BENCH_MARKERS = ("Serving Benchmark Result", "Successful requests:")
@@ -89,18 +103,32 @@ class RunPaths:
     concurrency_sources: tuple[tuple[int, Path], ...]
 
 
-def discover_run(log_dir: Path) -> RunPaths:
+def discover_run(log_dir: Path, *, cpu_samples_csv: Path | None = None) -> RunPaths:
+    """Locate the run's artifacts.
+
+    ``cpu_samples_csv`` pins the CPU CSV explicitly; it is required when both CPU
+    legs (scraper under ``power/cpu/``, host collector under ``cpu_power/``)
+    wrote a ``samples.csv`` for the same run.
+    """
     benchmark_out = log_dir / "benchmark.out"
     if not benchmark_out.is_file():
         raise PowerReportError(f"{benchmark_out}: not found")
 
-    cpu_matches = [p for p in log_dir.rglob("samples.csv") if p.parent.name == "cpu"]
-    gpu_matches = [p for p in log_dir.rglob("samples.csv") if p.parent.name != "cpu"]
-    if len(cpu_matches) > 1:
-        raise PowerReportError(f"multiple CPU power samples.csv found below {log_dir}: {cpu_matches}")
+    all_matches = sorted(log_dir.rglob("samples.csv"))
+    cpu_matches = [p for p in all_matches if p.parent.name in CPU_SAMPLES_DIRNAMES]
+    gpu_matches = [p for p in all_matches if p.parent.name not in CPU_SAMPLES_DIRNAMES]
+    if cpu_samples_csv is not None:
+        if not cpu_samples_csv.is_file():
+            raise PowerReportError(f"{cpu_samples_csv}: not found")
+    elif len(cpu_matches) > 1:
+        listing = ", ".join(str(p) for p in cpu_matches)
+        raise PowerReportError(
+            f"multiple CPU power samples.csv found below {log_dir}: {listing}; pick one with --cpu-samples"
+        )
+    else:
+        cpu_samples_csv = cpu_matches[0] if cpu_matches else None
     if len(gpu_matches) > 1:
         raise PowerReportError(f"multiple GPU power samples.csv found below {log_dir}: {gpu_matches}")
-    cpu_samples_csv = cpu_matches[0] if cpu_matches else None
     gpu_samples_csv = gpu_matches[0] if gpu_matches else None
     if cpu_samples_csv is None and gpu_samples_csv is None:
         raise PowerReportError(f"no power samples.csv (CPU or GPU) found below {log_dir}")
@@ -251,7 +279,10 @@ def load_concurrency_windows(paths: RunPaths) -> list[ConcurrencyWindow]:
 # ---------------------------------------------------------------------------
 
 
-def _sorted_series(rows: dict[object, list[tuple[float, float]]]) -> dict[object, tuple[np.ndarray, np.ndarray]]:
+K = TypeVar("K")
+
+
+def _sorted_series(rows: dict[K, list[tuple[float, float]]]) -> dict[K, tuple[np.ndarray, np.ndarray]]:
     series = {}
     for key, points in rows.items():
         points.sort(key=lambda p: p[0])
@@ -261,10 +292,30 @@ def _sorted_series(rows: dict[object, list[tuple[float, float]]]) -> dict[object
     return series
 
 
+# column -> (times, values); only columns that had at least one populated cell appear.
+UtilizationSeries = dict[str, tuple[np.ndarray, np.ndarray]]
+
+
+def _collect_utilization(
+    row: dict[str, str], columns: tuple[str, ...], timestamp: float, store: dict[str, list[tuple[float, float]]]
+) -> None:
+    """Append populated utilization cells by column name; absent columns and blanks are skipped."""
+    for column in columns:
+        raw = row.get(column)
+        if raw is None or raw == "":
+            continue
+        store.setdefault(column, []).append((timestamp, float(raw)))
+
+
+def _sorted_utilization(raw: dict[K, dict[str, list[tuple[float, float]]]]) -> dict[K, UtilizationSeries]:
+    return {key: _sorted_series(columns) for key, columns in raw.items() if columns}
+
+
 @dataclass(frozen=True)
 class CpuSamples:
     per_socket: dict[tuple[str, int], tuple[np.ndarray, np.ndarray]]
     per_node: dict[str, tuple[np.ndarray, np.ndarray]]
+    per_socket_utilization: dict[tuple[str, int], UtilizationSeries] = field(default_factory=dict)
 
 
 def load_cpu_samples(path: Path) -> CpuSamples:
@@ -275,19 +326,26 @@ def load_cpu_samples(path: Path) -> CpuSamples:
 def load_cpu_samples_from(handle: TextIO) -> CpuSamples:
     per_socket: dict[tuple[str, int], list[tuple[float, float]]] = {}
     node_totals: dict[str, dict[float, float]] = {}
+    utilization: dict[tuple[str, int], dict[str, list[tuple[float, float]]]] = {}
     for row in csv.DictReader(handle):
         timestamp = float(row["timestamp_unix"])
         hostname = row["hostname"]
         socket_raw = row["socket_id"]
         if socket_raw != "":
-            per_socket.setdefault((hostname, int(socket_raw)), []).append((timestamp, float(row["power_w"])))
+            key = (hostname, int(socket_raw))
+            per_socket.setdefault(key, []).append((timestamp, float(row["power_w"])))
+            _collect_utilization(row, CPU_UTILIZATION_COLUMNS, timestamp, utilization.setdefault(key, {}))
         # total_power_w is blank whenever an ACPI scrape has no `grace` channel
         # (see contract.CPU_SAMPLES_HEADER); skip rather than crash on float("").
         if row["total_power_w"] != "":
             node_totals.setdefault(hostname, {})[timestamp] = float(row["total_power_w"])
 
     per_node_rows = {host: list(values.items()) for host, values in node_totals.items()}
-    return CpuSamples(per_socket=_sorted_series(per_socket), per_node=_sorted_series(per_node_rows))
+    return CpuSamples(
+        per_socket=_sorted_series(per_socket),
+        per_node=_sorted_series(per_node_rows),
+        per_socket_utilization=_sorted_utilization(utilization),
+    )
 
 
 @dataclass(frozen=True)
@@ -295,6 +353,8 @@ class GpuSamples:
     per_device: dict[tuple[str, int], tuple[np.ndarray, np.ndarray]]
     per_node: dict[str, tuple[np.ndarray, np.ndarray]]
     per_role: dict[str, dict[str, tuple[np.ndarray, np.ndarray]]]  # role -> hostname -> series
+    per_device_utilization: dict[tuple[str, int], UtilizationSeries] = field(default_factory=dict)
+    device_roles: dict[tuple[str, int], set[str]] = field(default_factory=dict)
 
 
 def load_gpu_roles(manifest_path: Path) -> dict[tuple[str, int], set[str]]:
@@ -315,12 +375,14 @@ def load_gpu_samples_from(handle: TextIO, roles: dict[tuple[str, int], set[str]]
     per_device: dict[tuple[str, int], list[tuple[float, float]]] = {}
     node_totals: dict[str, dict[float, float]] = {}
     role_totals: dict[str, dict[str, dict[float, float]]] = {}
+    utilization: dict[tuple[str, int], dict[str, list[tuple[float, float]]]] = {}
     for row in csv.DictReader(handle):
         timestamp = float(row["timestamp_unix"])
         hostname = row["hostname"]
         gpu_index = int(row["gpu_index"])
         watts = float(row["power_w"])
         per_device.setdefault((hostname, gpu_index), []).append((timestamp, watts))
+        _collect_utilization(row, GPU_UTILIZATION_COLUMNS, timestamp, utilization.setdefault((hostname, gpu_index), {}))
         node_totals.setdefault(hostname, {})
         node_totals[hostname][timestamp] = node_totals[hostname].get(timestamp, 0.0) + watts
         if roles is not None:
@@ -337,6 +399,8 @@ def load_gpu_samples_from(handle: TextIO, roles: dict[tuple[str, int], set[str]]
         per_device=_sorted_series(per_device),
         per_node=_sorted_series(per_node_rows),
         per_role=per_role,
+        per_device_utilization=_sorted_utilization(utilization),
+        device_roles=dict(roles) if roles is not None else {},
     )
 
 
@@ -390,6 +454,78 @@ def windowed_energy(label: str, times: np.ndarray, watts: np.ndarray, start: flo
 
 
 # ---------------------------------------------------------------------------
+# Windowed utilization
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class UtilizationSummary:
+    label: str
+    column: str
+    mean: float
+    max: float
+    samples: int
+
+
+def windowed_utilization(
+    label: str, column: str, times: np.ndarray, values: np.ndarray, start: float, end: float
+) -> UtilizationSummary | None:
+    """Mean/max of the samples that fall inside ``[start, end]``.
+
+    Utilization is a gauge, not a rate to integrate, so no trapezoid and no
+    boundary snapping: only samples actually inside the window count. Returns
+    None when the window holds no samples; callers turn that into a warning.
+    """
+    mask = (times >= start) & (times <= end)
+    count = int(mask.sum())
+    if count == 0:
+        return None
+    inside = values[mask]
+    return UtilizationSummary(
+        label=label, column=column, mean=float(inside.mean()), max=float(inside.max()), samples=count
+    )
+
+
+def _summarize_utilization(
+    series_by_key: dict[tuple[str, int], UtilizationSeries],
+    *,
+    device_label: str,
+    group_labels: dict[tuple[str, int], tuple[str, ...]],
+    start: float,
+    end: float,
+    warnings: list[str],
+) -> tuple[UtilizationSummary, ...]:
+    """Per-device summaries, then equal-weight means of those per group label.
+
+    ``device_label`` formats ``(hostname, index)`` into the per-device label;
+    ``group_labels`` maps each device to the node/role labels it rolls up into.
+    """
+    summaries: list[UtilizationSummary] = []
+    grouped: dict[tuple[str, str], list[UtilizationSummary]] = {}
+    for key, columns in sorted(series_by_key.items()):
+        label = device_label.format(host=key[0], index=key[1])
+        for column, (times, values) in sorted(columns.items()):
+            summary = windowed_utilization(label, column, times, values, start, end)
+            if summary is None:
+                warnings.append(f"{label} {column}: no samples inside the window, utilization not reported")
+                continue
+            summaries.append(summary)
+            for group in group_labels.get(key, ()):
+                grouped.setdefault((group, column), []).append(summary)
+    for (group, column), members in sorted(grouped.items()):
+        summaries.append(
+            UtilizationSummary(
+                label=group,
+                column=column,
+                mean=float(np.mean([m.mean for m in members])),
+                max=max(m.max for m in members),
+                samples=sum(m.samples for m in members),
+            )
+        )
+    return tuple(summaries)
+
+
+# ---------------------------------------------------------------------------
 # Report assembly
 # ---------------------------------------------------------------------------
 
@@ -404,6 +540,8 @@ class ConcurrencyReport:
     gpu_per_role: tuple[EnergyBreakdown, ...] = ()
     gpu_per_node: tuple[EnergyBreakdown, ...] = ()
     gpu_total_joules: float = 0.0
+    cpu_utilization: tuple[UtilizationSummary, ...] = ()
+    gpu_utilization: tuple[UtilizationSummary, ...] = ()
     warnings: tuple[str, ...] = ()
 
     @property
@@ -439,6 +577,16 @@ def build_concurrency_report(
             for host, (times, watts) in sorted(cpu_samples.per_node.items())
         )
         cpu_total = sum(node.joules for node in cpu_per_node)
+        cpu_utilization = _summarize_utilization(
+            cpu_samples.per_socket_utilization,
+            device_label="cpu/{host}/socket{index}",
+            group_labels={key: (f"cpu/{key[0]}",) for key in cpu_samples.per_socket_utilization},
+            start=start,
+            end=end,
+            warnings=warnings,
+        )
+    else:
+        cpu_utilization = ()
 
     gpu_per_device: tuple[EnergyBreakdown, ...] = ()
     gpu_per_role: tuple[EnergyBreakdown, ...] = ()
@@ -462,6 +610,22 @@ def build_concurrency_report(
             gpu_per_role = tuple(per_role)
         else:
             warnings.append("GPU role breakdown unavailable (no manifest.json / expected_devices)")
+        gpu_utilization = _summarize_utilization(
+            gpu_samples.per_device_utilization,
+            device_label="gpu/{host}/gpu{index}",
+            group_labels={
+                key: (
+                    f"gpu/{key[0]}",
+                    *(f"gpu/{key[0]}/{role}" for role in sorted(gpu_samples.device_roles.get(key, ()))),
+                )
+                for key in gpu_samples.per_device_utilization
+            },
+            start=start,
+            end=end,
+            warnings=warnings,
+        )
+    else:
+        gpu_utilization = ()
 
     return ConcurrencyReport(
         window=window,
@@ -472,12 +636,14 @@ def build_concurrency_report(
         gpu_per_role=gpu_per_role,
         gpu_per_node=gpu_per_node,
         gpu_total_joules=gpu_total,
+        cpu_utilization=cpu_utilization,
+        gpu_utilization=gpu_utilization,
         warnings=tuple(warnings),
     )
 
 
-def build_reports(log_dir: Path) -> list[ConcurrencyReport]:
-    paths = discover_run(log_dir)
+def build_reports(log_dir: Path, *, cpu_samples_csv: Path | None = None) -> list[ConcurrencyReport]:
+    paths = discover_run(log_dir, cpu_samples_csv=cpu_samples_csv)
     windows = load_concurrency_windows(paths)
 
     cpu_samples = load_cpu_samples(paths.cpu_samples_csv) if paths.cpu_samples_csv else None
@@ -512,9 +678,19 @@ def render_table(reports: list[ConcurrencyReport]) -> str:
         lines.append(f"  J/total-token:  {_fmt(report.joules_per_total_token())}")
         for breakdown in (*report.cpu_per_socket, *report.gpu_per_device, *report.gpu_per_role):
             lines.append(f"    {breakdown.label}: {breakdown.joules:,.2f} J ({breakdown.avg_power_w:,.2f} W avg)")
+        for label, columns in _utilization_by_label((*report.cpu_utilization, *report.gpu_utilization)).items():
+            cells = "; ".join(f"{u.column} mean={u.mean:,.2f} max={u.max:,.2f}" for u in columns)
+            lines.append(f"    {label} utilization: {cells}")
         total_energy += report.combined_total_joules
     lines.append(f"\ntotal energy across all concurrency points: {total_energy:,.2f} J")
     return "\n".join(lines)
+
+
+def _utilization_by_label(summaries: tuple[UtilizationSummary, ...]) -> dict[str, list[UtilizationSummary]]:
+    by_label: dict[str, list[UtilizationSummary]] = {}
+    for summary in summaries:
+        by_label.setdefault(summary.label, []).append(summary)
+    return by_label
 
 
 def report_to_dict(report: ConcurrencyReport) -> dict:
@@ -522,6 +698,12 @@ def report_to_dict(report: ConcurrencyReport) -> dict:
 
     def dump(breakdowns: tuple[EnergyBreakdown, ...]) -> list[dict]:
         return [{"label": b.label, "joules": b.joules, "avg_power_w": b.avg_power_w} for b in breakdowns]
+
+    def dump_utilization(summaries: tuple[UtilizationSummary, ...]) -> list[dict]:
+        return [
+            {"label": u.label, "column": u.column, "mean": u.mean, "max": u.max, "samples": u.samples}
+            for u in summaries
+        ]
 
     return {
         "benchmark_type": w.benchmark_type,
@@ -540,6 +722,8 @@ def report_to_dict(report: ConcurrencyReport) -> dict:
         "combined_total_joules": report.combined_total_joules,
         "joules_per_output_token": report.joules_per_output_token(),
         "joules_per_total_token": report.joules_per_total_token(),
+        "cpu_utilization": dump_utilization(report.cpu_utilization),
+        "gpu_utilization": dump_utilization(report.gpu_utilization),
         "warnings": list(report.warnings),
     }
 
@@ -548,10 +732,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("log_dir", type=Path, help="A run's logs/ directory")
     parser.add_argument("--json-out", type=Path, help="Optional path to write the report as JSON")
+    parser.add_argument(
+        "--cpu-samples",
+        type=Path,
+        help="Explicit CPU samples.csv; required when both power/cpu/ (scraper) and cpu_power/ (host collector) exist",
+    )
     args = parser.parse_args(argv)
 
     try:
-        reports = build_reports(args.log_dir)
+        reports = build_reports(args.log_dir, cpu_samples_csv=args.cpu_samples)
     except PowerReportError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

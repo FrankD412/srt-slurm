@@ -220,10 +220,25 @@ Differences from `cpu_power_exporter`:
 - **No network hop.** Readings never leave the node until aggregation, so
   there is no port to reserve and no exporter binary to install.
 - **Separate artifacts.** Output lands in `cpu_power/` by default, with an
-  extra `timestamp_local` column, not in `power/cpu/`. The energy report in
-  `power_energy_report.py` currently discovers only the scraper's
-  `power/cpu/samples.csv`; aligning this leg's header and location with the
-  scraper (and adding utilization) is follow-on work.
+  extra `timestamp_local` column, not in `power/cpu/`. The energy report
+  (`python -m srtctl.analysis.power_energy_report <log_dir>`) discovers either
+  location; when a run has both, pass `--cpu-samples <path>` to pick one.
+- **Per-socket utilization (DCGM source only).** Alongside power field 1130
+  the DCGM reader watches CPU entity fields 1100-1104 and appends five
+  columns to every sample row: `cpu_util_total`, `cpu_util_user`,
+  `cpu_util_nice`, `cpu_util_sys`, `cpu_util_irq`, reported by DCGM as a
+  fraction of the socket's CPU time. ACPI has no utilization, so those cells
+  stay blank. The per-node `*.metadata.json` lists the field ids and unit.
+  This bumped the samples schema to v3; v2 readers that select columns by
+  name are unaffected.
+
+The energy report summarizes utilization per concurrency window as a mean and
+max of the samples inside the window, per socket and per node (and for the GPU
+leg's `gpu_util_pct`/`sm_active`, per GPU, node, and role). It is reported next
+to the joules, never integrated, and a window with no utilization samples is a
+warning rather than an error. Note that `sm_active` is only populated when the
+DCGM exporter is configured to emit `DCGM_FI_PROF_SM_ACTIVE`; the default
+counter set does not include it.
 
 The two legs may be enabled together. They share no ports or directories and
 neither one's failure affects the other.
