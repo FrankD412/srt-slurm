@@ -1135,7 +1135,12 @@ class TestTachometerStageMixin:
 
         processes = harness.start_tachometer()
 
-        assert [process.name for process in processes] == ["tachometer_dcgm_exporter", "tachometer"]
+        # The built-in node exporter launches by default alongside the explicit DCGM exporter.
+        assert [process.name for process in processes] == [
+            "tachometer_dcgm_exporter",
+            "tachometer_node_exporter",
+            "tachometer",
+        ]
         assert 'name = "dcgm_node-a"' in (tmp_path / "tachometer_config.toml").read_text()
 
     @patch("srtctl.cli.mixins.telemetry_stage.start_srun_process")

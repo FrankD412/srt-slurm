@@ -247,7 +247,7 @@ class TelemetryStageMixin:
         collector = CpuPowerCollector(
             settings=CpuPowerSessionSettings(
                 power_dir=self.runtime.log_dir / telemetry.storage_subdir / "cpu",
-                sample_interval_seconds=telemetry.default_frequency,
+                sample_interval_seconds=telemetry.collect_interval_ms / 1000.0,
                 request_timeout_seconds=telemetry.request_timeout_seconds,
                 collector_join_timeout_seconds=telemetry.resolved_collector_join_timeout_seconds,
                 exporter_port=telemetry.cpu_power_exporter.port,

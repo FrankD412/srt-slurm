@@ -47,7 +47,7 @@ telemetry:
 
 `telemetry.enabled: true` no longer requires `dcgm_exporter` — a recipe may
 configure `cpu_power_exporter` alone with no DCGM leg at all. The sampling
-cadence and timeouts (`default_frequency`, `request_timeout_seconds`,
+cadence and timeouts (`collect_interval_ms`, `request_timeout_seconds`,
 `startup_timeout_seconds`, `collector_join_timeout_seconds`) are shared with
 the DCGM leg on `TelemetryConfig`; there is no separate CPU-specific set.
 
@@ -81,7 +81,7 @@ instead of being silently dropped.
 Once the exporter tasks are launched, `CpuPowerCollector.start()` resolves
 each worker's IP (`get_hostname_ip`, respecting `runtime.network_interface`),
 opens the `cpu/samples.csv` writer, and starts a background thread that polls
-every endpoint's `/metrics` on `default_frequency` and appends parsed rows.
+every endpoint's `/metrics` every `collect_interval_ms` and appends parsed rows.
 Any launch failure for the exporter tasks themselves is caught and logged; the
 collector object is still returned (with whatever endpoints did resolve) so
 the caller doesn't have to special-case a partial launch.

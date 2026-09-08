@@ -1256,7 +1256,7 @@ exposes it on `cpu_power_exporter.port`. It resolves the bundled Rust binary
 installed by `make setup` first, falling back to the ACPI-only Python stdlib
 exporter (`srtctl.core.cpu_power_exporter`) when that binary is absent. A
 head-node collector scrapes every worker's exporter on the shared
-`default_frequency`/`request_timeout_seconds` cadence and writes per-sample
+`collect_interval_ms`/`request_timeout_seconds` cadence and writes per-sample
 rows plus a manifest under `<log_dir>/<storage_subdir>/cpu/`
 (`samples.csv`, `cpu_manifest.json`).
 
