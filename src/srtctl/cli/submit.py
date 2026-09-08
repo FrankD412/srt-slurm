@@ -461,6 +461,15 @@ def show_config_details(config: SrtConfig) -> None:
                     "telemetry", "cpu_power_exporter", f"{cpu_exporter.port} (source {cpu_exporter.source})"
                 )
 
+            cpu_power = config.telemetry.cpu_power
+            if cpu_power.enabled:
+                details.add_row(
+                    "telemetry",
+                    "cpu_power",
+                    f"host collector (source {cpu_power.source}, <log_dir>/{cpu_power.storage_subdir}"
+                    f"{', required' if cpu_power.required else ''})",
+                )
+
         if mooncake_cfg is not None:
             details.add_row("mooncake", "container", mooncake_cfg.container or "<job container>")
             details.add_row("mooncake", "master_port", f"{MOONCAKE_MASTER_PORT} (auto)")

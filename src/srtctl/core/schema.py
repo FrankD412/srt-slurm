@@ -54,6 +54,7 @@ logger = logging.getLogger(__name__)
 # never imports the power package; equality is pinned by tests.
 _BENCHMARK_TYPE_SA_BENCH = "sa-bench"
 _DCGM_POWER_MAX_SAMPLE_GAP_SECONDS = 3.0
+_CPU_POWER_MAX_SAMPLE_GAP_SECONDS = 3.0
 _DCGM_POWER_COLLECT_CYCLE_TIMEOUT_GRACE_SECONDS = 1.0
 
 
@@ -1241,6 +1242,43 @@ class ObservabilityConfig:
 
 
 @dataclass(frozen=True)
+class CpuPowerConfig:
+    """Host-side CPU power collection on every worker node.
+
+    This is the in-job Python collector (``srtctl.core.cpu_power``): one
+    process per backend node reads Linux ACPI ``power_meter`` hwmon channels
+    (or DCGM CPU entity field 1130) directly on the bare host and writes its
+    own per-node CSV, which the head node aggregates at teardown into
+    ``<storage_subdir>/samples.csv`` plus a manifest.
+
+    It is independent of ``cpu_power_exporter`` (the head-node scraper over a
+    per-node ``/metrics`` exporter): a recipe may enable either, both, or
+    neither. The two legs share no ports and write to different directories.
+
+    Attributes:
+        enabled: Master switch for this leg. Default: False.
+        source: ``auto`` tries ACPI then DCGM and is best-effort; naming
+            ``acpi`` or ``dcgm`` explicitly makes that provider mandatory.
+        sample_interval_seconds: Read period on each node, in seconds.
+        startup_timeout_seconds: How long to wait for every node's collector
+            to publish its ready marker before giving up on readiness.
+        required: Fail the job when the leg does not become ready or does not
+            produce a valid publication.
+        storage_subdir: Directory below the run log directory that holds the
+            CPU samples and manifest. Must differ from ``telemetry.storage_subdir``.
+    """
+
+    enabled: bool = False
+    source: Literal["auto", "acpi", "dcgm"] = "auto"
+    sample_interval_seconds: float = 0.1
+    startup_timeout_seconds: float = 30.0
+    required: bool = False
+    storage_subdir: str = "cpu_power"
+
+    Schema: ClassVar[type[Schema]] = Schema
+
+
+@dataclass(frozen=True)
 class CpuPowerExporterConfig:
     """Best-effort CPU power collection via the cpu-power-exporter binary.
 
@@ -1280,6 +1318,7 @@ class TelemetryConfig:
     # None derives a safe shutdown budget from request_timeout_seconds.
     collector_join_timeout_seconds: float | None = None
     cpu_power_exporter: CpuPowerExporterConfig | None = None
+    cpu_power: CpuPowerConfig = field(default_factory=CpuPowerConfig)
 
     Schema: ClassVar[type[Schema]] = Schema
 
@@ -2431,6 +2470,39 @@ class SrtConfig:
                 "assigned to a backend process on a worker node"
             )
 
+    def _validate_cpu_power(self) -> None:
+        """Validate the host-side CPU power collector leg (``telemetry.cpu_power``)."""
+        cpu_power = self.telemetry.cpu_power
+        for name in ("sample_interval_seconds", "startup_timeout_seconds"):
+            if not _is_finite_positive(getattr(cpu_power, name)):
+                raise ValidationError(f"telemetry.cpu_power.{name} must be finite and positive")
+        if cpu_power.sample_interval_seconds > _CPU_POWER_MAX_SAMPLE_GAP_SECONDS:
+            raise ValidationError(
+                f"telemetry.cpu_power.sample_interval_seconds={cpu_power.sample_interval_seconds} exceeds the "
+                f"{_CPU_POWER_MAX_SAMPLE_GAP_SECONDS}s max sample gap; every window would fail sample_gap_exceeded"
+            )
+
+        if not _is_safe_relative_subpath(cpu_power.storage_subdir):
+            raise ValidationError(
+                "telemetry.cpu_power.storage_subdir must be a safe relative path below the run log directory"
+            )
+        if cpu_power.storage_subdir == self.telemetry.storage_subdir:
+            raise ValidationError(
+                "telemetry.cpu_power.storage_subdir must differ from telemetry.storage_subdir; "
+                "the two legs write their own samples and manifest"
+            )
+
+    def _reject_inert_cpu_power_demand(self) -> None:
+        """Reject mandatory CPU power semantics that nothing will act on."""
+        cpu_power = self.telemetry.cpu_power
+        if cpu_power.required:
+            raise ValidationError("telemetry.cpu_power.required has no effect unless telemetry.cpu_power.enabled")
+        if cpu_power.source != "auto":
+            raise ValidationError(
+                f'telemetry.cpu_power.source: "{cpu_power.source}" has no effect unless telemetry.cpu_power.enabled; '
+                "it names a mandatory provider for a leg that will not run"
+            )
+
     def _validate_observability(self):
         """Validate Tachometer collection under observability."""
         observability = self.observability
@@ -2471,21 +2543,34 @@ class SrtConfig:
     def _validate_telemetry(self):
         """Validate telemetry config.
 
-        ``cpu_power_exporter`` is an independent, best-effort leg: it is
-        validated whenever telemetry is enabled, regardless of which
-        provider (dcgm-power today) is configured. It is also sufficient on
-        its own -- a recipe may enable telemetry for CPU power alone, with
-        no ``dcgm_exporter`` at all.
+        ``cpu_power_exporter`` (head-node scraper) and ``cpu_power`` (host-side
+        collector) are independent legs: each is validated whenever telemetry
+        is enabled, regardless of which provider (dcgm-power today) is
+        configured. Either is also sufficient on its own -- a recipe may
+        enable telemetry for CPU power alone, with no ``dcgm_exporter`` at all.
         """
         telemetry = self.telemetry
-        if telemetry is None or not telemetry.enabled:
+        if telemetry is None:
             return
+        if not telemetry.enabled:
+            if telemetry.cpu_power.enabled:
+                raise ValidationError("telemetry.cpu_power.enabled requires telemetry.enabled")
+            self._reject_inert_cpu_power_demand()
+            return
+        if telemetry.cpu_power.enabled:
+            if not _is_safe_relative_subpath(telemetry.storage_subdir):
+                raise ValidationError(
+                    "telemetry.storage_subdir must be a safe relative path below the run log directory"
+                )
+            self._validate_cpu_power()
+        else:
+            self._reject_inert_cpu_power_demand()
         if telemetry.dcgm_exporter is not None:
             self._validate_dcgm_power()
-        elif telemetry.cpu_power_exporter is None:
+        elif telemetry.cpu_power_exporter is None and not telemetry.cpu_power.enabled:
             raise ValidationError(
-                "telemetry.enabled requires telemetry.dcgm_exporter or telemetry.cpu_power_exporter; "
-                "otherwise there is nothing to collect"
+                "telemetry.enabled requires telemetry.dcgm_exporter, telemetry.cpu_power_exporter, "
+                "or telemetry.cpu_power.enabled; otherwise there is nothing to collect"
             )
         self._validate_collector_budget()
         self._validate_cpu_power_exporter()

@@ -810,6 +810,7 @@ class SweepOrchestrator(
                 else:
                     self.start_power_telemetry(registry)
                     self.start_cpu_power_telemetry(registry)
+                    self.start_cpu_power_host_telemetry(registry)
                     self.start_incremental_power_report()
 
             tachometer_procs = self.start_tachometer()
@@ -856,6 +857,7 @@ class SweepOrchestrator(
             # NOTE: finalize before registry.cleanup() so samples and manifest are durable.
             exit_code = self.finalize_power_telemetry(exit_code, interrupted=stop_event.is_set())
             exit_code = self.finalize_cpu_power_telemetry(exit_code, interrupted=stop_event.is_set())
+            exit_code = self.finalize_cpu_power_host_telemetry(exit_code, interrupted=stop_event.is_set())
             stop_event.set()
             registry.cleanup()
             # After cleanup so the GPUs are idle before node state is reverted.

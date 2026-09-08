@@ -12,6 +12,7 @@ power telemetry as an independent, best-effort leg.
 - [Output Format](#output-format)
 - [Computing Total Energy Over a Run](#computing-total-energy-over-a-run)
 - [Relationship to GPU Power Telemetry](#relationship-to-gpu-power-telemetry)
+- [Alternative: Host-Side Python Collector](#alternative-host-side-python-collector)
 
 ---
 
@@ -186,3 +187,43 @@ equivalent `required` semantics; it is always best-effort.
 GPU power *limits* (apply/restore audited caps, `src/srtctl/core/gpu_power_limit.py`)
 are a separate, unrelated top-level config (`gpu_power_limits`) — not part of
 `telemetry.cpu_power_exporter`.
+
+## Alternative: Host-Side Python Collector
+
+`telemetry.cpu_power` is a second, independent CPU power leg that predates the
+scraper design. Instead of an exporter plus a head-node poller, srtctl launches
+`python3 -m srtctl.core.cpu_power` directly on the bare host of every worker
+node. Each collector reads Linux ACPI `power_meter` hwmon channels (or DCGM CPU
+entity field 1130) itself, writes its own per-node CSV under
+`<storage_subdir>/nodes/`, and drops a ready marker. At teardown the head node
+(`CpuPowerTelemetrySession`, `src/srtctl/core/cpu_power_session.py`) merges the
+node CSVs into `<storage_subdir>/samples.csv` and writes `manifest.json`.
+
+```yaml
+telemetry:
+  enabled: true
+  cpu_power:
+    enabled: true              # presence alone is not enough; this flag turns the leg on
+    source: auto               # "auto" (ACPI then DCGM, best-effort) | "acpi" | "dcgm" (mandatory)
+    sample_interval_seconds: 0.1
+    startup_timeout_seconds: 30.0
+    required: false            # true fails the job if the leg is not ready or not publishable
+    storage_subdir: cpu_power  # must differ from telemetry.storage_subdir
+```
+
+Differences from `cpu_power_exporter`:
+
+- **Fail-closed is available.** `required: true` blocks the formal benchmark
+  when collectors do not become ready on every node, and turns an
+  unpublishable result into a nonzero exit code. The scraper leg has no
+  equivalent.
+- **No network hop.** Readings never leave the node until aggregation, so
+  there is no port to reserve and no exporter binary to install.
+- **Separate artifacts.** Output lands in `cpu_power/` by default, with an
+  extra `timestamp_local` column, not in `power/cpu/`. The energy report in
+  `power_energy_report.py` currently discovers only the scraper's
+  `power/cpu/samples.csv`; aligning this leg's header and location with the
+  scraper (and adding utilization) is follow-on work.
+
+The two legs may be enabled together. They share no ports or directories and
+neither one's failure affects the other.

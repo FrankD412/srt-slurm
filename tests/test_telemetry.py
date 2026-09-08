@@ -16,6 +16,7 @@ from srtctl.core.power.contract import Reason
 from srtctl.core.processes import ProcessRegistry
 from srtctl.core.schema import (
     BenchmarkConfig,
+    CpuPowerConfig,
     CpuPowerExporterConfig,
     FrontendConfig,
     InfraConfig,
@@ -108,9 +109,7 @@ class TestTachometerConfig:
         )
 
         default = TachometerConfig()
-        cmd = resolve_exporter_command(
-            default.resolved_dcgm_exporter, tachometer_dcgm_command_template(default)
-        )
+        cmd = resolve_exporter_command(default.resolved_dcgm_exporter, tachometer_dcgm_command_template(default))
         assert "--collect-interval=1000" in cmd
         assert ":9401" in cmd
 
@@ -123,9 +122,10 @@ class TestTachometerConfig:
                 container_image="dcgm:latest", port=9401, command="dcgm-exporter --custom --address :{port}"
             )
         )
-        assert resolve_exporter_command(
-            custom.resolved_dcgm_exporter, tachometer_dcgm_command_template(custom)
-        ) == "dcgm-exporter --custom --address :9401"
+        assert (
+            resolve_exporter_command(custom.resolved_dcgm_exporter, tachometer_dcgm_command_template(custom))
+            == "dcgm-exporter --custom --address :9401"
+        )
 
         assert "--collect-interval=100 " in DCGM_EXPORTER_COMMAND_TEMPLATE
 
@@ -193,6 +193,9 @@ class TestDcgmPowerConfig:
         assert defaults.collector_join_timeout_seconds is None
         assert defaults.resolved_collector_join_timeout_seconds == 12.0
         assert defaults.cpu_power_exporter is None
+        assert defaults.cpu_power.enabled is False
+        assert defaults.cpu_power.source == "auto"
+        assert defaults.cpu_power.storage_subdir == "cpu_power"
 
     def test_join_timeout_default_tracks_request_timeout(self):
         config = _make_config(
@@ -488,6 +491,90 @@ class TestCpuPowerExporterConfig:
                     storage_subdir="power",
                     cpu_power_exporter=CpuPowerExporterConfig(port=7500),
                 ),
+            )
+
+
+class TestCpuPowerHostConfig:
+    """The host-side Python collector is its own block, independent of cpu_power_exporter."""
+
+    def test_accepts_cpu_power_collection(self):
+        config = _make_config(
+            telemetry=_dcgm_power(
+                cpu_power=CpuPowerConfig(
+                    enabled=True,
+                    source="acpi",
+                    sample_interval_seconds=0.1,
+                    startup_timeout_seconds=10.0,
+                    required=True,
+                )
+            ),
+            benchmark=_sa_bench(),
+        )
+
+        assert config.telemetry.cpu_power.enabled is True
+        assert config.telemetry.cpu_power.required is True
+
+    def test_cpu_power_alone_is_sufficient_for_telemetry_enabled(self):
+        config = _make_config(
+            telemetry=TelemetryConfig(enabled=True, cpu_power=CpuPowerConfig(enabled=True)),
+            benchmark=_sa_bench(),
+        )
+
+        assert config.telemetry.dcgm_exporter is None
+        assert config.telemetry.cpu_power.enabled is True
+
+    def test_both_cpu_legs_may_be_configured_together(self):
+        config = _make_config(
+            telemetry=_dcgm_power(
+                cpu_power=CpuPowerConfig(enabled=True),
+                cpu_power_exporter=CpuPowerExporterConfig(port=9405),
+            ),
+            benchmark=_sa_bench(),
+        )
+
+        assert config.telemetry.cpu_power.enabled is True
+        assert config.telemetry.cpu_power_exporter is not None
+
+    def test_cpu_power_requires_telemetry(self):
+        with pytest.raises(ValidationError, match="telemetry.cpu_power.enabled requires telemetry.enabled"):
+            _make_config(telemetry=TelemetryConfig(cpu_power=CpuPowerConfig(enabled=True)))
+
+    def test_required_without_enabled_is_rejected(self):
+        with pytest.raises(ValidationError, match="telemetry.cpu_power.required has no effect"):
+            _make_config(telemetry=_dcgm_power(cpu_power=CpuPowerConfig(required=True)), benchmark=_sa_bench())
+
+    @pytest.mark.parametrize("source", ["acpi", "dcgm"])
+    def test_explicit_source_without_enabled_is_rejected(self, source):
+        with pytest.raises(ValidationError, match="telemetry.cpu_power.source"):
+            _make_config(telemetry=_dcgm_power(cpu_power=CpuPowerConfig(source=source)), benchmark=_sa_bench())
+
+    @pytest.mark.parametrize("field_name", ["sample_interval_seconds", "startup_timeout_seconds"])
+    def test_cpu_power_intervals_must_be_positive(self, field_name):
+        with pytest.raises(ValidationError, match=f"telemetry.cpu_power.{field_name}"):
+            _make_config(
+                telemetry=_dcgm_power(cpu_power=CpuPowerConfig(enabled=True, **{field_name: 0.0})),
+                benchmark=_sa_bench(),
+            )
+
+    def test_sample_interval_must_not_exceed_max_gap(self):
+        with pytest.raises(ValidationError, match="telemetry.cpu_power.sample_interval_seconds=5.0 exceeds"):
+            _make_config(
+                telemetry=_dcgm_power(cpu_power=CpuPowerConfig(enabled=True, sample_interval_seconds=5.0)),
+                benchmark=_sa_bench(),
+            )
+
+    def test_storage_subdir_must_differ_from_gpu_leg(self):
+        with pytest.raises(ValidationError, match="telemetry.cpu_power.storage_subdir must differ"):
+            _make_config(
+                telemetry=_dcgm_power(cpu_power=CpuPowerConfig(enabled=True, storage_subdir="power")),
+                benchmark=_sa_bench(),
+            )
+
+    def test_storage_subdir_must_be_safe_relative_path(self):
+        with pytest.raises(ValidationError, match="telemetry.cpu_power.storage_subdir must be a safe"):
+            _make_config(
+                telemetry=_dcgm_power(cpu_power=CpuPowerConfig(enabled=True, storage_subdir="../escape")),
+                benchmark=_sa_bench(),
             )
 
 
@@ -1564,3 +1651,94 @@ class TestCpuPowerExporterLaunch:
         assert collector is not None
         assert registry.process_count == 0
         mock_srun.assert_not_called()
+
+
+class TestCpuPowerHostCollectorLaunch:
+    """The host-side Python collector runs once per backend node on the bare host."""
+
+    @patch("srtctl.cli.mixins.telemetry_stage.CpuPowerTelemetrySession.wait_for_readiness", return_value=True)
+    @patch("srtctl.cli.mixins.telemetry_stage.start_srun_process")
+    def test_multinode_launches_native_collectors(self, mock_srun, _mock_ready, tmp_path):
+        mock_srun.return_value = _running_exporter()
+        harness = _power_harness(
+            tmp_path,
+            [_worker("node-a", range(4)), _worker("node-b", range(4), index=1)],
+        )
+        harness.config = _make_config(
+            telemetry=_dcgm_power(
+                startup_timeout_seconds=0.2,
+                request_timeout_seconds=0.1,
+                collector_join_timeout_seconds=3.0,
+                cpu_power=CpuPowerConfig(enabled=True, source="auto", required=True),
+            ),
+            benchmark=_sa_bench(),
+        )
+        registry = ProcessRegistry(job_id="12345")
+
+        session = harness.start_cpu_power_host_telemetry(registry)
+
+        assert session is not None
+        assert mock_srun.call_count == 1
+        kwargs = mock_srun.call_args.kwargs
+        assert kwargs["nodes"] == 2
+        assert kwargs["ntasks"] == 2
+        assert kwargs["nodelist"] == ["node-a", "node-b"]
+        assert kwargs["use_bash_wrapper"] is False
+        assert "container_image" not in kwargs
+        assert kwargs["command"][1:3] == ["-m", "srtctl.core.cpu_power"]
+        assert "--source" in kwargs["command"]
+        assert registry.process_count == 1
+        assert all(proc.critical is False for proc in registry.get_all_processes().values())
+        assert (tmp_path / "cpu_power" / "manifest.json").is_file()
+
+    @patch("srtctl.cli.mixins.telemetry_stage.start_srun_process")
+    def test_disabled_block_is_a_noop(self, mock_srun, tmp_path):
+        harness = _power_harness(tmp_path, [_worker("node-a", range(4))])
+        harness.config = _make_config(
+            telemetry=_dcgm_power(cpu_power_exporter=CpuPowerExporterConfig(port=9405)),
+            benchmark=_sa_bench(),
+        )
+        registry = ProcessRegistry(job_id="12345")
+
+        assert harness.start_cpu_power_host_telemetry(registry) is None
+        assert mock_srun.call_count == 0
+        assert harness.finalize_cpu_power_host_telemetry(0) == 0
+
+    def test_required_cpu_power_failure_blocks_benchmark(self, tmp_path):
+        harness = _power_harness(tmp_path, [_worker("node-a", range(4))])
+        harness.config = _make_config(
+            telemetry=_dcgm_power(cpu_power=CpuPowerConfig(enabled=True, required=True)),
+            benchmark=_sa_bench(),
+        )
+        harness._cpu_power_host_session = MagicMock()
+        harness._cpu_power_host_ready = False
+        harness._power_session = MagicMock()
+        harness._power_telemetry_ready = True
+
+        assert harness.power_telemetry_blocks_benchmark() is True
+
+    def test_best_effort_cpu_power_failure_does_not_block_benchmark(self, tmp_path):
+        harness = _power_harness(tmp_path, [_worker("node-a", range(4))])
+        harness.config = _make_config(
+            telemetry=_dcgm_power(required=False, cpu_power=CpuPowerConfig(enabled=True, required=False)),
+            benchmark=_sa_bench(),
+        )
+        harness._cpu_power_host_session = MagicMock()
+        harness._cpu_power_host_ready = False
+
+        assert harness.power_telemetry_blocks_benchmark() is False
+
+    def test_required_finalize_failure_sets_nonzero_exit(self, tmp_path):
+        harness = _power_harness(tmp_path, [_worker("node-a", range(4))])
+        harness.config = _make_config(
+            telemetry=_dcgm_power(cpu_power=CpuPowerConfig(enabled=True, required=True)),
+            benchmark=_sa_bench(),
+        )
+        session = MagicMock()
+        session.stop_and_finalize.return_value = MagicMock(
+            status="incomplete", publication_valid=False, reason_codes=("cpu_samples_empty",), exit_nonzero=True
+        )
+        harness._cpu_power_host_session = session
+
+        assert harness.finalize_cpu_power_host_telemetry(0) == 1
+        assert harness.finalize_cpu_power_host_telemetry(3) == 3
