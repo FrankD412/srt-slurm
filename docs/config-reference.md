@@ -328,6 +328,17 @@ supported). A recipe can be switched between the two TRT-LLM serving stacks by
 changing only `frontend.type` between `dynamo` and `trtllm_serve`. See the sample
 recipe `recipes/trtllm/b200-fp8/1k1k/stp/ctx1_gen3_tp8_batch1024_eplb0_mtp0_4_trtllm_serve.yaml`.
 
+**Worker metrics default.** srtctl sets `return_perf_metrics: true` in the
+`trtllm_config` section of every mode a `trtllm_serve` recipe uses (prefill and
+decode, or `aggregated`), creating the section when the recipe has none. This is
+a setdefault: an explicit `return_perf_metrics: false` in the recipe wins and is
+warned about. trtllm-serve mounts a worker's `/prometheus/metrics` route only
+when the engine runs with that flag, and TensorRT-LLM's own default is `false`,
+so without it Tachometer's `backend_*` endpoints answer HTTP 404 and the capture
+has no worker-level data. The route carries the per-request series (request
+latency, TTFT, TPOT, queue/prefill/decode time, token counters); it applies
+independently of `observability.enabled`, which keeps its own expansion.
+
 ### vllm frontend
 
 `type: vllm` runs aggregate vLLM jobs **without Dynamo**. The OpenAI-compatible
@@ -652,6 +663,7 @@ benchmark:
 | `router`          | Router performance with prefix caching         |
 | `mooncake-router` | KV-aware routing with Mooncake trace           |
 | `agentperf`       | AgentPerf trajectory replay (agentperf-client) |
+| `mlperf`          | MLPerf Inference LoadGen (mlcommons/inference)  |
 
 ### manual
 
@@ -703,9 +715,12 @@ their URLs are appended to `AIPERF_SERVER_METRICS_URLS` after the logical worker
 
 Two caveats for `AIPERF_SERVER_METRICS_URLS`:
 
-- **TRT-LLM worker URLs are omitted when the workers publish no metrics.** A TRT-LLM worker
+- **TRT-LLM worker URLs are omitted when the workers publish no metrics.** A Dynamo TRT-LLM worker
   launched without `--publish-events-and-metrics` (the default; `observability.enabled` turns it
-  on) serves nothing on its sys-port `/metrics`, so those URLs are not advertised. KVBM URLs are
+  on) serves nothing on its sys-port `/metrics`, so those URLs are not advertised. With
+  `frontend.type: trtllm_serve` the gate is the worker's own engine config instead: its
+  `/prometheus/metrics` URL is advertised when that mode's `return_perf_metrics` is true (the
+  srtctl default for trtllm_serve recipes; an explicit `false` drops the URL). KVBM URLs are
   unaffected — KVBM serves its own endpoint regardless of the flag.
 - **An explicit `AIPERF_SERVER_METRICS_URLS` in the recipe `environment:` wins.** Injection is
   skipped when the variable is already set, so a curated endpoint list is never clobbered.
@@ -928,6 +943,73 @@ Notes:
 - `telemetry:` (DCGM power measurement windows) is not supported with agentperf — the schema
   rejects non-sa-bench benchmark types at config load. Tachometer
   (`observability.enabled`) works normally.
+
+### mlperf
+
+MLPerf runs as a **`custom` benchmark driving the MLPerf team's `inference-endpoint` client**, not
+as a benchmark type. srt-slurm carries no MLPerf-specific schema at all — the driver is a script at
+`/srtctl-benchmarks/mlperf/bench.sh`, mounted for every benchmark type.
+
+```yaml
+benchmark:
+  type: custom
+  command: bash /srtctl-benchmarks/mlperf/bench.sh
+  env:
+    MLPERF_CLIENT_CONFIG: /configs/dsr1-interactive-submission.yaml
+    MLPERF_MODE: both            # both (default) | perf | acc
+
+extra_mount:
+  - "/path/to/client-configs:/configs"
+```
+
+**The client config is passed through, not re-modelled.** It carries ~60 nested settings — model
+params, two datasets with accuracy scoring, load pattern, a ZeroMQ transport block,
+drain/warmup/early-stopping — and its shape moves with the client version. Expressing any of it as
+srt-slurm settings would be a losing race and lossy: anything not modelled becomes unsettable. The
+script rewrites exactly two values, being the only two the config cannot know before the cluster
+exists:
+
+| Rewritten | Why |
+|---|---|
+| `endpoint_config.endpoints` | frontend IPs are assigned by Slurm at run time |
+| `report_dir` | so results land with the job's other logs and get collected |
+
+Everything else is passed through untouched, including unresolved `${VAR}` placeholders that the
+client expands itself at load time. This mirrors the MLPerf team's own launcher
+(`endpoints-launch`, `NVIDIA/src/sflow/tools/generate_endpoint_yaml.py`), which rewrites one key
+and leaves the rest.
+
+Start from a template in the client repo
+(`src/inference_endpoint/config/templates/submission_template.yaml`) or one of the ~45 point configs
+in `endpoints-launch` under `NVIDIA/src/configs/<system>/<model>/point_*/client.yaml`.
+
+| Variable | Required | Default | Description |
+| -------- | -------- | ------- | ----------- |
+| `MLPERF_CLIENT_CONFIG` | Yes | — | Container path to the client config |
+| `MLPERF_MODE` | No | `both` | `perf`, `acc`, or `both`. These are the client's own mode names — note they are *not* the `performance`/`accuracy` spellings used for dataset types inside the client config |
+| `MLPERF_ENDPOINTS` | No | the injected frontend | Comma-separated list, for client-side load balancing |
+| `MLPERF_CLIENT_BIN` | No | `inference-endpoint` | Client executable |
+
+Notes:
+
+- **Do not mount the client config at `/configs`.** srt-slurm mounts its own `configs/` there,
+  holding the `nats-server` and `etcd` binaries the head node starts from; an `extra_mount` onto the
+  same path shadows them and the job dies early with `NATS binary not found: /configs/nats-server`,
+  which reads like a broken install rather than a mount collision. Use any other path.
+- **Run it in the MLPerf endpoint client image** (`endpoint_client_*.sqsh`). The client ships
+  pre-installed there, so there is nothing to build; the script checks it is on `PATH` and fails
+  with that message if not.
+- **The endpoint is injected, never defaulted.** srt-slurm sets `SRT_FRONTEND_HOST` /
+  `SRT_FRONTEND_PORT` for every custom benchmark, and the script errors if they are absent rather
+  than quietly benchmarking localhost.
+- **`MLPERF_ENDPOINTS` is how you get more than one frontend.** The client load-balances across the
+  list itself, which is how MLPerf gets past the roughly 28k-connection ceiling of a single
+  `ip:port` — its own submission configs ask for 84,000. srt-slurm exposes a single frontend today,
+  so at submission scale this override is currently the only route.
+- The script writes `benchmark-rollup.json` itself, which is the artifact srt-slurm's postprocess
+  already reads. Per-run metrics are deliberately absent: this client does not use LoadGen and
+  writes its own report format, which has not been observed here yet, and a fabricated parser would
+  be worse than an honest gap. The record points at `report_dir` and lists what landed there.
 
 ---
 
