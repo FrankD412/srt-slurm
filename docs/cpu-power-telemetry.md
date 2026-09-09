@@ -97,8 +97,10 @@ the source of truth).
 The exporter binary itself decides ACPI vs. DCGM per its own `--source` flag:
 
 - **`acpi`** — reads Linux ACPI `power_meter` hwmon sysfs channels. Reports
-  per-channel detail: `cpu`, `sysio`, and (where firmware exposes it)
-  `grace`-kind rails per socket.
+  per-channel detail: `cpu_rail`, `soc`, `dram`, and (where firmware exposes
+  it) a `total`-kind rail per socket. Domain names vary by platform (e.g.
+  "Grace Power Socket 0" vs. a generic "Total Power socket 0", some suffixed
+  with "in uW"); the exporter classifies all known variants into these kinds.
 - **`dcgm`** — reads DCGM CPU entity power directly, one already-aggregated
   value per socket.
 - **`auto`** (default) — tries DCGM first, falls back to ACPI when DCGM is
@@ -123,14 +125,15 @@ schema_version, timestamp_unix, hostname, source, sensor, socket_id, power_w, to
 - **`total_power_w`** — the node-level total for that scrape, duplicated on
   every sensor row at the same `(hostname, timestamp_unix)`. In DCGM mode this
   is the sum of the per-socket DCGM values. In ACPI mode it is **not** a sum of
-  the `cpu`- and `sysio`-kind rails: whenever a `grace`-kind channel exists for
-  a socket, that channel alone is the total. Real hardware traces show `grace`
-  at roughly 93-104W against `cpu`+`sysio` combined at roughly 53-58W for the
-  same socket — `grace` measures the whole Grace SoC power boundary, not
-  literally `cpu + sysio`. **When no `grace` channel is present for a scrape,
-  `total_power_w` is left blank** for every row from that scrape rather than
-  guessed from the component rails; per-sensor `power_w` values are still
-  populated. Consumers reading this CSV (e.g.
+  the `cpu_rail`-, `soc`-, and `dram`-kind rails: whenever a `total`-kind
+  channel exists for a socket, that channel alone is the total. Real hardware
+  traces show the `total` rail at roughly 93-104W against `cpu_rail`+`soc`
+  combined at roughly 53-58W for the same socket — `total` measures the whole
+  Grace SoC power boundary, not literally `cpu_rail + soc`. **When no
+  `total`-kind channel is present for a scrape, `total_power_w` is left
+  blank** for every row from that scrape rather than guessed from the
+  component rails; per-sensor `power_w` values are still populated. Consumers
+  reading this CSV (e.g.
   `srtctl.analysis.power_energy_report.load_cpu_samples`) must skip blank
   `total_power_w` rows rather than treat them as `0`.
 
@@ -150,7 +153,7 @@ import pandas as pd
 import numpy as np
 
 df = pd.read_csv("samples.csv")
-df = df[df["total_power_w"] != ""]  # skip scrapes with no grace channel
+df = df[df["total_power_w"] != ""]  # skip scrapes with no total-kind channel
 
 # total_power_w repeats across every sensor row for the same (hostname, timestamp);
 # dedupe before integrating or sockets get double-counted.

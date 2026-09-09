@@ -6,8 +6,9 @@
 The exporter resolves DCGM-vs-ACPI once at startup and only ever serves one
 metric family for its process lifetime, so a scrape body should never
 contain both. If it ever did, ACPI wins here: it reports per-channel detail
-(``cpu``/``sysio``/``grace``) while DCGM reports only one already-aggregated
-value per socket, so ACPI is the more informative source when both exist.
+(``total``/``cpu_rail``/``soc``/``dram``) while DCGM reports only one
+already-aggregated value per socket, so ACPI is the more informative source
+when both exist.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from prometheus_client.parser import text_string_to_metric_families
 
 DCGM_METRIC = "cpu_power_dcgm_watts"
 ACPI_METRIC = "cpu_power_acpi_watts"
-GRACE_KIND = "grace"
+TOTAL_KIND = "total"
 
 
 @dataclass(frozen=True)
@@ -30,7 +31,7 @@ class CpuReading:
     sensor: str
     socket_id: int
     power_w: float
-    kind: str  # "" for dcgm; "cpu" | "grace" | "sysio" for acpi
+    kind: str  # "" for dcgm; "total" | "cpu_rail" | "soc" | "dram" for acpi
 
 
 @dataclass(frozen=True)
@@ -51,7 +52,7 @@ def parse_cpu_scrape(text: str) -> ParsedCpuScrape:
 
     acpi_readings = _parse_acpi(families)
     if acpi_readings:
-        total = _sum_by_kind(acpi_readings, GRACE_KIND)
+        total = _sum_by_kind(acpi_readings, TOTAL_KIND)
         return ParsedCpuScrape(mode="acpi", readings=tuple(acpi_readings), total_power_w=total)
 
     dcgm_readings = _parse_dcgm(families)

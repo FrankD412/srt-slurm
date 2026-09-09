@@ -78,13 +78,15 @@ CPU_SAMPLES_HEADER = (
     "power_w",
     "total_power_w",
 )
-# NOTE: in ACPI mode, total_power_w sums only "grace"-kind channels. Real
-# hardware traces show grace ~93-104W vs cpu+sysio ~53-58W for the same
-# socket -- grace is a separate, larger measurement of the whole Grace SoC
-# power boundary, not literally cpu + sysio. This has not been verified
-# against NVIDIA hardware/DCGM documentation; if it turns out to be wrong,
-# only total_power_w in ACPI mode is affected, since per-row power_w values
-# and DCGM mode (one already-aggregate value per socket) are unaffected.
+# NOTE: in ACPI mode, total_power_w sums only "total"-kind channels (e.g.
+# "Grace Power Socket N" or a platform's generic "Total Power socket N"
+# rail). Real hardware traces show the total rail ~93-104W vs cpu_rail+soc
+# ~53-58W for the same socket -- total is a separate, larger measurement of
+# the whole Grace SoC power boundary, not literally cpu_rail + soc. This has
+# not been verified against NVIDIA hardware/DCGM documentation; if it turns
+# out to be wrong, only total_power_w in ACPI mode is affected, since
+# per-row power_w values and DCGM mode (one already-aggregate value per
+# socket) are unaffected.
 
 MAX_SAMPLE_GAP_SECONDS = 3.0
 COLLECT_CYCLE_TIMEOUT_GRACE_SECONDS = 1.0

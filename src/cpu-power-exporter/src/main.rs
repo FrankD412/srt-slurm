@@ -42,11 +42,29 @@ use tokio::time::{timeout, Duration};
 
 /// Channels we surface. Matched against the hwmon OEM string in this order;
 /// the socket ID must follow the phrase directly, so "Grace Power Socket 1"
-/// stays `grace` even when the string also mentions CPU power elsewhere.
-const OEM_KINDS: [(&str, &str); 3] = [
-    ("cpu power socket ", "cpu"),
-    ("grace power socket ", "grace"),
-    ("sysio power socket ", "sysio"),
+/// stays `total` even when the string also mentions CPU power elsewhere.
+///
+/// Mirrors `AcpiPowerMeterReader._DOMAIN_PATTERNS` in
+/// `src/srtctl/core/cpu_power.py`: some platforms suffix a rail's OEM string
+/// with "in uW" (e.g. "Total Power in uW socket 0" vs. "Total Power socket
+/// 0"), so each variable-form domain lists both spellings. `total` is the
+/// complete CPU-side socket envelope (Grace's own reading, or a platform's
+/// generic "Total Power" rail); `cpu_rail`/`soc`/`dram` are component rails
+/// that must not be summed into a node's total power.
+const OEM_KINDS: [(&str, &[&str]); 4] = [
+    (
+        "total",
+        &["grace power socket ", "total power socket ", "total power in uw socket "],
+    ),
+    (
+        "cpu_rail",
+        &["cpu rail power socket ", "cpu rail power in uw socket ", "cpu power socket "],
+    ),
+    (
+        "soc",
+        &["soc rail power socket ", "soc rail power in uw socket ", "sysio power socket "],
+    ),
+    ("dram", &["dram power socket ", "dram power in uw socket "]),
 ];
 
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -136,13 +154,15 @@ fn read_text(p: &Path) -> Option<String> {
 
 fn classify_oem(oem: &str) -> (&'static str, String) {
     let lower = oem.to_lowercase();
-    for (needle, kind) in OEM_KINDS {
-        let Some((_, rest)) = lower.split_once(needle) else {
-            continue;
-        };
-        let socket: String = rest.chars().take_while(char::is_ascii_digit).collect();
-        if !socket.is_empty() {
-            return (kind, socket);
+    for (kind, needles) in OEM_KINDS {
+        for needle in needles {
+            let Some((_, rest)) = lower.split_once(needle) else {
+                continue;
+            };
+            let socket: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            if !socket.is_empty() {
+                return (kind, socket);
+            }
         }
     }
     ("other", String::new())
@@ -605,10 +625,10 @@ mod tests {
         );
         let sensors = discover_sensors(dir.path()).unwrap();
         assert_eq!(sensors.len(), 2);
-        assert_eq!((sensors[0].kind, sensors[0].socket.as_str()), ("cpu", "0"));
+        assert_eq!((sensors[0].kind, sensors[0].socket.as_str()), ("cpu_rail", "0"));
         assert_eq!(
             (sensors[1].kind, sensors[1].socket.as_str()),
-            ("grace", "1")
+            ("total", "1")
         );
     }
 
@@ -628,7 +648,7 @@ mod tests {
         let sensors = discover_sensors(dir.path()).unwrap();
         assert_eq!(sensors.len(), 1, "an alias is one sensor, not two");
         assert_eq!(sensors[0].oem_info, "CPU Power Socket 0");
-        assert_eq!(sensors[0].kind, "cpu");
+        assert_eq!(sensors[0].kind, "cpu_rail");
     }
 
     #[test]
@@ -661,11 +681,11 @@ mod tests {
 
     #[test]
     fn classify_oem_requires_a_socket_id_adjacent_to_the_rail_name() {
-        assert_eq!(classify_oem("CPU Power Socket 0"), ("cpu", "0".into()));
+        assert_eq!(classify_oem("CPU Power Socket 0"), ("cpu_rail", "0".into()));
         // Rail name wins by adjacency, not by scan order.
         assert_eq!(
             classify_oem("Grace Power Socket 1 CPU Power"),
-            ("grace", "1".into())
+            ("total", "1".into())
         );
         // No numeric socket ID -> unclassified, so no unescaped text reaches a label.
         assert_eq!(
@@ -673,6 +693,38 @@ mod tests {
             ("other", String::new())
         );
         assert_eq!(classify_oem("Module Socket A"), ("other", String::new()));
+    }
+
+    #[test]
+    fn classify_oem_accounts_for_platform_naming_variants() {
+        // Generic "Total Power" rail: the total-envelope label on platforms
+        // that don't say "Grace".
+        assert_eq!(classify_oem("Total Power socket 0"), ("total", "0".into()));
+        // Some platforms suffix the rail name with "in uW".
+        assert_eq!(
+            classify_oem("Total Power in uW socket 0"),
+            ("total", "0".into())
+        );
+        assert_eq!(
+            classify_oem("CPU Rail Power in uW socket 1"),
+            ("cpu_rail", "1".into())
+        );
+        assert_eq!(
+            classify_oem("SoC Rail Power in uW socket 1"),
+            ("soc", "1".into())
+        );
+        assert_eq!(
+            classify_oem("SysIO Power Socket 1"),
+            ("soc", "1".into())
+        );
+        assert_eq!(
+            classify_oem("DRAM Power socket 0"),
+            ("dram", "0".into())
+        );
+        assert_eq!(
+            classify_oem("DRAM Power in uW socket 0"),
+            ("dram", "0".into())
+        );
     }
 
     #[test]
@@ -690,7 +742,7 @@ mod tests {
         let output = build_metrics(&sensors);
         assert!(output.contains("# TYPE cpu_power_acpi_watts gauge"));
         assert!(output.contains(
-            "cpu_power_acpi_watts{sensor=\"hwmon0/power1\",type=\"cpu\",socket=\"0\",oem_info=\"CPU Power Socket 0\",source=\"acpi\"} 150.000000\n"
+            "cpu_power_acpi_watts{sensor=\"hwmon0/power1\",type=\"cpu_rail\",socket=\"0\",oem_info=\"CPU Power Socket 0\",source=\"acpi\"} 150.000000\n"
         ), "{output}");
         assert!(
             !output.contains("not-a-number"),
