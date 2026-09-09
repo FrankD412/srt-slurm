@@ -257,6 +257,16 @@ Each window also carries **perf/W** and a **timing comparison**:
   ran (time-of-day only, so no absolute start/end). `timing.coverage`: the
   first and last power samples the trapezoid actually spanned. Every
   breakdown row records its own `sample_start_unix`/`sample_end_unix`/`samples`.
+- **Power statistics per breakdown row** (socket, GPU, node, role):
+  `avg_power_w` is time-weighted (joules / window duration) and therefore
+  consistent with the energy figure even under uneven sampling; `mean_w` is
+  the plain sample mean over the same samples, kept alongside so any gap
+  between the two is visible. `min_w`, `p5_w`, `p50_w`, `p95_w`, `p99_w`, and
+  `max_w` are sample-based percentiles (numpy linear interpolation) over the
+  exact samples the trapezoid spanned; `samples` says how many points they
+  rest on. Node and role rows are computed over the *summed* series, so a
+  node p99 is the 99th percentile of the node's total power, not a sum of
+  per-device percentiles. The text table shows p50/p95/p99/max; JSON has all.
 
 The two legs may be enabled together. They share no ports or directories and
 neither one's failure affects the other.

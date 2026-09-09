@@ -543,12 +543,28 @@ def load_gpu_samples_from(handle: TextIO, roles: dict[tuple[str, int], set[str]]
 class EnergyBreakdown:
     label: str
     joules: float
+    # Time-weighted: joules / window duration. Consistent with the energy figure
+    # even when sampling is uneven.
     avg_power_w: float
     # The samples the trapezoid actually spanned, so a reader can compare the
     # power data's edges against the benchmark's own window.
     sample_start_unix: float | None = None
     sample_end_unix: float | None = None
     samples: int = 0
+    # Sample-based distribution over those same samples. ``mean_w`` is the
+    # plain sample mean; it differs from ``avg_power_w`` when sampling is uneven,
+    # and both are kept so that difference is visible. Percentiles use numpy's
+    # default linear interpolation. None only on rows built without samples.
+    mean_w: float | None = None
+    min_w: float | None = None
+    p5_w: float | None = None
+    p50_w: float | None = None
+    p95_w: float | None = None
+    p99_w: float | None = None
+    max_w: float | None = None
+
+
+POWER_STAT_FIELDS = ("mean_w", "min_w", "p5_w", "p50_w", "p95_w", "p99_w", "max_w")
 
 
 def _nearest_index(times: np.ndarray, target: float) -> int:
@@ -583,8 +599,10 @@ def windowed_energy(label: str, times: np.ndarray, watts: np.ndarray, start: flo
     if end_i <= start_i:
         raise PowerReportError(f"{label}: window narrower than the sample spacing")
 
-    joules = float(np.trapezoid(watts[start_i : end_i + 1], x=times[start_i : end_i + 1]))
+    inside = watts[start_i : end_i + 1]
+    joules = float(np.trapezoid(inside, x=times[start_i : end_i + 1]))
     duration = end - start
+    p5, p50, p95, p99 = (float(v) for v in np.percentile(inside, (5, 50, 95, 99)))
     return EnergyBreakdown(
         label=label,
         joules=joules,
@@ -592,6 +610,13 @@ def windowed_energy(label: str, times: np.ndarray, watts: np.ndarray, start: flo
         sample_start_unix=float(times[start_i]),
         sample_end_unix=float(times[end_i]),
         samples=int(end_i - start_i + 1),
+        mean_w=float(inside.mean()),
+        min_w=float(inside.min()),
+        p5_w=p5,
+        p50_w=p50,
+        p95_w=p95,
+        p99_w=p99,
+        max_w=float(inside.max()),
     )
 
 
@@ -903,7 +928,15 @@ def render_table(reports: list[ConcurrencyReport]) -> str:
         lines.append(f"  timing: {_render_timing(report)}")
         lines.append(f"  perf/W: {_render_perf_per_watt(report)}")
         for breakdown in (*report.cpu_per_socket, *report.gpu_per_device, *report.gpu_per_role):
-            lines.append(f"    {breakdown.label}: {breakdown.joules:,.2f} J ({breakdown.avg_power_w:,.2f} W avg)")
+            stats = ""
+            if breakdown.p99_w is not None:
+                stats = (
+                    f"; p50={breakdown.p50_w:,.2f} p95={breakdown.p95_w:,.2f} "
+                    f"p99={breakdown.p99_w:,.2f} max={breakdown.max_w:,.2f} W"
+                )
+            lines.append(
+                f"    {breakdown.label}: {breakdown.joules:,.2f} J ({breakdown.avg_power_w:,.2f} W avg{stats})"
+            )
         for label, columns in _utilization_by_label((*report.cpu_utilization, *report.gpu_utilization)).items():
             cells = "; ".join(f"{u.column} mean={u.mean:,.2f} max={u.max:,.2f}" for u in columns)
             lines.append(f"    {label} utilization: {cells}")
@@ -983,6 +1016,7 @@ def report_to_dict(report: ConcurrencyReport) -> dict:
                 "sample_start_unix": b.sample_start_unix,
                 "sample_end_unix": b.sample_end_unix,
                 "samples": b.samples,
+                **{name: getattr(b, name) for name in POWER_STAT_FIELDS},
             }
             for b in breakdowns
         ]

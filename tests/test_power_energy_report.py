@@ -938,3 +938,76 @@ def test_concurrency_report_defaults_keep_older_constructors_working() -> None:
     assert report.combined_avg_power_w is None
     assert report.coverage_start_unix is None
     assert EnergyBreakdown(label="x", joules=1.0, avg_power_w=1.0).samples == 0
+
+
+# ---------------------------------------------------------------------------
+# Power percentile stats
+# ---------------------------------------------------------------------------
+
+
+def test_windowed_energy_reports_sample_based_power_stats() -> None:
+    times = np.array([0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
+    watts = np.array([100.0, 10.0, 20.0, 30.0, 40.0, 100.0])
+
+    result = windowed_energy("label", times, watts, start=1.0, end=4.0)
+
+    inside = watts[1:5]  # 10, 20, 30, 40 -- the same samples the trapezoid spanned
+    assert result.samples == 4
+    assert result.min_w == 10.0
+    assert result.max_w == 40.0
+    assert result.mean_w == pytest.approx(25.0)
+    assert result.p50_w == pytest.approx(np.percentile(inside, 50))
+    assert result.p95_w == pytest.approx(np.percentile(inside, 95))
+    assert result.p99_w == pytest.approx(np.percentile(inside, 99))
+    assert result.p5_w == pytest.approx(np.percentile(inside, 5))
+    # time-weighted average (joules / duration) and sample mean coincide on a uniform grid
+    assert result.avg_power_w == pytest.approx(result.mean_w)
+
+
+def test_time_weighted_average_and_sample_mean_diverge_on_uneven_sampling() -> None:
+    # Three quick low samples, then one long high ramp: the ramp dominates the
+    # energy (trapezoid 10 + 10 + 440 = 460 J) but is a single sample point.
+    times = np.array([0.0, 1.0, 2.0, 10.0])
+    watts = np.array([10.0, 10.0, 10.0, 100.0])
+
+    result = windowed_energy("label", times, watts, start=0.0, end=10.0)
+
+    assert result.mean_w == pytest.approx(32.5)
+    assert result.avg_power_w == pytest.approx(46.0)
+    assert result.avg_power_w == pytest.approx(result.joules / 10.0)
+
+
+def test_node_percentiles_come_from_the_summed_series() -> None:
+    from srtctl.analysis.power_energy_report import GpuSamples
+
+    times = np.arange(99.0, 112.0, 1.0)
+    gpu0 = np.where(times % 2 == 0, 100.0, 300.0)
+    gpu1 = np.where(times % 2 == 0, 300.0, 100.0)
+    gpu = GpuSamples(
+        per_device={("node-a", 0): (times, gpu0), ("node-a", 1): (times, gpu1)},
+        per_node={"node-a": (times, gpu0 + gpu1)},
+        per_role={},
+    )
+
+    report = build_concurrency_report(_window(), None, gpu)
+
+    node = report.gpu_per_node[0]
+    assert node.min_w == node.max_w == 400.0  # anti-phase devices sum flat; not 2 x per-device p99
+    assert report.gpu_per_device[0].max_w == 300.0
+
+
+def test_render_and_json_carry_power_percentiles() -> None:
+    from srtctl.analysis.power_energy_report import GpuSamples
+
+    gpu = GpuSamples(
+        per_device={("node-a", 0): _flat_series(400.0)}, per_node={"node-a": _flat_series(400.0)}, per_role={}
+    )
+    report = build_concurrency_report(_window(), None, gpu)
+
+    text = render_table([report])
+    assert "gpu/node-a/gpu0: 4,000.00 J (400.00 W avg; p50=400.00 p95=400.00 p99=400.00 max=400.00 W)" in text
+
+    entry = report_to_dict(report)["gpu_per_device"][0]
+    for key in ("mean_w", "min_w", "p5_w", "p50_w", "p95_w", "p99_w", "max_w"):
+        assert entry[key] == pytest.approx(400.0), key
+    assert EnergyBreakdown(label="x", joules=1.0, avg_power_w=1.0).p99_w is None
