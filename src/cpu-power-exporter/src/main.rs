@@ -54,15 +54,27 @@ use tokio::time::{timeout, Duration};
 const OEM_KINDS: [(&str, &[&str]); 4] = [
     (
         "total",
-        &["grace power socket ", "total power socket ", "total power in uw socket "],
+        &[
+            "grace power socket ",
+            "total power socket ",
+            "total power in uw socket ",
+        ],
     ),
     (
         "cpu_rail",
-        &["cpu rail power socket ", "cpu rail power in uw socket ", "cpu power socket "],
+        &[
+            "cpu rail power socket ",
+            "cpu rail power in uw socket ",
+            "cpu power socket ",
+        ],
     ),
     (
         "soc",
-        &["soc rail power socket ", "soc rail power in uw socket ", "sysio power socket "],
+        &[
+            "soc rail power socket ",
+            "soc rail power in uw socket ",
+            "sysio power socket ",
+        ],
     ),
     ("dram", &["dram power socket ", "dram power in uw socket "]),
 ];
@@ -625,7 +637,10 @@ mod tests {
         );
         let sensors = discover_sensors(dir.path()).unwrap();
         assert_eq!(sensors.len(), 2);
-        assert_eq!((sensors[0].kind, sensors[0].socket.as_str()), ("cpu_rail", "0"));
+        assert_eq!(
+            (sensors[0].kind, sensors[0].socket.as_str()),
+            ("cpu_rail", "0")
+        );
         assert_eq!(
             (sensors[1].kind, sensors[1].socket.as_str()),
             ("total", "1")
@@ -713,14 +728,8 @@ mod tests {
             classify_oem("SoC Rail Power in uW socket 1"),
             ("soc", "1".into())
         );
-        assert_eq!(
-            classify_oem("SysIO Power Socket 1"),
-            ("soc", "1".into())
-        );
-        assert_eq!(
-            classify_oem("DRAM Power socket 0"),
-            ("dram", "0".into())
-        );
+        assert_eq!(classify_oem("SysIO Power Socket 1"), ("soc", "1".into()));
+        assert_eq!(classify_oem("DRAM Power socket 0"), ("dram", "0".into()));
         assert_eq!(
             classify_oem("DRAM Power in uW socket 0"),
             ("dram", "0".into())

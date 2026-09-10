@@ -341,7 +341,11 @@ impl DcgmReader {
         }
     }
 
-    fn setup(lib: DcgmLib, handle: Handle, handle_source: HandleSource) -> Result<Self, DcgmUnavailable> {
+    fn setup(
+        lib: DcgmLib,
+        handle: Handle,
+        handle_source: HandleSource,
+    ) -> Result<Self, DcgmUnavailable> {
         // Enumerate supported CPU entities.
         let mut raw_ids = vec![0u32; MAX_CPU_ENTITIES];
         let mut count: i32 = MAX_CPU_ENTITIES as i32;
