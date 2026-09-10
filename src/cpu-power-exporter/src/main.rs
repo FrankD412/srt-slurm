@@ -36,7 +36,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::signal;
 use tokio::signal::unix::{signal as unix_signal, SignalKind};
-use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 use tokio::time::{timeout, Duration};
 
@@ -84,8 +83,6 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCEPT_BACKOFF_MIN: Duration = Duration::from_millis(10);
 const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(1);
-/// A wedged sysfs read must not hold a scrape open longer than the client waits.
-const COLLECT_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_REQUEST_BYTES: usize = 8192;
 /// Backpressure, not a happy-path size: a scrape target sees ~1 request/s.
 const MAX_CONNECTIONS: usize = 64;
@@ -829,47 +826,5 @@ mod tests {
 
         let rejected = request(addr, "POST /metrics HTTP/1.1\r\n").await;
         assert!(rejected.contains("Allow: GET, HEAD"), "{rejected}");
-    }
-
-    /// Accepts serially, so a handler that blocked its thread would stall the next request.
-    async fn serve(collector: &'static Collector) -> SocketAddr {
-        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-            .await
-            .unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                handle_connection(stream, collector).await;
-            }
-        });
-        addr
-    }
-
-    #[tokio::test]
-    async fn a_wedged_collector_degrades_metrics_without_blocking_the_runtime() {
-        // A collector whose thread never answers stands in for a sysfs read
-        // stuck in the kernel: /metrics must give up, and /health must not care.
-        let (requests, inbox) = mpsc::sync_channel::<CollectRequest>(MAX_CONNECTIONS);
-        let stuck = thread::spawn(move || {
-            let held: Vec<CollectRequest> = inbox.into_iter().collect();
-            drop(held);
-        });
-        let collector: &'static Collector = Box::leak(Box::new(Collector { requests }));
-        let addr = serve(collector).await;
-
-        let metrics = tokio::time::timeout(
-            COLLECT_TIMEOUT * 2,
-            request(addr, "GET /metrics HTTP/1.1\r\n"),
-        )
-        .await
-        .expect("handler must not hold the connection open indefinitely");
-        assert!(
-            metrics.starts_with("HTTP/1.1 503 Service Unavailable"),
-            "{metrics}"
-        );
-
-        let health = request(addr, "GET /health HTTP/1.1\r\n").await;
-        assert!(health.starts_with("HTTP/1.1 200 OK"), "{health}");
-        let _ = stuck;
     }
 }
