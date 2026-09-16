@@ -533,8 +533,7 @@ class TestSGLangGrpcScheme:
 
         # Mock runtime
         runtime = MagicMock()
-        runtime.log_dir = MagicMock()
-        runtime.log_dir.__truediv__ = lambda self, x: f"/logs/{x}"
+        runtime.log_dir = Path("/logs")
         runtime.container_image = "/container.sqsh"
         runtime.container_mounts = {}
 
@@ -576,8 +575,7 @@ class TestSGLangGrpcScheme:
 
         # Mock runtime
         runtime = MagicMock()
-        runtime.log_dir = MagicMock()
-        runtime.log_dir.__truediv__ = lambda self, x: f"/logs/{x}"
+        runtime.log_dir = Path("/logs")
         runtime.container_image = "/container.sqsh"
         runtime.container_mounts = {}
 
@@ -614,8 +612,7 @@ class TestSGLangGrpcScheme:
 
         runtime = MagicMock()
         runtime.network_interface = "eth0"
-        runtime.log_dir = MagicMock()
-        runtime.log_dir.__truediv__ = lambda self, x: f"/logs/{x}"
+        runtime.log_dir = Path("/logs")
         runtime.container_image = "/container.sqsh"
         runtime.container_mounts = {}
 
@@ -657,8 +654,7 @@ class TestSGLangGrpcScheme:
         backend.is_grpc_mode.return_value = False
 
         runtime = MagicMock()
-        runtime.log_dir = MagicMock()
-        runtime.log_dir.__truediv__ = lambda self, x: f"/logs/{x}"
+        runtime.log_dir = Path("/logs")
         runtime.container_image = "/container.sqsh"
         runtime.container_mounts = {}
 
@@ -703,8 +699,7 @@ class TestFrontendEnvHandling:
         backend.is_grpc_mode.return_value = False
 
         runtime = MagicMock()
-        runtime.log_dir = MagicMock()
-        runtime.log_dir.__truediv__ = lambda self, x: f"/logs/{x}"
+        runtime.log_dir = Path("/logs")
         runtime.container_image = "/container.sqsh"
         runtime.container_mounts = {}
 
@@ -774,8 +769,7 @@ class TestFrontendEnvHandling:
         backend.is_grpc_mode.return_value = False
 
         runtime = MagicMock()
-        runtime.log_dir = MagicMock()
-        runtime.log_dir.__truediv__ = lambda self, x: f"/logs/{x}"
+        runtime.log_dir = Path("/logs")
         runtime.container_image = "/container.sqsh"
         runtime.container_mounts = {}
 
@@ -809,8 +803,7 @@ class TestFrontendEnvHandling:
         backend.is_grpc_mode.return_value = False
 
         runtime = MagicMock()
-        runtime.log_dir = MagicMock()
-        runtime.log_dir.__truediv__ = lambda self, x: f"/logs/{x}"
+        runtime.log_dir = Path("/logs")
         runtime.container_image = "/container.sqsh"
         runtime.container_mounts = {}
 

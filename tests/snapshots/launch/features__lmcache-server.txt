@@ -4,7 +4,7 @@
 
 ## service_etcd
 nodelist: node-01
-output: <output>/logs/service_etcd.out
+output: <output>/logs/services/logs/service_etcd.out
 container_image: vllm-lmcache
 container_mounts:
     <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
@@ -19,7 +19,7 @@ command: |
 
 ## service_lmcache-server_node-01
 nodelist: node-01
-output: <output>/logs/service_lmcache-server_node-01.out
+output: <output>/logs/services/logs/service_lmcache-server_node-01.out
 container_image: vllm-lmcache
 container_mounts:
     <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
@@ -37,7 +37,7 @@ command: |
 
 ## service_lmcache-server_node-02
 nodelist: node-02
-output: <output>/logs/service_lmcache-server_node-02.out
+output: <output>/logs/services/logs/service_lmcache-server_node-02.out
 container_image: vllm-lmcache
 container_mounts:
     <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
@@ -55,7 +55,7 @@ command: |
 
 ## service_lmcache-server_node-03
 nodelist: node-03
-output: <output>/logs/service_lmcache-server_node-03.out
+output: <output>/logs/services/logs/service_lmcache-server_node-03.out
 container_image: vllm-lmcache
 container_mounts:
     <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
@@ -73,7 +73,7 @@ command: |
 
 ## agg_0_node-01
 nodelist: node-01
-output: <output>/logs/node-01_agg_w0.out
+output: <output>/logs/workers/node-01_agg_w0.out
 container_image: vllm-lmcache
 container_mounts:
     <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
@@ -102,11 +102,11 @@ bash_preamble: |
     __FINGERPRINT_EOF__
     ) || true )
 command: |
-    python3 -m dynamo.vllm --model /model --served-model-name Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connector": "LMCacheMPConnector", "kv_connector_module_path": "lmcache.integration.vllm.lmcache_mp_connector", "kv_role": "kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "tcp://localhost", "lmcache.mp.port": 8750}}' --device-ids 0 --request-plane tcp --dump-config-to /logs/node-01_config.json --gpu-memory-utilization 0.5 --max-model-len 4096 --served-model-name Qwen/Qwen3-0.6B --tensor-parallel-size 1
+    python3 -m dynamo.vllm --model /model --served-model-name Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connector": "LMCacheMPConnector", "kv_connector_module_path": "lmcache.integration.vllm.lmcache_mp_connector", "kv_role": "kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "tcp://localhost", "lmcache.mp.port": 8750}}' --device-ids 0 --request-plane tcp --dump-config-to /logs/workers/node-01_config.json --gpu-memory-utilization 0.5 --max-model-len 4096 --served-model-name Qwen/Qwen3-0.6B --tensor-parallel-size 1
 
 ## agg_1_node-01
 nodelist: node-01
-output: <output>/logs/node-01_agg_w1.out
+output: <output>/logs/workers/node-01_agg_w1.out
 container_image: vllm-lmcache
 container_mounts:
     <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
@@ -135,11 +135,11 @@ bash_preamble: |
     __FINGERPRINT_EOF__
     ) || true )
 command: |
-    python3 -m dynamo.vllm --model /model --served-model-name Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connector": "LMCacheMPConnector", "kv_connector_module_path": "lmcache.integration.vllm.lmcache_mp_connector", "kv_role": "kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "tcp://localhost", "lmcache.mp.port": 8750}}' --device-ids 1 --request-plane tcp --dump-config-to /logs/node-01_config.json --gpu-memory-utilization 0.5 --max-model-len 4096 --served-model-name Qwen/Qwen3-0.6B --tensor-parallel-size 1
+    python3 -m dynamo.vllm --model /model --served-model-name Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connector": "LMCacheMPConnector", "kv_connector_module_path": "lmcache.integration.vllm.lmcache_mp_connector", "kv_role": "kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "tcp://localhost", "lmcache.mp.port": 8750}}' --device-ids 1 --request-plane tcp --dump-config-to /logs/workers/node-01_config.json --gpu-memory-utilization 0.5 --max-model-len 4096 --served-model-name Qwen/Qwen3-0.6B --tensor-parallel-size 1
 
 ## frontend_0
 nodelist: node-01
-output: <output>/logs/node-01_frontend_0.out
+output: <output>/logs/workers/node-01_frontend_0.out
 container_image: vllm-lmcache
 container_mounts:
     <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
@@ -161,7 +161,7 @@ command: |
 
 ## service_dcgm-exporter_node-01
 nodelist: node-01
-output: <output>/logs/service_dcgm-exporter_node-01.out
+output: <output>/logs/services/logs/service_dcgm-exporter_node-01.out
 container_image: nvcr.io#nvidia/k8s/dcgm-exporter:3.3.9-3.6.1-ubuntu22.04
 container_mounts:
     <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
@@ -176,7 +176,7 @@ command: |
 
 ## service_dcgm-exporter_node-02
 nodelist: node-02
-output: <output>/logs/service_dcgm-exporter_node-02.out
+output: <output>/logs/services/logs/service_dcgm-exporter_node-02.out
 container_image: nvcr.io#nvidia/k8s/dcgm-exporter:3.3.9-3.6.1-ubuntu22.04
 container_mounts:
     <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
@@ -191,7 +191,7 @@ command: |
 
 ## service_dcgm-exporter_node-03
 nodelist: node-03
-output: <output>/logs/service_dcgm-exporter_node-03.out
+output: <output>/logs/services/logs/service_dcgm-exporter_node-03.out
 container_image: nvcr.io#nvidia/k8s/dcgm-exporter:3.3.9-3.6.1-ubuntu22.04
 container_mounts:
     <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
@@ -206,7 +206,7 @@ command: |
 
 ## service_node-exporter_node-01
 nodelist: node-01
-output: <output>/logs/service_node-exporter_node-01.out
+output: <output>/logs/services/logs/service_node-exporter_node-01.out
 container_image: quay.io#prometheus/node-exporter:v1.8.2
 container_mounts:
     <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
@@ -221,7 +221,7 @@ command: |
 
 ## service_node-exporter_node-02
 nodelist: node-02
-output: <output>/logs/service_node-exporter_node-02.out
+output: <output>/logs/services/logs/service_node-exporter_node-02.out
 container_image: quay.io#prometheus/node-exporter:v1.8.2
 container_mounts:
     <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
@@ -236,7 +236,7 @@ command: |
 
 ## service_node-exporter_node-03
 nodelist: node-03
-output: <output>/logs/service_node-exporter_node-03.out
+output: <output>/logs/services/logs/service_node-exporter_node-03.out
 container_image: quay.io#prometheus/node-exporter:v1.8.2
 container_mounts:
     <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
@@ -251,12 +251,12 @@ command: |
 
 ## tachometer
 nodelist: node-01
-output: <output>/logs/tachometer.out
+output: <output>/logs/telemetry/tachometer.out
 srun_export_env:
     POLARS_MAX_THREADS: 4
 use_bash_wrapper: False
 command: |
-    tachometer-scraper --config <output>/logs/tachometer_config.toml --local-dir <output>/logs/tachometer/local --sync-interval 120
+    tachometer-scraper --config <output>/logs/telemetry/tachometer_config.toml --local-dir <output>/logs/tachometer/local --sync-interval 120
 
 ## <unnamed>
 nodelist: node-01

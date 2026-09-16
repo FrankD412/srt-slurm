@@ -4,7 +4,7 @@
 
 ## service_train_node-01
 nodelist: node-01
-output: <output>/logs/service_train_node-01.out
+output: <output>/logs/services/logs/service_train_node-01.out
 container_image: nvcr.io/nvidia/pytorch:25.06-py3
 container_mounts:
     <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
@@ -22,7 +22,7 @@ command: |
 
 ## service_train_node-02
 nodelist: node-02
-output: <output>/logs/service_train_node-02.out
+output: <output>/logs/services/logs/service_train_node-02.out
 container_image: nvcr.io/nvidia/pytorch:25.06-py3
 container_mounts:
     <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
