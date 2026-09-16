@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 import yaml
 
 from srtctl.cli.submit import show_config_details
@@ -46,6 +47,148 @@ def _make_config(overrides: dict | None = None) -> SrtConfig:
         yaml.dump(data, f)
         tmp_path = Path(f.name)
     return SrtConfig.from_yaml(tmp_path)
+
+
+class TestDryRunDynamoMetrics:
+    @pytest.mark.parametrize(
+        ("settings", "expected", "excluded"),
+        [
+            ({}, "--publish-metrics", "--publish-events-and-metrics"),
+            ({"publish_events_and_metrics": None}, "--publish-metrics", "--publish-events-and-metrics"),
+            ({"publish_events_and_metrics": False}, "No publication flag", "--publish-"),
+            (
+                {"publish_metrics": True, "publish_events_and_metrics": False},
+                "No publication flag",
+                "--publish-",
+            ),
+            ({"publish_metrics": False}, "No publication flag", "--publish-metrics"),
+            (
+                {"publish_metrics": False, "publish_events_and_metrics": True},
+                "--publish-events-and-metrics",
+                "--publish-metrics",
+            ),
+        ],
+    )
+    def test_selected_flag_is_visible(self, capsys, settings, expected, excluded):
+        config = _make_config({"backend": {"type": "trtllm", **settings}, "frontend": {"type": "dynamo"}})
+        show_config_details(config)
+        output = capsys.readouterr().out
+        assert "Dynamo TRT-LLM Metrics" in output
+        assert expected in output
+        assert excluded not in output
+
+    @pytest.mark.parametrize("frontend", ["trtllm_serve", "dynamo"])
+    def test_unrelated_workers_have_no_dynamo_trtllm_publication_panel(self, capsys, frontend):
+        backend = "trtllm" if frontend == "trtllm_serve" else "sglang"
+        config = _make_config(
+            {"backend": {"type": backend}, "frontend": {"type": frontend, "enable_multiple_frontends": False}}
+        )
+        show_config_details(config)
+        assert "Dynamo TRT-LLM Metrics" not in capsys.readouterr().out
+
+    def test_both_flags_are_visible(self, capsys):
+        config = _make_config(
+            {"backend": {"type": "trtllm", "publish_events_and_metrics": True}, "frontend": {"type": "dynamo"}}
+        )
+        show_config_details(config)
+        output = capsys.readouterr().out
+        assert "--publish-metrics" in output
+        assert "--publish-events-and-metrics" in output
+
+    @pytest.mark.parametrize("enabled", [False, True])
+    def test_explicit_combined_false_wins_over_observability(self, capsys, enabled):
+        config = _make_config(
+            {
+                "backend": {"type": "trtllm", "publish_events_and_metrics": False},
+                "frontend": {"type": "dynamo"},
+                "observability": {"enabled": enabled},
+            }
+        )
+        show_config_details(config)
+        output = capsys.readouterr().out
+        assert "No publication flag" in output
+        assert "backend.publish_events_and_metrics: false" in output
+        assert "--publish-" not in output
+
+    def test_sidecar_has_no_dynamo_trtllm_publication_panel(self, capsys):
+        config = _make_config(
+            {
+                "backend": {"type": "trtllm", "trtllm_config": {"aggregated": {"max_seq_len": 8192}}},
+                "frontend": {"type": "dynamo"},
+                "dynamo": {"sidecar": True},
+                "resources": {
+                    "prefill_nodes": 0,
+                    "decode_nodes": 0,
+                    "prefill_workers": 0,
+                    "decode_workers": 0,
+                    "agg_nodes": 1,
+                    "agg_workers": 1,
+                },
+            }
+        )
+        show_config_details(config)
+        assert "Dynamo TRT-LLM Metrics" not in capsys.readouterr().out
+
+
+class TestDryRunTrtllmEngineStatistics:
+    """The engine-yaml statistics keys srtctl defaults at load time are shown for
+    every TRT-LLM backend, so a run that expects the iteration-level trtllm_*
+    gauges can see before submitting that enable_iter_perf_stats is off."""
+
+    def test_dynamo_shows_iteration_stats_off_per_mode(self, capsys):
+        config = _make_config({"backend": {"type": "trtllm"}, "frontend": {"type": "dynamo"}})
+        show_config_details(config)
+        output = capsys.readouterr().out
+        assert "TRT-LLM Engine Statistics" in output
+        assert "prefill: enable_iter_perf_stats=false, return_perf_metrics=unset" in output
+        assert "decode: enable_iter_perf_stats=false, return_perf_metrics=unset" in output
+
+    def test_trtllm_serve_shows_both_defaults(self, capsys):
+        config = _make_config(
+            {"backend": {"type": "trtllm"}, "frontend": {"type": "trtllm_serve", "enable_multiple_frontends": False}}
+        )
+        show_config_details(config)
+        output = capsys.readouterr().out
+        assert "TRT-LLM Engine Statistics" in output
+        assert "prefill: enable_iter_perf_stats=false, return_perf_metrics=true" in output
+        assert "decode: enable_iter_perf_stats=false, return_perf_metrics=true" in output
+
+    def test_observability_shows_iteration_stats_on(self, capsys):
+        config = _make_config(
+            {"backend": {"type": "trtllm"}, "frontend": {"type": "dynamo"}, "observability": {"enabled": True}}
+        )
+        show_config_details(config)
+        output = capsys.readouterr().out
+        assert "prefill: enable_iter_perf_stats=true, return_perf_metrics=true" in output
+
+    def test_aggregated_layout_shows_the_agg_section(self, capsys):
+        # ResourceConfig.is_disaggregated is `prefill_nodes is not None or
+        # decode_nodes is not None`, so the agg layout needs the pair unset.
+        config = _make_config(
+            {
+                "backend": {"type": "trtllm", "trtllm_config": {"aggregated": {"max_seq_len": 8192}}},
+                "frontend": {"type": "dynamo"},
+                "dynamo": {"sidecar": True},
+                "resources": {
+                    "prefill_nodes": None,
+                    "decode_nodes": None,
+                    "prefill_workers": None,
+                    "decode_workers": None,
+                    "agg_nodes": 1,
+                    "agg_workers": 1,
+                },
+            }
+        )
+        show_config_details(config)
+        output = capsys.readouterr().out
+        assert "TRT-LLM Engine Statistics" in output
+        assert "agg: enable_iter_perf_stats=false" in output
+        assert "prefill: enable_iter_perf_stats" not in output
+
+    def test_non_trtllm_backend_has_no_engine_statistics_panel(self, capsys):
+        config = _make_config({"backend": {"type": "sglang"}, "frontend": {"type": "dynamo"}})
+        show_config_details(config)
+        assert "TRT-LLM Engine Statistics" not in capsys.readouterr().out
 
 
 class TestDryRunMounts:
@@ -275,8 +418,15 @@ class TestDryRunExecutionExtensions:
         # Built-in exporters are part of the default and must be visible.
         assert "dcgm_exporter" in output
         assert "node_exporter" in output
+        assert "process_exporter" in output
         assert ":9401" in output
         assert ":9101" in output
+        assert ":9256" in output
+        # The process exporter is host-native by default; dry-run must say so
+        # (and name the binary make setup installs) rather than print an image.
+        # Rich wraps the cell, so the two halves are asserted separately.
+        assert "host binary" in output
+        assert "configs/process-exporter" in output
 
     def test_dcgm_power_telemetry_details_shown(self, capsys):
         config = _make_config(
@@ -478,6 +628,151 @@ class TestDryRunExecutionExtensions:
         assert "100GB" in output
 
 
+class TestDryRunServices:
+    """services: command, env, source, and readiness must be visible before submitting."""
+
+    def test_service_command_env_and_readiness_shown(self, capsys):
+        config = _make_config(
+            {
+                "services": [
+                    {
+                        "name": "thunderagent-router",
+                        "command": ["python3", "-m", "dynamo.thunderagent_router", "--endpoint", "dyn://ns.comp.ep"],
+                        "env": {"ROUTER_LOG_LEVEL": "debug"},
+                        "readiness": {"port": 9100},
+                    }
+                ]
+            }
+        )
+        show_config_details(config)
+        output = capsys.readouterr().out
+        assert "Services:" in output
+        assert "thunderagent-router" in output
+        assert "dynamo.thunderagent_router" in output
+        assert "ROUTER_LOG_LEVEL" in output
+        assert "debug" in output
+        assert "tcp/9100" in output
+        assert "placement=head" in output
+
+    def test_source_and_build_command_shown(self, capsys):
+        config = _make_config(
+            {
+                "services": [
+                    {
+                        "name": "thunderagent-router",
+                        "command": ["python3", "-m", "dynamo.thunderagent_router"],
+                        "source": {"git": "https://github.com/ai-dynamo/dynamo", "rev": "refs/pull/14000/head"},
+                        "build_command": ["bash", "-lc", "maturin develop --uv && pip install -e ."],
+                    }
+                ]
+            }
+        )
+        show_config_details(config)
+        output = capsys.readouterr().out
+        assert "https://github.com/ai-dynamo/dynamo" in output
+        assert "refs/pull/14000/head" in output
+        assert "maturin develop" in output
+
+    def test_mooncake_store_shows_type_defaults(self, capsys):
+        config = _make_config(
+            {
+                "backend": {
+                    "type": "sglang",
+                    "mooncake_kv_store": {"container": "mooncake.sqsh"},
+                    "sglang_config": {
+                        "prefill": {"disaggregation-transfer-backend": "mooncake"},
+                        "decode": {"disaggregation-transfer-backend": "mooncake"},
+                    },
+                },
+                "services": [
+                    {
+                        "name": "store",
+                        "type": "mooncake-store",
+                        "placement": {"node": "workers"},
+                        "env": {"MOONCAKE_GLOBAL_SEGMENT_SIZE": "100gb"},
+                    }
+                ],
+            }
+        )
+        show_config_details(config)
+        output = capsys.readouterr().out
+        assert "mooncake.mooncake_store_service" in output
+        assert "type=mooncake-store" in output
+        assert "start=before_workers" in output
+        assert "critical=true" in output
+        assert "100gb" in output
+
+    def test_no_services_omits_the_panel(self, capsys):
+        # No discovery plane (static frontend), no tachometer: nothing declared, nothing implied.
+        config = _make_config(
+            {"frontend": {"type": "sglang-router"}, "observability": {"tachometer": {"enabled": False}}}
+        )
+        show_config_details(config)
+        assert "Services:" not in capsys.readouterr().out
+
+    def test_implicit_services_are_listed_and_marked(self, capsys):
+        config = _make_config({"frontend": {"type": "dynamo"}, "dynamo": {"request_plane": "nats"}})
+        show_config_details(config)
+        output = capsys.readouterr().out
+        assert "Services:" in output
+        assert "etcd" in output and "nats" in output
+        assert "implied by: frontend.type dynamo" in output
+        assert "implied by: dynamo.request_plane nats" in output
+        assert "/configs/etcd" in output
+        assert "dcgm-exporter" in output and "node-exporter" in output
+        assert "implied by: observability.tachometer default exporters" in output
+
+    def test_external_service_is_shown_as_not_launched(self, capsys):
+        config = _make_config(
+            {
+                "frontend": {"type": "dynamo"},
+                "services": [{"name": "etcd", "type": "etcd", "external": "http://etcd.shared:2379"}],
+            }
+        )
+        show_config_details(config)
+        output = capsys.readouterr().out
+        assert "external: http://etcd.shared:2379 (not launched)" in output
+        assert "implied by: frontend.type dynamo" not in output.split("nats")[0]
+
+
+class TestDryRunPostEval:
+    def test_post_eval_dispatch_shown(self, capsys):
+        config = _make_config(
+            {"post_eval": {"passthrough_env": ["EVAL_FRAMEWORK", "EVAL_SUITE"], "command": ["bash", "run.sh"]}}
+        )
+        show_config_details(config)
+        output = capsys.readouterr().out
+        assert "Post-eval dispatch:" in output
+        assert "bash run.sh" in output
+        assert "EVAL_FRAMEWORK, EVAL_SUITE" in output
+
+    def test_default_post_eval_is_silent(self, capsys):
+        show_config_details(_make_config())
+        assert "Post-eval dispatch" not in capsys.readouterr().out
+
+
+class TestDryRunDynamoSource:
+    """dynamo.source: the repo, ref, and whether it is pinned must be visible before submitting."""
+
+    def test_git_source_shown_unpinned_and_pinned(self, capsys):
+        base = {"frontend": {"type": "dynamo"}}
+        config = _make_config({**base, "dynamo": {"source": {"rev": "refs/pull/14000/head"}}})
+        show_config_details(config)
+        output = capsys.readouterr().out
+        assert "https://github.com/ai-dynamo/dynamo.git @ refs/pull/14000/head" in output
+        assert "resolved from rev at submit" in output
+
+        sha = "2ecbdfdf192c69c02c6d21e931d20d3b4a0bb64a"
+        config = _make_config({**base, "dynamo": {"source": {"rev": "v1.4.2", "sha": sha}}})
+        show_config_details(config)
+        assert f"dynamo source sha: {sha}" in capsys.readouterr().out
+
+    def test_pypi_source_shown(self, capsys):
+        config = _make_config({"frontend": {"type": "dynamo"}, "dynamo": {"source": {"pypi": "1.4.2"}}})
+        show_config_details(config)
+        assert "PyPI ai-dynamo==1.4.2" in capsys.readouterr().out
+
+
 class TestDryRunHetJobs:
     """Het structure panel appears only when het is enabled."""
 
@@ -539,7 +834,7 @@ class TestDryRunRemapRoot:
         assert "ENROOT_REMAP_ROOT" in output
 
     def test_remap_root_absent_for_sglang_frontend(self, capsys):
-        config = _make_config({"frontend": {"type": "sglang"}})
+        config = _make_config({"frontend": {"type": "sglang-router"}})
         show_config_details(config)
         output = capsys.readouterr().out
         assert "ENROOT_REMAP_ROOT" not in output
