@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import csv
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -14,10 +16,15 @@ import pytest
 
 from srtctl.analysis.power_energy_report import PowerReportError
 from srtctl.analysis.power_report_html import (
-    _build_facets,
+    _build_run_series,
     _dedupe_labels,
     _downsample_minmax,
+    _family_label,
+    _load_run_family,
+    _load_run_topology,
+    _model_select_html,
     _pareto_points,
+    _phase_bands,
     build,
     build_combined,
     build_combined_report,
@@ -53,7 +60,7 @@ def test_downsample_caps_point_count_and_keeps_the_peak() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Facet building
+# Run series building
 # ---------------------------------------------------------------------------
 
 
@@ -61,46 +68,76 @@ def _series(watts: list[float]) -> tuple[np.ndarray, np.ndarray]:
     return np.arange(len(watts), dtype=float), np.array(watts, dtype=float)
 
 
-def test_build_facets_groups_by_host_sorted_by_index() -> None:
+def test_build_run_series_sorted_by_host_then_index() -> None:
     per_device = {
         ("node-b", 0): _series([10.0, 12.0]),
         ("node-a", 1): _series([20.0, 22.0]),
         ("node-a", 0): _series([30.0, 32.0]),
     }
 
-    facets = _build_facets(per_device, label_fmt="gpu{index}")
+    series = _build_run_series(per_device, label_fmt="{host}/gpu{index}")
 
-    assert [f["host"] for f in facets] == ["node-a", "node-b"]
-    node_a = facets[0]
-    assert [s["label"] for s in node_a["series"]] == ["gpu0", "gpu1"]
+    assert [s["label"] for s in series] == ["node-a/gpu0", "node-a/gpu1", "node-b/gpu0"]
 
 
-def test_build_facets_assigns_slot_and_pattern_cycling_past_three_devices() -> None:
-    per_device = {("node-a", i): _series([float(i)] * 3) for i in range(4)}
+def test_build_run_series_colors_by_host_and_shades_by_device() -> None:
+    per_device = {(host, i): _series([float(i)] * 3) for host in ("node-a", "node-b") for i in range(2)}
 
-    facets = _build_facets(per_device, label_fmt="gpu{index}")
+    series = _build_run_series(per_device, label_fmt="{host}/gpu{index}")
 
-    slots = [s["slot"] for s in facets[0]["series"]]
-    patterns = [s["pattern"] for s in facets[0]["series"]]
-    assert slots == [0, 1, 2, 0]
-    assert patterns == [0, 0, 0, 1]  # the 4th device reuses slot 0 with the next stroke pattern
+    by_label = {s["label"]: s for s in series}
+    a0, a1, b0 = by_label["node-a/gpu0"], by_label["node-a/gpu1"], by_label["node-b/gpu0"]
+    # same host -> same hue, different lightness; different host -> different hue
+    assert a0["color"].split()[0] == a1["color"].split()[0]
+    assert a0["color"] != a1["color"]
+    assert a0["color"].split()[0] != b0["color"].split()[0]
+    assert all(s["pattern"] == 0 for s in series)
 
 
-def test_build_facets_time_shifts_to_the_earliest_sample_across_all_devices() -> None:
+def test_build_run_series_cycles_stroke_pattern_past_four_devices_on_one_host() -> None:
+    per_device = {("node-a", i): _series([float(i)] * 3) for i in range(5)}
+
+    series = _build_run_series(per_device, label_fmt="{host}/gpu{index}")
+
+    assert [s["pattern"] for s in series] == [0, 0, 0, 0, 1]
+
+
+def test_build_run_series_window_slices_samples_and_shifts_to_window_start() -> None:
+    per_device = {
+        ("node-a", 0): (np.array([100.0, 105.0, 110.0, 115.0]), np.array([1.0, 2.0, 3.0, 4.0])),
+        ("node-a", 1): (np.array([200.0, 201.0]), np.array([9.0, 9.0])),  # entirely outside the window
+    }
+
+    series = _build_run_series(per_device, label_fmt="{host}/gpu{index}", window=(104.0, 111.0))
+
+    assert [s["label"] for s in series] == ["node-a/gpu0"]
+    assert series[0]["t"] == [1.0, 6.0]
+    assert series[0]["w"] == [2.0, 3.0]
+    assert series[0]["stats"]["max"] == 3.0  # stats reflect the window, not the whole run
+
+
+def test_build_run_series_time_shifts_to_the_earliest_sample_across_all_devices() -> None:
     per_device = {
         ("node-a", 0): (np.array([100.0, 101.0]), np.array([1.0, 2.0])),
         ("node-a", 1): (np.array([105.0, 106.0]), np.array([3.0, 4.0])),
     }
 
-    facets = _build_facets(per_device, label_fmt="gpu{index}")
+    series = _build_run_series(per_device, label_fmt="{host}/gpu{index}")
 
-    series = facets[0]["series"]
     assert series[0]["t"] == [0.0, 1.0]
     assert series[1]["t"] == [5.0, 6.0]
 
 
-def test_build_facets_empty_input_returns_no_facets() -> None:
-    assert _build_facets({}, label_fmt="gpu{index}") == []
+def test_build_run_series_origin_overrides_the_time_zero() -> None:
+    per_device = {("node-a", 0): (np.array([105.0, 106.0]), np.array([1.0, 2.0]))}
+
+    series = _build_run_series(per_device, label_fmt="{host}/gpu{index}", origin=100.0)
+
+    assert series[0]["t"] == [5.0, 6.0]
+
+
+def test_build_run_series_empty_input_returns_no_series() -> None:
+    assert _build_run_series({}, label_fmt="{host}/gpu{index}") == []
 
 
 # ---------------------------------------------------------------------------
@@ -118,28 +155,50 @@ def _report_dict(
     return {
         "benchmark_type": "aiperf",
         "concurrency": concurrency,
+        "start_unix": 10.0,
+        "end_unix": 70.0,
+        "tpot_p50_ms": 8.0,
         "tpot_p90_ms": 12.0,
+        "joules_per_output_token": 3.0,
         "timing": {"computed": {"duration_seconds": 60.0}},
         "perf_per_watt": {
             "output_tokens_per_second": output_tps,
+            "total_tokens_per_second": None if output_tps is None else output_tps * 1.4,
             "output_tokens_per_second_per_gpu": tps_per_gpu,
             "num_gpus": num_gpus,
             "gpu_avg_power_w": 300.0,
             "cpu_avg_power_w": 40.0,
+            "combined_avg_power_w": 340.0,
             "output_tokens_per_second_per_gpu_watt": 0.16,
+            "output_tokens_per_second_per_combined_watt": 0.14,
         },
     }
 
 
-def test_pareto_points_extracts_xy_and_label() -> None:
+def test_pareto_points_extracts_metrics_and_label() -> None:
     reports = [_report_dict(concurrency=4, output_tps=100.0, tps_per_gpu=50.0)]
 
     points = _pareto_points(reports, run_label="runA")
 
     assert len(points) == 1
-    assert points[0]["label"] == "runA · aiperf c=4"
-    assert points[0]["x"] == 100.0
-    assert points[0]["y"] == 50.0
+    p = points[0]
+    assert p["label"] == "runA · aiperf c=4"
+    assert p["id"] == "runA::aiperf::c4"
+    assert p["run"] == "runA"
+    assert p["m"]["output_tps"] == 100.0
+    assert p["m"]["tps_per_gpu"] == 50.0
+    assert p["m"]["total_tps_per_gpu"] == pytest.approx(70.0)
+    assert p["m"]["inv_tpot_p90"] == pytest.approx(1000.0 / 12.0)
+    assert p["m"]["concurrency"] == 4
+
+
+def test_pareto_points_color_follows_run_position() -> None:
+    reports = [_report_dict(concurrency=4, output_tps=100.0, tps_per_gpu=50.0)]
+
+    a = _pareto_points(reports, run_label="runA", run_position=0)[0]["color"]
+    b = _pareto_points(reports, run_label="runB", run_position=1)[0]["color"]
+
+    assert a != b
 
 
 def test_pareto_points_skips_rows_with_no_gpu_count() -> None:
@@ -154,6 +213,36 @@ def test_pareto_points_skips_rows_with_no_gpu_count() -> None:
     assert points[0]["label"] == "runA · aiperf c=4"
 
 
+def test_power_scatter_keeps_only_points_with_both_power_legs() -> None:
+    from srtctl.analysis.power_report_html import _power_scatter_html
+
+    reports = [_report_dict(concurrency=4, output_tps=100.0, tps_per_gpu=50.0)]
+    points = _pareto_points(reports, run_label="runA")
+    points[0]["m"]["cpu_w"] = None
+    assert "No concurrency points have both" in _power_scatter_html(points)
+
+    points = _pareto_points(reports, run_label="runA")
+    content = _power_scatter_html(points)
+    assert 'data-x="cpu_w" data-y="gpu_w" data-frontier="off"' in content
+    assert points[0]["m"]["cpu_w"] == 40.0
+    assert points[0]["m"]["gpu_w"] == 300.0
+
+
+def test_baseline_view_needs_two_runs_and_lists_them_as_options() -> None:
+    from srtctl.analysis.power_report_html import _baseline_view_html
+
+    reports = [_report_dict(concurrency=4, output_tps=100.0, tps_per_gpu=50.0)]
+    one_run = _pareto_points(reports, run_label="runA")
+    assert "at least two runs" in _baseline_view_html(one_run)
+
+    two_runs = one_run + _pareto_points(reports, run_label="runB", run_position=1)
+    content = _baseline_view_html(two_runs)
+    assert '<option value="runA" selected>' in content
+    assert '<option value="runB">' in content
+    assert "<select data-baseline>" in content
+    assert all(p["bench"] == "aiperf" for p in two_runs)  # what the JS matches baseline points on
+
+
 def test_pareto_points_omits_run_label_prefix_when_none() -> None:
     reports = [_report_dict(concurrency=4, output_tps=100.0, tps_per_gpu=50.0)]
 
@@ -162,22 +251,21 @@ def test_pareto_points_omits_run_label_prefix_when_none() -> None:
     assert points[0]["label"] == "aiperf c=4"
 
 
-def test_pareto_points_includes_panel_fields() -> None:
+def test_pareto_points_includes_panel_and_hover_fields() -> None:
     reports = [_report_dict(concurrency=4, output_tps=100.0, tps_per_gpu=50.0)]
 
     points = _pareto_points(reports, run_label="runA")
 
     field_names = [name for name, _ in points[0]["fields"]]
-    assert field_names == [
-        "Concurrency",
-        "Output throughput",
-        "TPS / active GPU",
-        "P90 TPOT",
-        "Average GPU power",
-        "Average CPU power",
-        "TPS / GPU watt",
-        "Profile duration",
-    ]
+    assert "Concurrency / active GPUs" in field_names
+    assert "Output tok/s / active GPU" in field_names
+    assert "P90 TPOT" in field_names
+    assert "Average total GPU power" in field_names
+    assert "Average per-GPU power" in field_names
+    assert "Output tok/s / (GPU+CPU) W" in field_names
+    assert "Measured window" in field_names
+    hover_names = [name for name, _ in points[0]["hover"]]
+    assert hover_names == ["Concurrency / GPUs", "P90 TPOT", "Avg GPU power", "Output tok/s / GPU W"]
 
 
 # ---------------------------------------------------------------------------
@@ -269,11 +357,38 @@ def test_build_report_renders_summary_table_and_charts(tmp_path: Path) -> None:
     content = build_report(log_dir)
 
     assert "Throughput &amp; power by concurrency" in content
-    assert "GPU power over time" in content
-    assert "CPU socket power over time" in content
-    assert "node-a" in content
-    assert "gpu0" in content
-    assert "socket0" in content
+    assert "Power over time" in content
+    assert "GPU power (W)" in content
+    assert "CPU socket power (W)" in content
+    assert "node-a/gpu0" in content
+    assert "node-a/socket0" in content
+    # GPU and CPU are stacked in one chart group so the crosshair/zoom span both.
+    # Single run, single concurrency -> one per-concurrency card on the data table
+    # (which is also the run's series source) plus the Pareto page's whole-run copy.
+    assert content.count('class="conc-card"') == 1
+    assert content.count('data-source-id="run-src-0"') == 1
+    assert content.count('data-focus-bench="aiperf" data-focus-conc="4"') == 1
+    # a single-host run gets no host legend (nothing to toggle between)
+    assert 'class="legend host-legend"' not in content
+    # KPI stat cards in the header
+    assert "stat-card-num" in content
+    assert "GPUs" in content
+    assert "CPU sockets" in content
+
+
+def test_host_legend_lists_each_host_once_across_both_legs() -> None:
+    from srtctl.analysis.power_report_html import _host_legend_html
+
+    gpu = _build_run_series(
+        {(h, i): _series([1.0, 2.0]) for h in ("node-a", "node-b") for i in range(2)}, label_fmt="{host}/gpu{index}"
+    )
+    cpu = _build_run_series({("node-a", 0): _series([1.0, 2.0])}, label_fmt="{host}/socket{index}")
+
+    content = _host_legend_html(gpu, cpu)
+
+    assert content.count('class="legend-key host-key"') == 2
+    assert 'data-host="node-a"' in content
+    assert 'data-host="node-b"' in content
 
 
 def test_build_report_omits_pareto_tab_with_a_single_concurrency_point(tmp_path: Path) -> None:
@@ -287,6 +402,14 @@ def test_build_report_omits_pareto_tab_with_a_single_concurrency_point(tmp_path:
     content = build_report(log_dir)
 
     assert "Pareto view" not in content
+    # ... but the per-node power bars still appear, self-rendered from the embedded point
+    assert content.count('class="pareto-card node-power-card" data-point=') == 1
+    assert "node_power" in content
+    assert (
+        content.index("<table>")
+        < content.index('class="pareto-card node-power-card"')
+        < content.index('class="conc-card"')
+    )
 
 
 def test_build_report_includes_pareto_tab_with_multiple_concurrency_points(tmp_path: Path) -> None:
@@ -294,15 +417,22 @@ def test_build_report_includes_pareto_tab_with_multiple_concurrency_points(tmp_p
     _write_aiperf_run(log_dir, concurrencies=(4, 8))
     _write_gpu_csv(
         log_dir / "power" / "samples.csv",
-        [(1, 9.0, 1, "node-a", 0, "GPU-a", 100.0), (1, 21.0, 3, "node-a", 0, "GPU-a", 105.0)],
+        [
+            (1, 9.0, 1, "node-a", 0, "GPU-a", 100.0),
+            (1, 15.0, 2, "node-a", 0, "GPU-a", 120.0),  # inside the 10..20 s measured window
+            (1, 21.0, 3, "node-a", 0, "GPU-a", 105.0),
+        ],
     )
 
     content = build_report(log_dir)
 
     assert "Pareto view" in content
-    assert "Selected run" in content
+    assert "Inspect a point" in content
     assert "aiperf c=4" in content
     assert "aiperf c=8" in content
+    # single-run points have no run prefix in their id; each gets its own window charts
+    assert 'data-point-id="::aiperf::c4"' in content
+    assert 'data-point-id="::aiperf::c8"' in content
 
 
 def test_build_report_charts_only_without_benchmark_windows(tmp_path: Path) -> None:
@@ -319,7 +449,7 @@ def test_build_report_charts_only_without_benchmark_windows(tmp_path: Path) -> N
     content = build_report(log_dir)
 
     assert "No concurrency-level benchmark windows" in content
-    assert "GPU power over time" in content
+    assert "GPU power (W)" in content
 
 
 def test_build_report_raises_when_nothing_applies(tmp_path: Path) -> None:
@@ -363,6 +493,59 @@ def _write_run(log_dir: Path, *, gpu_watts: float) -> None:
     )
 
 
+def _write_config_yaml(
+    job_dir: Path, *, prefill_workers: int, gpus_per_prefill: int, decode_workers: int, gpus_per_decode: int
+) -> None:
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / "config.yaml").write_text(
+        "resources:\n"
+        f"  prefill_workers: {prefill_workers}\n"
+        f"  gpus_per_prefill: {gpus_per_prefill}\n"
+        f"  decode_workers: {decode_workers}\n"
+        f"  gpus_per_decode: {gpus_per_decode}\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Run topology classification
+# ---------------------------------------------------------------------------
+
+
+def test_load_run_topology_reads_resources_block(tmp_path: Path) -> None:
+    job_dir = tmp_path / "job"
+    log_dir = job_dir / "logs"
+    log_dir.mkdir(parents=True)
+    _write_config_yaml(job_dir, prefill_workers=1, gpus_per_prefill=4, decode_workers=4, gpus_per_decode=8)
+
+    result = _load_run_topology(log_dir)
+
+    assert result == ("P1x4+D4x8", 36)
+
+
+def test_load_run_topology_falls_back_to_the_copy_inside_logs(tmp_path: Path) -> None:
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    _write_config_yaml(log_dir, prefill_workers=1, gpus_per_prefill=4, decode_workers=1, gpus_per_decode=8)
+
+    assert _load_run_topology(log_dir) == ("P1x4+D1x8", 12)
+
+
+def test_load_run_topology_returns_none_without_a_config(tmp_path: Path) -> None:
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+
+    assert _load_run_topology(log_dir) is None
+
+
+def test_load_run_topology_returns_none_on_missing_resources_fields(tmp_path: Path) -> None:
+    job_dir = tmp_path / "job"
+    log_dir = job_dir / "logs"
+    log_dir.mkdir(parents=True)
+    (job_dir / "config.yaml").write_text("resources:\n  gpu_type: gb300\n")
+
+    assert _load_run_topology(log_dir) is None
+
+
 def test_build_combined_report_merges_rows_from_every_run(tmp_path: Path) -> None:
     run_a = tmp_path / "runA" / "logs"
     run_b = tmp_path / "runB" / "logs"
@@ -374,13 +557,64 @@ def test_build_combined_report_merges_rows_from_every_run(tmp_path: Path) -> Non
     assert "2 runs: runA, runB" in content
     assert content.count("<td>runA · aiperf c=4</td>") == 1
     assert content.count("<td>runB · aiperf c=4</td>") == 1
-    assert "GPU power over time — runA" in content
-    assert "GPU power over time — runB" in content
+    assert "runA — aiperf c=4" in content  # per-concurrency card titles
+    assert "runB — aiperf c=4" in content
+    # data-table tab: one card per run x concurrency, a run/concurrency checkbox filter
+    assert content.count('class="conc-card"') == 2
+    assert 'data-run="runA" data-conc="4"' in content
+    assert 'data-run="runB" data-conc="4"' in content
+    assert content.count('data-filter="run"') >= 2
+    # each card carries both a whole-run view and a profile-window view behind one global toggle
+    assert content.count('class="view-window-only"') == 1
+    assert content.count('<div class="view-window" hidden>') == 2
+    assert "runA — aiperf c=4 (profile window)" in content
+    assert '<input type="checkbox" data-filter="conc" value="4" checked>' in content
+    # series data embedded once per run and shared by that run's cards
+    assert content.count('data-source-id="run-src-0"') == 1
+    assert content.count('data-source-id="run-src-1"') == 1
+    # whole-run traces carry idle/warmup/profile phase shading
+    assert "data-phases=" in content
+    assert "Profile (measured)" in content
     # one shared table, not one table per run
     assert content.count("Throughput &amp; power by concurrency") == 1
     assert "Pareto view" in content
     assert "runA · aiperf c=4" in content
     assert "runB · aiperf c=4" in content
+    # clicking a Pareto point swaps in that run's power charts
+    assert 'data-pareto-run="runA"' in content
+    assert 'data-pareto-run="runB"' in content
+    # ... and its own measured-window charts, keyed by point id
+    assert 'data-point-id="runA::aiperf::c4"' in content
+    assert 'data-point-id="runB::aiperf::c4"' in content
+    # both scopes live in one card behind a checkbox; the window is the default
+    assert content.count('class="scope-whole-run"') == 1
+    assert '<div class="scope-run" hidden>' in content
+    # KPI stat cards in the header
+    assert "Runs" in content
+    assert "GPU devices tracked" in content
+    # tab order: Pareto (front), Data table, CPU vs GPU, vs baseline
+    assert (
+        content.index('data-tab="pareto"')
+        < content.index('data-tab="table"')
+        < content.index('data-tab="power"')
+        < content.index('data-tab="baseline"')
+    )
+    assert 'data-tab-panel="table" hidden' in content
+    assert 'data-tab-panel="power" hidden' in content
+
+
+def test_build_combined_report_sorts_by_gpu_count_then_concurrency(tmp_path: Path) -> None:
+    big = tmp_path / "big" / "logs"
+    small = tmp_path / "small" / "logs"
+    _write_run(big, gpu_watts=100.0)
+    _write_run(small, gpu_watts=200.0)
+    _write_config_yaml(tmp_path / "big", prefill_workers=1, gpus_per_prefill=4, decode_workers=4, gpus_per_decode=8)
+    _write_config_yaml(tmp_path / "small", prefill_workers=1, gpus_per_prefill=4, decode_workers=1, gpus_per_decode=8)
+
+    # Passed in "big first" order; the smaller topology should still render first.
+    content = build_combined_report([big, small])
+
+    assert content.index("P1x4+D1x8") < content.index("P1x4+D4x8")
 
 
 def test_build_combined_report_dedupes_identical_labels(tmp_path: Path) -> None:
@@ -493,3 +727,131 @@ def test_main_returns_nonzero_when_nothing_applies(tmp_path: Path, capsys: pytes
 
     assert exit_code == 1
     assert "error" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Phase bands
+# ---------------------------------------------------------------------------
+
+
+def _window(concurrency: int, start: float, end: float, warmup: tuple[float, float] | None = None) -> dict:
+    return {
+        "benchmark_type": "aiperf",
+        "concurrency": concurrency,
+        "start_unix": start,
+        "end_unix": end,
+        "warmup_start_unix": warmup[0] if warmup else None,
+        "warmup_end_unix": warmup[1] if warmup else None,
+    }
+
+
+def test_phase_bands_classify_idle_warmup_profile_in_order() -> None:
+    reports = [_window(4, 200.0, 300.0, warmup=(150.0, 200.0)), _window(1, 20.0, 100.0)]
+
+    bands = _phase_bands(reports, origin=0.0, run_end=400.0)
+
+    assert [(b["kind"], b["t0"], b["t1"]) for b in bands] == [
+        ("idle", 0.0, 20.0),
+        ("profile", 20.0, 100.0),
+        ("idle", 100.0, 150.0),
+        ("warmup", 150.0, 200.0),
+        ("profile", 200.0, 300.0),
+        ("idle", 300.0, 400.0),
+    ]
+    assert bands[4]["label"] == "aiperf c=4 profile"
+    assert (bands[4]["bench"], bands[4]["conc"]) == ("aiperf", 4)
+    assert "conc" not in bands[0]  # idle bands belong to no concurrency
+
+
+def test_phase_bands_are_relative_to_origin_and_clip_overlaps() -> None:
+    # warmup recorded as running past the profile start is clipped to it
+    reports = [_window(2, 1100.0, 1200.0, warmup=(1050.0, 1120.0))]
+
+    bands = _phase_bands(reports, origin=1000.0, run_end=1200.0)
+
+    assert [(b["kind"], b["t0"], b["t1"]) for b in bands] == [
+        ("idle", 0.0, 50.0),
+        ("warmup", 50.0, 100.0),
+        ("profile", 100.0, 200.0),
+    ]
+
+
+def test_phase_bands_empty_without_reports() -> None:
+    assert _phase_bands([], origin=0.0, run_end=10.0) == []
+
+
+# ---------------------------------------------------------------------------
+# Frontier families (GPU type x model)
+# ---------------------------------------------------------------------------
+
+
+def test_load_run_family_prefers_identity_repo_over_model_path() -> None:
+    config = {
+        "resources": {"gpu_type": "GB300"},
+        "identity": {"model": {"repo": "deepseek-ai/DeepSeek-V4-Pro"}},
+        "model": {"path": "/scratch/models/something-else"},
+    }
+
+    assert _load_run_family(config) == ("gb300", "deepseek-ai/DeepSeek-V4-Pro")
+
+
+def test_load_run_family_falls_back_to_model_path_basename() -> None:
+    config = {"resources": {"gpu_type": "gb300"}, "model": {"path": "hf:org/MiniMax-M3-NVFP4"}}
+    assert _load_run_family(config) == ("gb300", "MiniMax-M3-NVFP4")
+
+    config = {"resources": {"gpu_type": "gb300"}, "model": {"path": "/scratch/models/MiniMax-M3-NVFP4/"}}
+    assert _load_run_family(config) == ("gb300", "MiniMax-M3-NVFP4")
+
+
+def test_load_run_family_tolerates_missing_config_and_blocks() -> None:
+    assert _load_run_family(None) == (None, None)
+    assert _load_run_family({}) == (None, None)
+    assert _load_run_family({"identity": {"model": {}}, "model": {}}) == (None, None)
+
+
+def test_family_label_keeps_unknown_parts_visible() -> None:
+    assert _family_label("gb300", "deepseek-ai/DeepSeek-V4-Pro") == "gb300 · deepseek-ai/DeepSeek-V4-Pro"
+    assert _family_label(None, None) == "unknown gpu · unknown model"
+
+
+def test_pareto_points_group_and_colour_follow_the_family_not_the_run() -> None:
+    reports = [_report_dict(concurrency=4, output_tps=100.0, tps_per_gpu=50.0)]
+
+    a = _pareto_points(reports, run_label="runA", run_position=0, group="gb300 · m", group_position=0)[0]
+    b = _pareto_points(reports, run_label="runB", run_position=1, group="gb300 · m", group_position=0)[0]
+    c = _pareto_points(reports, run_label="runC", run_position=2, group="b200 · m", group_position=1)[0]
+
+    assert a["group"] == b["group"] and a["color"] == b["color"]  # same family -> same frontier + hue
+    assert a["run"] != b["run"]  # but still distinct runs (baseline / chart swapping key on run)
+    assert c["group"] != a["group"] and c["color"] != a["color"]
+
+
+def test_model_select_omitted_for_one_model_and_defaults_to_first_of_several() -> None:
+    reports = [_report_dict(concurrency=4, output_tps=100.0, tps_per_gpu=50.0)]
+    one = _pareto_points(reports, run_label="runA", model="M1")
+    assert _model_select_html(one) == ""
+
+    two = one + _pareto_points(reports, run_label="runB", run_position=1, model="M2")
+    content = _model_select_html(two)
+    assert '<option value="">All models</option>' in content
+    assert '<option value="M1" selected>M1</option>' in content
+    assert '<option value="M2">M2</option>' in content
+    assert two[0]["model"] == "M1" and two[1]["model"] == "M2"
+
+
+# ---------------------------------------------------------------------------
+# Embedded JavaScript
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available for a JS syntax check")
+def test_embedded_javascript_parses(tmp_path: Path) -> None:
+    """The inlined script is built from Python string fragments; a stray brace or
+    duplicated declaration breaks the whole page silently. Parse it with node."""
+    from srtctl.analysis.power_report_html import _JS
+
+    script = tmp_path / "report.js"
+    script.write_text(_JS)
+    result = subprocess.run(["node", "--check", str(script)], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
