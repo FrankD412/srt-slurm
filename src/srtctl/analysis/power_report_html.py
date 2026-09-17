@@ -145,6 +145,8 @@ def _build_run_series(
     window: tuple[float, float] | None = None,
     origin: float | None = None,
     max_buckets: int = _MAX_BUCKETS_PER_SERIES,
+    roles: dict[tuple[str, int], set[str]] | None = None,
+    host_roles: dict[str, set[str]] | None = None,
 ) -> list[dict]:
     """One series per device across the whole run -- every node combined onto a
     single chart -- sorted by ``(hostname, index)``, downsampled and time-shifted
@@ -163,6 +165,10 @@ def _build_run_series(
 
     Colour: one hue per host, spread in lightness across that host's devices, so a
     chart of ``N`` nodes x ``M`` GPUs reads as ``N`` colour families.
+
+    ``roles`` (per ``(host, index)``, from the GPU manifest) or ``host_roles`` (per
+    host -- used for CPU sockets, which inherit the roles of the GPUs on their node)
+    tag each series with its worker roles so the legend can toggle by role.
     """
     populated: dict[tuple[str, int], tuple[np.ndarray, np.ndarray]] = {}
     for key, (times, watts) in per_device.items():
@@ -196,6 +202,7 @@ def _build_run_series(
             {
                 "label": label_fmt.format(host=host, index=index),
                 "host": host,
+                "roles": sorted((roles or {}).get((host, index)) or (host_roles or {}).get(host) or ()),
                 "color": _series_color(hosts.index(host), device_position, devices_on_host[host]),
                 "pattern": (device_position // _MAX_SOLID_DEVICES_PER_HOST) % len(_STROKE_PATTERNS),
                 "t": rel_times.tolist(),
@@ -245,6 +252,14 @@ tr:last-child td { border-bottom: none; }
 .host-legend { margin: 0 0 12px; padding-bottom: 10px; border-bottom: 1px solid var(--grid); }
 .legend-label { color: var(--ink-muted); font-size: 11px; text-transform: uppercase; letter-spacing: .02em; align-self: center; }
 .host-key { font-weight: 600; }
+.role-legend { margin: 0 0 8px; }
+.chart-notices { color: var(--slot-1); font-size: 12px; margin: 0 0 10px; padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--slot-1) 45%, transparent); border-radius: 6px;
+  background: color-mix(in srgb, var(--slot-1) 8%, transparent); }
+.chart-notices div + div { margin-top: 3px; }
+.row-warn { color: var(--slot-1); cursor: help; }
+.role-key { font-weight: 600; text-transform: capitalize; }
+.role-count { color: var(--ink-muted); font-weight: 400; }
 .legend-swatch { width: 14px; height: 3px; border-radius: 1px; }
 .stat-cards { display: flex; gap: 12px; margin: 4px 0 24px; flex-wrap: wrap; }
 .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 12px 18px; min-width: 110px; }
@@ -254,7 +269,12 @@ tr:last-child td { border-bottom: none; }
 .chart-group-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin: 0 0 8px; }
 .zoom-hint { color: var(--ink-muted); font-size: 11px; }
 .chart-sub + .chart-sub { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--grid); }
+.chart-sub-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .chart-sub-title { font-weight: 600; font-size: 13px; margin: 0 0 4px; }
+.yscale-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; font-size: 11px; }
+.yscale-btn { background: transparent; color: var(--ink-muted); border: 0; padding: 1px 8px; cursor: pointer; font: inherit; font-size: 11px; }
+.yscale-btn + .yscale-btn { border-left: 1px solid var(--line); }
+.yscale-btn.on { background: var(--surface-2, rgba(127,127,127,0.18)); color: var(--ink); font-weight: 600; }
 .zoom-band { fill: var(--slot-0); opacity: 0; pointer-events: none; }
 .power-chart-run[hidden], .point-charts[hidden] { display: none; }
 .chart-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 12px 16px 4px; margin-bottom: 16px; }
@@ -365,6 +385,23 @@ function fmtNum(v, decimals) {
   return v.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
 
+// Axis labels for big magnitudes: 950, 1.2k, 48k, 1.5M. Tooltips keep full values.
+function fmtAxis(v) {
+  const a = Math.abs(v);
+  if (a >= 1e6) return (v / 1e6).toLocaleString(undefined, { maximumFractionDigits: a >= 1e7 ? 0 : 1 }) + "M";
+  if (a >= 1e3) return (v / 1e3).toLocaleString(undefined, { maximumFractionDigits: a >= 1e4 ? 0 : 1 }) + "k";
+  return v.toLocaleString(undefined, { maximumFractionDigits: a >= 100 ? 0 : a >= 10 ? 1 : 2 });
+}
+
+// Round tick positions for a linear axis: step is 1/2/2.5/5 x 10^n.
+function linearTicks(max, n) {
+  const rough = max / n, mag = Math.pow(10, Math.floor(Math.log10(rough || 1)));
+  const step = [1, 2, 2.5, 5, 10].map(s => s * mag).find(s => s >= rough) || mag;
+  const out = [];
+  for (let v = 0; v <= max + 1e-9; v += step) out.push(v);
+  return out;
+}
+
 function nearestIndex(arr, target) {
   let lo = 0, hi = arr.length - 1;
   while (lo < hi) {
@@ -404,6 +441,7 @@ function initChartGroup(group) {
   }
   const charts = [...group.querySelectorAll(".chart-sub")].map((sub, i) => ({
     sub,
+    unit: sub.dataset.unit === undefined ? "W" : sub.dataset.unit,
     data: sub.dataset.series ? JSON.parse(sub.dataset.series) : (sourceSubs ? sourceSubs[i] : []),
     svg: sub.querySelector("svg.chart"),
     overlay: sub.querySelector(".overlay"),
@@ -412,6 +450,7 @@ function initChartGroup(group) {
     tooltip: sub.querySelector(".tooltip"),
     hidden: new Set(),
     lineEls: [],
+    scale: "linear",
   })).filter(c => c.data.length);
   if (!charts.length) return;
   if (group.dataset.sourceId) group.__subsData = charts.map(c => c.data);
@@ -454,6 +493,14 @@ function initChartGroup(group) {
     c.svg.insertBefore(c.gGrid, c.overlay); c.svg.insertBefore(c.gLines, c.overlay); c.svg.appendChild(c.gLabels);
   });
 
+  charts.forEach(c => {
+    c.sub.querySelectorAll(".yscale-btn").forEach(btn => btn.addEventListener("click", () => {
+      c.scale = btn.dataset.scale;
+      c.sub.querySelectorAll(".yscale-btn").forEach(b => b.classList.toggle("on", b === btn));
+      draw();
+    }));
+  });
+
   function draw() {
     const zoomed = tMin > fullMin || tMax < fullMax;
     if (hint) hint.textContent = zoomed ? "zoomed \u00b7 double-click for the whole run" : "drag to zoom";
@@ -469,20 +516,39 @@ function initChartGroup(group) {
         rect.appendChild(title);
         c.gGrid.appendChild(rect);
       });
-      // y scale: max over the visible time range, every series (hidden lines don't rescale).
-      let wMax = 0;
-      c.data.forEach(s => {
+      // y scale: max over the visible time range of the *visible* series, so hiding a
+      // role or host (or zooming) rescales to what's left. Falls back to every
+      // series when all are hidden so the axis doesn't collapse.
+      let wMax = 0, wMinPos = Infinity;
+      const anyVisible = c.data.some((s, i) => !c.hidden.has(i));
+      c.data.forEach((s, i) => {
+        if (anyVisible && c.hidden.has(i)) return;
         const lo = lowerBound(s.t, tMin), hi = lowerBound(s.t, tMax + 1e-9);
-        for (let j = lo; j < hi; j++) if (s.w[j] > wMax) wMax = s.w[j];
+        for (let j = lo; j < hi; j++) { const v = s.w[j]; if (v > wMax) wMax = v; if (v > 0 && v < wMinPos) wMinPos = v; }
       });
       wMax = wMax <= 0 ? 1 : wMax * 1.08;
-      const y = w => padT + plotH - (w / wMax) * plotH;
+      const isLog = c.scale === "log" && isFinite(wMinPos);
+      // Log floor: one decade below the smallest positive value, clamped so zeros and
+      // gaps still land on the axis instead of at -infinity.
+      const logLo = isLog ? Math.pow(10, Math.floor(Math.log10(wMinPos))) : 0;
+      const lgLo = isLog ? Math.log10(logLo) : 0, lgSpan = isLog ? Math.log10(wMax) - lgLo || 1 : 1;
+      const y = isLog
+        ? w => padT + plotH - (w <= logLo ? 0 : (Math.log10(w) - lgLo) / lgSpan) * plotH
+        : w => padT + plotH - (w / wMax) * plotH;
 
-      [0, 0.25, 0.5, 0.75, 1].forEach(f => {
-        const gy = padT + plotH - f * plotH;
+      let ticks;
+      if (isLog) {
+        ticks = [];
+        for (let e = Math.ceil(lgLo); Math.pow(10, e) <= wMax; e++) ticks.push(Math.pow(10, e));
+        if (!ticks.length || ticks[0] > logLo) ticks.unshift(logLo);
+        if (ticks.length <= 2) [2, 5].forEach(m => { const v = m * logLo; if (v < wMax) ticks.push(v); const v2 = m * logLo * 10; if (v2 < wMax) ticks.push(v2); });
+        ticks.sort((a, b) => a - b);
+      } else ticks = linearTicks(wMax, 4);
+      ticks.forEach(v => {
+        const gy = y(v);
         c.gGrid.appendChild(svgEl("line", { class: "gridline", x1: padL, x2: W - padR, y1: gy, y2: gy }));
         const label = svgEl("text", { class: "axis-text", x: padL - 6, y: gy + 3, "text-anchor": "end" });
-        label.textContent = Math.round(f * wMax).toLocaleString();
+        label.textContent = fmtAxis(v);
         c.gLabels.appendChild(label);
       });
       [0, 0.25, 0.5, 0.75, 1].forEach(f => {
@@ -509,7 +575,7 @@ function initChartGroup(group) {
           const lastT = s.t[s.t.length - 1], lastW = s.w[s.w.length - 1];
           const dot = svgEl("circle", { cx: x(lastT), cy: y(lastW), r: 3, fill: s.color, stroke: "var(--surface)", "stroke-width": "1.5" });
           c.gLines.appendChild(dot); els.push(dot);
-          if (c.data.length <= MAX_END_LABELS) {
+          if (c.data.length > 1 && c.data.length <= MAX_END_LABELS) {  // a lone series is already named by its title
             const label = svgEl("text", { class: "end-label", x: Math.min(x(lastT) + 6, W - padR - 2), y: y(lastW) + 3 });
             label.textContent = s.label;
             c.gLabels.appendChild(label); els.push(label);
@@ -551,7 +617,7 @@ function initChartGroup(group) {
         const key = document.createElement("span"); key.className = "t-key"; key.style.background = r.color;
         const label = document.createElement("span"); label.textContent = r.label;
         const val = document.createElement("span"); val.className = "t-val"; val.style.marginLeft = "auto";
-        val.textContent = r.value.toFixed(1) + " W";
+        val.textContent = fmtNum(r.value, 1) + (c.unit ? " " + c.unit : "");
         row.appendChild(key); row.appendChild(label); row.appendChild(val);
         tip.appendChild(row);
       });
@@ -597,7 +663,7 @@ function initChartGroup(group) {
 
     c.keys = [...c.sub.querySelectorAll(".legend-key")];
     c.keys.forEach((key, i) => {
-      key.addEventListener("click", () => { setHidden(c, i, !c.hidden.has(i)); syncHostKeys(); });
+      key.addEventListener("click", () => { setHidden(c, i, !c.hidden.has(i)); syncHostKeys(); syncRoleKeys(); rescale(); });
     });
   });
 
@@ -606,6 +672,9 @@ function initChartGroup(group) {
     c.keys[i].classList.toggle("off", off);
     (c.lineEls[i] || []).forEach(el => { el.style.display = off ? "none" : ""; });
   }
+  // Visibility changes rescale the y-axis; callers batch their setHidden calls and
+  // redraw once.
+  function rescale() { draw(); }
 
   // Host chips: one click hides/shows every device on that host in every chart of
   // the group. A chip reads "partial" when only some of its devices are hidden.
@@ -628,7 +697,31 @@ function initChartGroup(group) {
       const devs = hostDevices(key.dataset.host);
       const allOff = devs.every(([c, i]) => c.hidden.has(i));
       devs.forEach(([c, i]) => setHidden(c, i, !allOff));
-      syncHostKeys();
+      syncHostKeys(); syncRoleKeys(); rescale();
+    });
+  });
+
+  // Role chips (prefill / decode ...): toggle every device tagged with that role.
+  const roleKeys = [...group.querySelectorAll(".role-key")];
+  function roleDevices(role) {
+    const out = [];
+    charts.forEach(c => c.data.forEach((s, i) => { if ((s.roles || []).includes(role)) out.push([c, i]); }));
+    return out;
+  }
+  function syncRoleKeys() {
+    roleKeys.forEach(key => {
+      const devs = roleDevices(key.dataset.role);
+      const hiddenN = devs.filter(([c, i]) => c.hidden.has(i)).length;
+      key.classList.toggle("off", devs.length > 0 && hiddenN === devs.length);
+      key.classList.toggle("partial", hiddenN > 0 && hiddenN < devs.length);
+    });
+  }
+  roleKeys.forEach(key => {
+    key.addEventListener("click", () => {
+      const devs = roleDevices(key.dataset.role);
+      const allOff = devs.every(([c, i]) => c.hidden.has(i));
+      devs.forEach(([c, i]) => setHidden(c, i, !allOff));
+      syncHostKeys(); syncRoleKeys(); rescale();
     });
   });
 
@@ -702,6 +795,13 @@ function renderNodePower(card, point) {
   card.hidden = !nodes.length;
   if (!nodes.length) return;
   sub.textContent = point.label;
+  // Coverage warnings (e.g. "CPU power missing ...") so a GPU-only bar isn't read as
+  // the node's whole draw.
+  const notices = card.querySelector(".node-power-notices");
+  const powerWarnings = (point.warnings || []).filter(w => /power (missing|not collected)/i.test(w));
+  notices.innerHTML = "";
+  powerWarnings.forEach(w => { const d = document.createElement("div"); d.textContent = "\u26a0 " + w; notices.appendChild(d); });
+  notices.hidden = !powerWarnings.length;
 
   const anyRails = nodes.some(n => n.cpu_rails_w && Object.keys(n.cpu_rails_w).length);
   const rows = nodes.map(n => {
@@ -776,9 +876,10 @@ const PARETO_AXES = {
   tpot_p90:        { label: "P90 TPOT (ms)",             key: "tpot_p90",        better: "min" },
   tps_per_gpu_w:   { label: "Output tok/s / GPU W",      key: "tps_per_gpu_w",   better: "max" },
   tps_per_total_w: { label: "Output tok/s / (GPU+CPU) W", key: "tps_per_total_w", better: "max" },
-  gpu_w:           { label: "Avg GPU power (W)",         key: "gpu_w",           better: "min" },
-  cpu_w:           { label: "Avg CPU power (W)",         key: "cpu_w",           better: "min" },
-  total_w:         { label: "Avg GPU+CPU power (W)",     key: "total_w",         better: "min" },
+  gpu_w:           { label: "Total GPU power (W)",       key: "gpu_w",           better: "min" },
+  gpu_w_per_gpu:   { label: "Power per GPU (W)",         key: "gpu_w_per_gpu",   better: "min" },
+  cpu_w:           { label: "Total CPU power (W)",       key: "cpu_w",           better: "min" },
+  total_w:         { label: "Total GPU+CPU power (W)",   key: "total_w",         better: "min" },
   concurrency:     { label: "Concurrency",               key: "concurrency",     better: "max" },
 };
 
@@ -1095,19 +1196,27 @@ def _fmt(value: float | None, decimals: int = 2) -> str:
 
 _SUMMARY_TABLE_HEADER = (
     "<tr><th>Run</th><th>Output tok/s</th><th>Tok/s/GPU</th><th>TPOT p50 (ms)</th><th>TPOT p90 (ms)</th>"
-    "<th>Avg GPU W</th><th>Avg CPU W</th><th>GPU-only tok/s/W</th><th>CPU-only tok/s/W</th>"
+    "<th>Total GPU W</th><th>W / GPU</th><th>Total CPU W</th><th>GPU-only tok/s/W</th><th>CPU-only tok/s/W</th>"
     "<th>Combined tok/s/W</th></tr>"
 )
 
 
-def _summary_rows_html(reports: list[dict], *, run_label: str | None = None) -> str:
+def _summary_rows_html(
+    reports: list[dict], *, run_label: str | None = None, coverage_warnings: list[str] | None = None
+) -> str:
     """``<tr>``s for one run's per-concurrency reports.
 
     ``run_label`` prefixes the Run cell -- set only in the combined multi-directory
     report, where rows from different runs are interleaved in one table and need
-    to say which run they came from.
+    to say which run they came from. ``coverage_warnings`` (missing power legs)
+    put a ⚠ marker on the Run cell with the explanation as its tooltip.
     """
     rows = []
+    warn_mark = ""
+    if coverage_warnings:
+        warn_mark = (
+            f' <span class="row-warn" title="{html.escape(" ".join(coverage_warnings), quote=True)}">\u26a0</span>'
+        )
     for r in reports:
         w = r
         ppw = r["perf_per_watt"]
@@ -1118,12 +1227,13 @@ def _summary_rows_html(reports: list[dict], *, run_label: str | None = None) -> 
         )
         rows.append(
             "<tr>"
-            f"<td>{html.escape(run_cell)}</td>"
+            f"<td>{html.escape(run_cell)}{warn_mark}</td>"
             f"<td>{_fmt(ppw['output_tokens_per_second'])}</td>"
             f"<td>{_fmt(ppw['output_tokens_per_second_per_gpu'])} ({ppw['num_gpus']} gpu)</td>"
             f"<td>{_fmt(w['tpot_p50_ms'])}</td>"
             f"<td>{_fmt(w['tpot_p90_ms'])}</td>"
-            f"<td>{_fmt(ppw['gpu_avg_power_w'])}</td>"
+            f"<td>{_fmt(ppw['gpu_avg_power_w'], 0)}</td>"
+            f"<td>{_fmt(_per_gpu(ppw['gpu_avg_power_w'], ppw['num_gpus']), 0)}</td>"
             f"<td>{_fmt(ppw['cpu_avg_power_w'])}</td>"
             f"<td>{_fmt(ppw['output_tokens_per_second_per_gpu_watt'], 4)}</td>"
             f"<td>{_fmt(ppw['output_tokens_per_second_per_cpu_watt'], 4)}</td>"
@@ -1137,7 +1247,7 @@ def _summary_table_html(reports: list[dict]) -> str:
     return f"<table><thead>{_SUMMARY_TABLE_HEADER}</thead><tbody>{_summary_rows_html(reports)}</tbody></table>"
 
 
-def _stats_table_html(series: list[dict]) -> str:
+def _stats_table_html(series: list[dict], unit: str = "W") -> str:
     rows = []
     for s in series:
         st = s["stats"]
@@ -1148,7 +1258,8 @@ def _stats_table_html(series: list[dict]) -> str:
             f"<td>{_fmt(st['p95'])}</td><td>{_fmt(st['max'])}</td>"
             "</tr>"
         )
-    header = "<tr><th>Device</th><th>Mean W</th><th>Min W</th><th>P50 W</th><th>P95 W</th><th>Max W</th></tr>"
+    u = f" {unit}" if unit else ""
+    header = f"<tr><th>Series</th><th>Mean{u}</th><th>Min{u}</th><th>P50{u}</th><th>P95{u}</th><th>Max{u}</th></tr>"
     return f'<table class="stats-table"><thead>{header}</thead><tbody>{"".join(rows)}</tbody></table>'
 
 
@@ -1189,6 +1300,10 @@ def _family_label(gpu_type: str | None, model: str | None) -> str:
     return f"{gpu_type or 'unknown gpu'} · {model or 'unknown model'}"
 
 
+def _per_gpu(total: float | None, num_gpus: int | None) -> float | None:
+    return None if total is None or not num_gpus else total / num_gpus
+
+
 def _cpu_sensor_summary(report: dict) -> str:
     """Short provenance line for the inspect panel: which ACPI/DCGM channel the CPU
     socket energy was integrated from, e.g. ``Grace Power Socket N (ACPI envelope)``;
@@ -1212,6 +1327,7 @@ def _pareto_points(
     group: str | None = None,
     group_position: int | None = None,
     model: str | None = None,
+    coverage_warnings: list[str] | None = None,
 ) -> list[dict]:
     """Scatter points for the Pareto view, one per summary-table row.
 
@@ -1262,6 +1378,7 @@ def _pareto_points(
                     "tps_per_gpu_w": ppw["output_tokens_per_second_per_gpu_watt"],
                     "tps_per_total_w": ppw["output_tokens_per_second_per_combined_watt"],
                     "gpu_w": ppw["gpu_avg_power_w"],
+                    "gpu_w_per_gpu": _per_gpu(ppw["gpu_avg_power_w"], num_gpus),
                     "cpu_w": ppw["cpu_avg_power_w"],
                     "total_w": combined_w,
                     "concurrency": r["concurrency"],
@@ -1269,7 +1386,8 @@ def _pareto_points(
                 "hover": [
                     ("Concurrency / GPUs", f"{r['concurrency']} / {num_gpus}"),
                     ("P90 TPOT", f"{_fmt(r['tpot_p90_ms'])} ms"),
-                    ("Avg GPU power", f"{_fmt(ppw['gpu_avg_power_w'], 0)} W"),
+                    ("Total GPU power", f"{_fmt(ppw['gpu_avg_power_w'], 0)} W"),
+                    ("Per GPU", f"{_fmt(_per_gpu(ppw['gpu_avg_power_w'], num_gpus), 0)} W"),
                     ("Output tok/s / GPU W", _fmt(ppw["output_tokens_per_second_per_gpu_watt"], 3)),
                 ],
                 "fields": [
@@ -1281,20 +1399,18 @@ def _pareto_points(
                     ("P50 TPOT", f"{_fmt(r['tpot_p50_ms'])} ms"),
                     ("P90 TPOT", f"{_fmt(r['tpot_p90_ms'])} ms"),
                     ("1 / P90 TPOT", f"{_fmt(_inverse_ms(r['tpot_p90_ms']), 1)} tok/s/user"),
-                    ("Average total GPU power", f"{_fmt(ppw['gpu_avg_power_w'], 0)} W"),
-                    (
-                        "Average per-GPU power",
-                        f"{_fmt(None if not num_gpus or ppw['gpu_avg_power_w'] is None else ppw['gpu_avg_power_w'] / num_gpus, 1)} W",
-                    ),
-                    ("Average total CPU power", f"{_fmt(ppw['cpu_avg_power_w'], 0)} W"),
-                    ("Average GPU+CPU power", f"{_fmt(combined_w, 0)} W"),
+                    ("Total GPU power (all GPUs, avg)", f"{_fmt(ppw['gpu_avg_power_w'], 0)} W"),
+                    ("Power per GPU (avg)", f"{_fmt(_per_gpu(ppw['gpu_avg_power_w'], num_gpus), 1)} W"),
+                    ("Total CPU power (all sockets, avg)", f"{_fmt(ppw['cpu_avg_power_w'], 0)} W"),
+                    ("Total GPU+CPU power (avg)", f"{_fmt(combined_w, 0)} W"),
                     ("Output tok/s / GPU W", _fmt(ppw["output_tokens_per_second_per_gpu_watt"], 4)),
                     ("Output tok/s / (GPU+CPU) W", _fmt(ppw["output_tokens_per_second_per_combined_watt"], 4)),
                     ("Joules / output token", _fmt(r["joules_per_output_token"], 4)),
                     ("Measured window", f"{_fmt(duration, 1)} s"),
                     ("CPU power source", _cpu_sensor_summary(r)),
                 ],
-                "warnings": [w for w in r.get("warnings", []) if "CPU energy mismatch" in w],
+                "warnings": [w for w in r.get("warnings", []) if "CPU energy mismatch" in w]
+                + list(coverage_warnings or ()),
                 "node_power": r.get("node_power", []),
             }
         )
@@ -1311,9 +1427,10 @@ _PARETO_AXIS_OPTIONS: tuple[tuple[str, str], ...] = (
     ("tpot_p90", "P90 TPOT (ms)"),
     ("tps_per_gpu_w", "Output tok/s / GPU W"),
     ("tps_per_total_w", "Output tok/s / (GPU+CPU) W"),
-    ("gpu_w", "Avg GPU power (W)"),
-    ("cpu_w", "Avg CPU power (W)"),
-    ("total_w", "Avg GPU+CPU power (W)"),
+    ("gpu_w", "Total GPU power (W)"),
+    ("gpu_w_per_gpu", "Power per GPU (W)"),
+    ("cpu_w", "Total CPU power (W)"),
+    ("total_w", "Total GPU+CPU power (W)"),
     ("concurrency", "Concurrency"),
 )
 _PARETO_DEFAULT_X = "inv_tpot_p90"
@@ -1358,6 +1475,7 @@ def _node_power_card_html(point: dict | None = None) -> str:
   <p class="pareto-subtitle">Window-average power for {what}, one bar per allocated node. GPU is the
   node's GPUs summed; CPU is the socket envelope (ACPI total / DCGM). When the collector recorded component rails,
   the CPU bar is drawn as its rails (CPU rail, SoC, DRAM) plus the remainder of the envelope they don't account for.</p>
+  <div class="chart-notices node-power-notices" hidden></div>
   <div class="node-power-legend legend"></div>
   <div class="node-power-root"><svg class="node-power-svg"></svg><div class="tooltip node-power-tooltip"></div></div>
 </div>
@@ -1452,8 +1570,9 @@ def _power_scatter_html(points: list[dict]) -> str:
     points_json = html.escape(json.dumps(plottable), quote=True)
     return f"""
 <div class="pareto-card">
-  <h3>CPU vs GPU power</h3>
-  <p class="pareto-subtitle">Average CPU socket power (all sockets) against average GPU power (all GPUs) over each
+  <h3>Total CPU vs total GPU power</h3>
+  <p class="pareto-subtitle">Run totals, averaged over each point's measured window: all CPU sockets summed against all GPUs summed.
+  Divide by the point's socket / GPU count for per-device figures (the inspect panel shows per-GPU). Over each
   point's measured window. Hover for the headline numbers; click to inspect.</p>
   <div class="pareto-layout">
     <div>
@@ -1544,6 +1663,7 @@ def _concurrency_cards_html(
             bundle["cpu_series"],
             phase_bands=bands,
             title=title,
+            notices=bundle.get("coverage_warnings"),
             source_id=run_charts_source_id if i == 0 else None,
             reuse_source=None if i == 0 else run_charts_source_id,
             focus=(bench, conc),
@@ -1606,14 +1726,19 @@ def _tabs_html(pareto_html: str, table_html: str, power_html: str, baseline_html
 """
 
 
-def _chart_sub_html(title: str, series: list[dict], *, embed: bool = True) -> str:
+def _chart_sub_html(title: str, series: list[dict], *, embed: bool = True, unit: str = "W") -> str:
     """``embed=False`` leaves ``data-series`` empty; the group's ``data-source`` tells
     the JS which sibling group to copy the (identical) series from -- see
     ``_power_charts_html``."""
     series_json = html.escape(json.dumps(series), quote=True) if embed else ""
     return f"""
-<div class="chart-sub" data-series="{series_json}">
-  <p class="chart-sub-title">{html.escape(title)}</p>
+<div class="chart-sub" data-series="{series_json}" data-unit="{html.escape(unit, quote=True)}">
+  <div class="chart-sub-head">
+    <p class="chart-sub-title">{html.escape(title)}</p>
+    <span class="yscale-toggle" title="y-axis scale">
+      <button type="button" class="yscale-btn on" data-scale="linear">linear</button><button type="button" class="yscale-btn" data-scale="log">log</button>
+    </span>
+  </div>
   <div class="chart-root chart-wrap">
     <svg class="chart" viewBox="0 0 900 220" preserveAspectRatio="xMinYMin meet">
       <rect class="zoom-band"></rect>
@@ -1623,10 +1748,36 @@ def _chart_sub_html(title: str, series: list[dict], *, embed: bool = True) -> st
     <div class="tooltip"></div>
   </div>
   {_legend_html(series)}
-  <span class="stats-toggle">show device stats table</span>
-  {_stats_table_html(series)}
+  <span class="stats-toggle">show stats table</span>
+  {_stats_table_html(series, unit)}
 </div>
 """
+
+
+def _notices_html(notices: list[str] | None) -> str:
+    if not notices:
+        return ""
+    items = "".join(f"<div>\u26a0 {html.escape(n)}</div>" for n in notices)
+    return f'<div class="chart-notices">{items}</div>'
+
+
+def _role_legend_html(gpu_series: list[dict], cpu_series: list[dict]) -> str:
+    """One chip per worker role (prefill / decode / aggregated ...); clicking toggles
+    every device carrying that role across both charts. Omitted when the run has
+    fewer than two roles (nothing to separate)."""
+    roles: dict[str, int] = {}
+    for series in (*gpu_series, *cpu_series):
+        for role in series.get("roles", ()):
+            roles[role] = roles.get(role, 0) + 1
+    if len(roles) < 2:
+        return ""
+    keys = "".join(
+        f'<span class="legend-key role-key" data-role="{html.escape(role, quote=True)}" '
+        f'title="click to hide/show every device with this role">{html.escape(role)} '
+        f'<span class="role-count">({count})</span></span>'
+        for role, count in sorted(roles.items())
+    )
+    return f'<div class="legend role-legend"><span class="legend-label">Roles</span>{keys}</div>'
 
 
 def _host_legend_html(gpu_series: list[dict], cpu_series: list[dict]) -> str:
@@ -1708,8 +1859,13 @@ def _power_charts_html(
     source_id: str | None = None,
     reuse_source: str | None = None,
     focus: tuple[str, int] | None = None,
+    extra_subs: list[tuple[str, list[dict]]] | None = None,
+    notices: list[str] | None = None,
 ) -> str:
-    """GPU chart stacked over CPU chart for one run in a single panel. Both legs share
+    """GPU chart stacked over CPU chart for one run in a single panel.
+
+    ``notices`` (e.g. "CPU power missing ...") render as a warning strip at the top
+    of the panel so a missing leg is explained rather than silently absent. Both legs share
     one time origin (see ``_build_run_series``'s ``origin``), so the JS can drive one
     crosshair and one zoom range across both -- see ``initChartGroup``.
 
@@ -1726,6 +1882,9 @@ def _power_charts_html(
         subs.append(_chart_sub_html("GPU power (W)", gpu_series, embed=reuse_source is None))
     if cpu_series:
         subs.append(_chart_sub_html("CPU socket power (W)", cpu_series, embed=reuse_source is None))
+    for title_extra, series in extra_subs or ():
+        if series:
+            subs.append(_chart_sub_html(title_extra, series, embed=reuse_source is None, unit=""))
     if not subs:
         return ""
     bands = phase_bands or []
@@ -1744,11 +1903,162 @@ def _power_charts_html(
     <p class="chart-panel-title">{html.escape(title)}</p>
     <span class="zoom-hint">drag to zoom</span>
   </div>
+  {_notices_html(notices)}
   {_phase_legend_html(bands)}
+  {_role_legend_html(gpu_series, cpu_series)}
   {_host_legend_html(gpu_series, cpu_series)}
   {"".join(subs)}
 </div>
 """
+
+
+_PHASE_TPS_BIN_S = 1.0
+_PREFILL_COLOR = "hsl(28 85% 55%)"
+_DECODE_COLOR = "hsl(158 60% 42%)"
+
+
+def _tps_series(label: str, color: str, t: np.ndarray, v: np.ndarray) -> dict:
+    t_arr, v_arr = _downsample_minmax(t, v, _MAX_BUCKETS_PER_WINDOW_SERIES)
+    return {
+        "label": label,
+        "host": "",
+        "roles": [],
+        "color": color,
+        "pattern": 0,
+        "t": [round(x, 2) for x in t_arr.tolist()],
+        "w": [round(x, 1) for x in v_arr.tolist()],
+        "stats": _series_stats(v_arr),
+    }
+
+
+def _derive_phase_tps(
+    report: dict, *, origin: float, bin_s: float = _PHASE_TPS_BIN_S
+) -> tuple[list[dict], list[dict]] | None:
+    """Prefill and decode token rates over the measured window, rebuilt from aiperf's
+    per-request records (``profile_export.jsonl``).
+
+    Each request's input tokens are spread uniformly over ``request_start -> first
+    token`` and its output tokens over ``first token -> last token`` (``ttft +
+    decode_duration``); every 1 s bin gets the token-rate x overlap of each request,
+    so the series integrate back to the exact token totals aiperf reports. This is
+    wall-clock throughput, unlike aiperf's own per-slice fields (which credit a whole
+    request to the second it completed, or measure rate-while-active).
+
+    Note "first token" is the client-observed TTFT, so prefill here means *input tokens
+    admitted per second* -- it includes frontend queueing and KV transfer, not just
+    prefill compute. Returns ``None`` when the run has no per-request export.
+    """
+    source = report.get("source")
+    if not source or not str(source).endswith(".jsonl") or not Path(source).is_file():
+        return None
+    start, end = report["start_unix"], report["end_unix"]
+    n = int(np.ceil((end - start) / bin_s))
+    if n <= 0:
+        return None
+    prefill = np.zeros(n)
+    decode = np.zeros(n)
+    edges = start + np.arange(n + 1) * bin_s
+
+    def spread(arr: np.ndarray, a: float, b: float, tokens: float) -> None:
+        if b <= a or tokens <= 0:
+            return
+        rate = tokens / (b - a)
+        i0 = max(0, int((a - start) // bin_s))
+        i1 = min(n - 1, int((b - start) // bin_s))
+        for i in range(i0, i1 + 1):
+            overlap = min(edges[i + 1], b) - max(edges[i], a)
+            if overlap > 0:
+                arr[i] += rate * overlap
+
+    found = False
+    with Path(source).open() as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            md, m = rec.get("metadata", {}), rec.get("metrics", {})
+            if md.get("benchmark_phase", "profiling") != "profiling" or md.get("was_cancelled"):
+                continue
+            ttft = _metric_value(m.get("time_to_first_token"))
+            dec_dur = _metric_value(m.get("decode_duration"))
+            isl = _metric_value(m.get("input_sequence_length"))
+            osl = _metric_value(m.get("output_sequence_length"))
+            req_start_ns = md.get("request_start_ns")
+            if req_start_ns is None or ttft is None or isl is None:
+                continue
+            found = True
+            t_start = req_start_ns / 1e9
+            t_first = t_start + ttft / 1e3
+            spread(prefill, t_start, t_first, isl)
+            if dec_dur is not None and osl is not None:
+                spread(decode, t_first, t_first + dec_dur / 1e3, osl)
+    if not found:
+        return None
+    mids = (edges[:-1] + edges[1:]) / 2 - origin
+    return (
+        [_tps_series("prefill (input tok/s)", _PREFILL_COLOR, mids, prefill)],
+        [_tps_series("decode (output tok/s)", _DECODE_COLOR, mids, decode)],
+    )
+
+
+def _metric_value(metric: object) -> float | None:
+    """aiperf per-request metrics are ``{"value": x, "unit": "ms"}``; tolerate bare numbers."""
+    if isinstance(metric, dict):
+        metric = metric.get("value")
+    return float(metric) if isinstance(metric, (int, float)) else None
+
+
+# aiperf timeslice metrics plotted under the power charts, in display order.
+# (key in the timeslices JSON, series label). Output only by default: aiperf's
+# input_token_throughput counts whole prompts accepted per second (ISL x req/s),
+# which at agentic ISLs is ~100x output and would flatten it on a shared axis.
+_TPS_METRICS: tuple[tuple[str, str], ...] = (("output_token_throughput", "output tok/s"),)
+_TPS_COLORS = ("hsl(158 60% 42%)", "hsl(212 70% 55%)")
+
+
+def _load_tps_series(report: dict, *, origin: float) -> list[dict]:
+    """Per-second throughput from aiperf's ``profile_export_aiperf_timeslices.json``
+    (sibling of the concurrency's result artifact), as chart series time-shifted to
+    ``origin`` so they line up with the point's power charts. Fallback for runs without
+    ``profile_export.jsonl`` (see ``_derive_phase_tps``); aiperf credits a request's
+    tokens to the second it completed, so this is spikier than the derived series.
+    Empty when the run did not export timeslices (older aiperf, or sa-bench)."""
+    source = report.get("source")
+    if not source:
+        return []
+    path = Path(source).with_name("profile_export_aiperf_timeslices.json")
+    if not path.is_file():
+        return []
+    try:
+        slices = json.loads(path.read_text()).get("timeslices", [])
+    except (OSError, ValueError):
+        return []
+    series: list[dict] = []
+    for position, (key, label) in enumerate(_TPS_METRICS):
+        times: list[float] = []
+        values: list[float] = []
+        for sl in slices:
+            metric = sl.get(key)
+            if not isinstance(metric, dict) or metric.get("avg") is None:
+                continue
+            times.append((sl["start_ns"] + sl["end_ns"]) / 2e9 - origin)
+            values.append(float(metric["avg"]))
+        if not values:
+            continue
+        t_arr, v_arr = _downsample_minmax(np.array(times), np.array(values), _MAX_BUCKETS_PER_WINDOW_SERIES)
+        series.append(
+            {
+                "label": label,
+                "host": "",
+                "roles": [],
+                "color": _TPS_COLORS[position % len(_TPS_COLORS)],
+                "pattern": 0,
+                "t": [round(v, 2) for v in t_arr.tolist()],
+                "w": [round(v, 1) for v in v_arr.tolist()],
+                "stats": _series_stats(v_arr),
+            }
+        )
+    return series
 
 
 def _point_charts_html(bundle: dict, *, run_label: str | None) -> dict[str, str]:
@@ -1763,6 +2073,7 @@ def _point_charts_html(bundle: dict, *, run_label: str | None) -> dict[str, str]
             gpu = _build_run_series(
                 bundle["gpu_per_device"],
                 label_fmt="{host}/gpu{index}",
+                roles=bundle.get("gpu_roles"),
                 window=window,
                 max_buckets=_MAX_BUCKETS_PER_WINDOW_SERIES,
             )
@@ -1770,10 +2081,31 @@ def _point_charts_html(bundle: dict, *, run_label: str | None) -> dict[str, str]
             cpu = _build_run_series(
                 bundle["cpu_per_socket"],
                 label_fmt="{host}/socket{index}",
+                host_roles=bundle.get("host_roles"),
                 window=window,
                 max_buckets=_MAX_BUCKETS_PER_WINDOW_SERIES,
             )
-        charts = _power_charts_html(gpu, cpu)
+        phase_tps = _derive_phase_tps(r, origin=window[0])
+        if phase_tps is not None:
+            extra = [
+                ("Prefill throughput (input tok/s)", phase_tps[0]),
+                ("Decode throughput (output tok/s)", phase_tps[1]),
+            ]
+        else:  # no per-request export: fall back to aiperf's completion-attributed slices
+            tps = _load_tps_series(r, origin=window[0])
+            extra = [("Output throughput (tok/s, aiperf timeslices)", tps)] if tps else []
+        notices = list(bundle.get("coverage_warnings") or ())
+        if phase_tps is None and r.get("benchmark_type") == "aiperf":
+            notices.append(
+                "Prefill/decode throughput split unavailable: this run has no per-request export "
+                "(profile_export.jsonl). "
+                + (
+                    "Showing aiperf's aggregate output throughput instead (tokens credited to the second each request completed)."
+                    if tps
+                    else "No throughput-over-time data for this point."
+                )
+            )
+        charts = _power_charts_html(gpu, cpu, extra_subs=extra or None, notices=notices or None)
         if charts:
             out[_point_id(run_label, r)] = charts
     return out
@@ -1849,7 +2181,8 @@ def _render_page(bundles: list[dict], *, title: str, subtitle: str, single_run: 
     table_parts = []
     if any(b["reports"] for b in bundles):
         rows = "".join(
-            _summary_rows_html(b["reports"], run_label=rl) for b, rl in zip(bundles, run_labels, strict=True)
+            _summary_rows_html(b["reports"], run_label=rl, coverage_warnings=b.get("coverage_warnings"))
+            for b, rl in zip(bundles, run_labels, strict=True)
         )
         table_parts.append("<h2>Throughput &amp; power by concurrency</h2>")
         table_parts.append(f"<table><thead>{_SUMMARY_TABLE_HEADER}</thead><tbody>{rows}</tbody></table>")
@@ -1872,6 +2205,7 @@ def _render_page(bundles: list[dict], *, title: str, subtitle: str, single_run: 
                 group=family,
                 group_position=group_position,
                 model=bundle["model"] or "unknown model",
+                coverage_warnings=bundle.get("coverage_warnings"),
             )
         )
         run_point_charts = _point_charts_html(bundle, run_label=rl)
@@ -1884,7 +2218,10 @@ def _render_page(bundles: list[dict], *, title: str, subtitle: str, single_run: 
     all_concurrencies: set[int] = set()
     for position, (bundle, label, rl) in enumerate(zip(bundles, labels, run_labels, strict=True)):
         charts_html = _power_charts_html(
-            bundle["gpu_series"], bundle["cpu_series"], phase_bands=_bundle_phase_bands(bundle)
+            bundle["gpu_series"],
+            bundle["cpu_series"],
+            phase_bands=_bundle_phase_bands(bundle),
+            notices=bundle.get("coverage_warnings"),
         )
         if charts_html:
             power_charts_by_run[label if not single_run else ""] = charts_html
@@ -1997,6 +2334,70 @@ def _discover_power_csvs(
     return cpu_samples_csv, gpu_samples_csv, gpu_manifest
 
 
+def _power_coverage_warnings(
+    log_dir: Path,
+    *,
+    cpu_csv: Path | None,
+    gpu_csv: Path | None,
+    gpu_per_device: dict[tuple[str, int], tuple[np.ndarray, np.ndarray]] | None,
+    cpu_per_socket: dict[tuple[str, int], tuple[np.ndarray, np.ndarray]] | None,
+) -> list[str]:
+    """Explain missing power legs instead of silently drawing fewer charts.
+
+    A leg counts as *collected* only if its samples.csv has rows. When an exporter
+    log (``telemetry_cpu_power_exporter.<host>.out`` / ``telemetry_dcgm_exporter.out``)
+    exists but no samples were written, collection was attempted and failed -- the
+    common case is one node's exporter dying and Slurm cancelling the whole step.
+    Hosts that have GPU samples but no CPU samples are called out individually.
+    """
+    warnings: list[str] = []
+    cpu_logs = sorted(log_dir.glob("telemetry_cpu_power_exporter.*.out"))
+    gpu_logs = sorted(log_dir.glob("telemetry_dcgm_exporter*.out"))
+
+    def failed(log_paths: list[Path]) -> str:
+        bad = [p for p in log_paths if "TASK FAILURE" in p.read_text(errors="replace")]
+        if bad:
+            hosts = ", ".join(p.name.split(".")[1] if p.name.count(".") >= 2 else p.name for p in bad)
+            return f" (exporter step cancelled: TASK FAILURE on {hosts})"
+        return ""
+
+    if not cpu_per_socket:
+        if cpu_csv is not None and cpu_logs:
+            warnings.append(
+                f"CPU power missing: exporter started on {len(cpu_logs)} host(s) but wrote no samples"
+                + failed(cpu_logs)
+                + ". Totals and tok/s-per-W below exclude CPU."
+            )
+        elif cpu_csv is not None:
+            warnings.append("CPU power missing: power/cpu/samples.csv is empty. Totals below exclude CPU.")
+        elif cpu_logs:
+            warnings.append(
+                f"CPU power missing: {len(cpu_logs)} exporter log(s) but no power/cpu/samples.csv"
+                + failed(cpu_logs)
+                + "."
+            )
+        else:
+            warnings.append("CPU power not collected for this run (no CPU power exporter).")
+    if not gpu_per_device:
+        if gpu_csv is not None or gpu_logs:
+            warnings.append(
+                "GPU power missing: DCGM exporter ran but no GPU samples were written" + failed(gpu_logs) + "."
+            )
+        else:
+            warnings.append("GPU power not collected for this run (no DCGM exporter).")
+
+    if gpu_per_device and cpu_per_socket:
+        gpu_hosts = {host for host, _ in gpu_per_device}
+        cpu_hosts = {host for host, _ in cpu_per_socket}
+        missing = sorted(gpu_hosts - cpu_hosts)
+        if missing:
+            warnings.append(
+                f"CPU power missing on {len(missing)} of {len(gpu_hosts)} GPU host(s): {', '.join(missing)}. "
+                "CPU totals cover only the hosts that reported."
+            )
+    return warnings
+
+
 def _load_run_config(log_dir: Path) -> dict | None:
     """The run's ``config.yaml`` as a dict, or None. It lives next to ``logs/`` (the job
     dir) and is also copied inside ``logs/`` itself; either location is accepted."""
@@ -2067,6 +2468,15 @@ def _bundle_phase_bands(bundle: dict) -> list[dict]:
     return _phase_bands(bundle["reports"], origin=origin, run_end=max(ends))
 
 
+def _host_roles(roles: dict[tuple[str, int], set[str]] | None) -> dict[str, set[str]]:
+    """Union of worker roles per host, so CPU sockets can be toggled by the role of the
+    GPUs they serve (a host running only decode GPUs is a decode host)."""
+    out: dict[str, set[str]] = {}
+    for (host, _index), device_roles in (roles or {}).items():
+        out.setdefault(host, set()).update(device_roles)
+    return out
+
+
 def _earliest_sample(*legs: dict[tuple[str, int], tuple[np.ndarray, np.ndarray]] | None) -> float | None:
     starts = [float(times[0]) for leg in legs if leg for times, _ in leg.values() if len(times)]
     return min(starts) if starts else None
@@ -2090,9 +2500,11 @@ def _build_run_bundle(log_dir: Path, *, cpu_samples_csv: Path | None = None) -> 
         logger.info("power report: concurrency stats unavailable for %s (%s); charts only", log_dir, e)
 
     gpu_per_device: dict[tuple[str, int], tuple[np.ndarray, np.ndarray]] | None = None
+    roles: dict[tuple[str, int], set[str]] | None = None
     if gpu_csv is not None:
         roles = load_gpu_roles(gpu_manifest) if gpu_manifest else None
         gpu_per_device = load_gpu_samples(gpu_csv, roles).per_device
+    host_roles = _host_roles(roles)
 
     cpu_per_socket: dict[tuple[str, int], tuple[np.ndarray, np.ndarray]] | None = None
     if cpu_csv is not None:
@@ -2102,13 +2514,21 @@ def _build_run_bundle(log_dir: Path, *, cpu_samples_csv: Path | None = None) -> 
     origin = _earliest_sample(gpu_per_device, cpu_per_socket)
     gpu_series: list[dict] = []
     if gpu_per_device is not None:
-        gpu_series = _build_run_series(gpu_per_device, label_fmt="{host}/gpu{index}", origin=origin)
+        gpu_series = _build_run_series(gpu_per_device, label_fmt="{host}/gpu{index}", origin=origin, roles=roles)
     cpu_series: list[dict] = []
     if cpu_per_socket is not None:
-        cpu_series = _build_run_series(cpu_per_socket, label_fmt="{host}/socket{index}", origin=origin)
+        cpu_series = _build_run_series(
+            cpu_per_socket, label_fmt="{host}/socket{index}", origin=origin, host_roles=host_roles
+        )
 
     if not reports and not gpu_series and not cpu_series:
         raise PowerReportError(f"{log_dir}: no benchmark stats or power samples to report")
+
+    coverage_warnings = _power_coverage_warnings(
+        log_dir, cpu_csv=cpu_csv, gpu_csv=gpu_csv, gpu_per_device=gpu_per_device, cpu_per_socket=cpu_per_socket
+    )
+    for w in coverage_warnings:
+        logger.warning("power report: %s: %s", log_dir, w)
 
     job_label = log_dir.parent.name or str(log_dir)
     gpu_type, model = _load_run_family(_load_run_config(log_dir))
@@ -2131,8 +2551,11 @@ def _build_run_bundle(log_dir: Path, *, cpu_samples_csv: Path | None = None) -> 
         # measured window out of the run without re-reading the CSVs.
         "gpu_per_device": gpu_per_device,
         "cpu_per_socket": cpu_per_socket,
+        "gpu_roles": roles,
+        "host_roles": host_roles,
         "gpu_source": gpu_csv,
         "cpu_source": cpu_csv,
+        "coverage_warnings": coverage_warnings,
     }
 
 
