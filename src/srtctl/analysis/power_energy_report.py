@@ -1439,6 +1439,7 @@ def report_to_dict(report: ConcurrencyReport) -> dict:
 
     return {
         "benchmark_type": w.benchmark_type,
+        "source": str(w.source),
         "concurrency": w.concurrency,
         "start_unix": w.start_unix,
         "end_unix": w.end_unix,

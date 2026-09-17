@@ -128,6 +128,36 @@ def test_build_run_series_time_shifts_to_the_earliest_sample_across_all_devices(
     assert series[1]["t"] == [5.0, 6.0]
 
 
+def test_build_run_series_tags_roles_from_manifest_and_host_fallback() -> None:
+    per_device = {("node-a", 0): _series([1.0]), ("node-a", 1): _series([1.0]), ("node-b", 0): _series([1.0])}
+    roles = {("node-a", 0): {"prefill"}, ("node-a", 1): {"decode"}}
+
+    gpu = _build_run_series(per_device, label_fmt="{host}/gpu{index}", roles=roles)
+    cpu = _build_run_series(
+        {("node-a", 0): _series([1.0])}, label_fmt="{host}/socket{index}", host_roles={"node-a": {"prefill", "decode"}}
+    )
+
+    assert [s["roles"] for s in gpu] == [["prefill"], ["decode"], []]  # node-b has no manifest entry
+    assert cpu[0]["roles"] == ["decode", "prefill"]  # socket inherits every role on its host
+
+
+def test_role_legend_lists_roles_with_device_counts_and_needs_two_roles() -> None:
+    from srtctl.analysis.power_report_html import _role_legend_html
+
+    per_device = {("node-a", i): _series([1.0]) for i in range(3)}
+    one_role = _build_run_series(per_device, label_fmt="{host}/gpu{index}", roles={k: {"decode"} for k in per_device})
+    assert _role_legend_html(one_role, []) == ""
+
+    two = _build_run_series(
+        per_device,
+        label_fmt="{host}/gpu{index}",
+        roles={("node-a", 0): {"prefill"}, ("node-a", 1): {"decode"}, ("node-a", 2): {"decode"}},
+    )
+    content = _role_legend_html(two, [])
+    assert 'data-role="decode"' in content and "(2)" in content
+    assert 'data-role="prefill"' in content and "(1)" in content
+
+
 def test_build_run_series_origin_overrides_the_time_zero() -> None:
     per_device = {("node-a", 0): (np.array([105.0, 106.0]), np.array([1.0, 2.0]))}
 
@@ -260,12 +290,13 @@ def test_pareto_points_includes_panel_and_hover_fields() -> None:
     assert "Concurrency / active GPUs" in field_names
     assert "Output tok/s / active GPU" in field_names
     assert "P90 TPOT" in field_names
-    assert "Average total GPU power" in field_names
-    assert "Average per-GPU power" in field_names
+    assert "Total GPU power (all GPUs, avg)" in field_names
+    assert "Power per GPU (avg)" in field_names
     assert "Output tok/s / (GPU+CPU) W" in field_names
     assert "Measured window" in field_names
     hover_names = [name for name, _ in points[0]["hover"]]
-    assert hover_names == ["Concurrency / GPUs", "P90 TPOT", "Avg GPU power", "Output tok/s / GPU W"]
+    assert hover_names == ["Concurrency / GPUs", "P90 TPOT", "Total GPU power", "Per GPU", "Output tok/s / GPU W"]
+    assert points[0]["m"]["gpu_w_per_gpu"] == 150.0  # 300 W across 2 GPUs
 
 
 # ---------------------------------------------------------------------------
@@ -555,8 +586,10 @@ def test_build_combined_report_merges_rows_from_every_run(tmp_path: Path) -> Non
     content = build_combined_report([run_a, run_b])
 
     assert "2 runs: runA, runB" in content
-    assert content.count("<td>runA · aiperf c=4</td>") == 1
-    assert content.count("<td>runB · aiperf c=4</td>") == 1
+    # (fixture runs have no CPU leg, so the Run cell carries a ⚠ coverage marker)
+    assert content.count('<td>runA · aiperf c=4 <span class="row-warn"') == 1
+    assert content.count('<td>runB · aiperf c=4 <span class="row-warn"') == 1
+    assert "CPU power not collected for this run" in content
     assert "runA — aiperf c=4" in content  # per-concurrency card titles
     assert "runB — aiperf c=4" in content
     # data-table tab: one card per run x concurrency, a run/concurrency checkbox filter
@@ -626,8 +659,8 @@ def test_build_combined_report_dedupes_identical_labels(tmp_path: Path) -> None:
     content = build_combined_report([run_a, run_b])
 
     assert "same, same (2)" in content
-    assert "<td>same · aiperf c=4</td>" in content
-    assert "<td>same (2) · aiperf c=4</td>" in content
+    assert "<td>same · aiperf c=4 <span" in content
+    assert "<td>same (2) · aiperf c=4 <span" in content
 
 
 def test_build_combined_report_skips_empty_dirs_but_keeps_the_rest(tmp_path: Path) -> None:
@@ -855,3 +888,176 @@ def test_embedded_javascript_parses(tmp_path: Path) -> None:
     result = subprocess.run(["node", "--check", str(script)], capture_output=True, text=True)
 
     assert result.returncode == 0, result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Throughput over time (aiperf timeslices)
+# ---------------------------------------------------------------------------
+
+
+def test_load_tps_series_reads_aiperf_timeslices_next_to_the_result(tmp_path: Path) -> None:
+    from srtctl.analysis.power_report_html import _load_tps_series
+
+    artifacts = tmp_path / "aiperf_artifacts"
+    artifacts.mkdir()
+    (artifacts / "profile_export_aiperf_timeslices.json").write_text(
+        json.dumps(
+            {
+                "timeslices": [
+                    {
+                        "start_ns": 1_000_000_000_000,
+                        "end_ns": 1_001_000_000_000,
+                        "output_token_throughput": {"avg": 100.0},
+                        "input_token_throughput": {"avg": 20.0},
+                    },
+                    {
+                        "start_ns": 1_001_000_000_000,
+                        "end_ns": 1_002_000_000_000,
+                        "output_token_throughput": {"avg": 120.0},
+                        "input_token_throughput": {"avg": None},
+                    },
+                ]
+            }
+        )
+    )
+    report = {"source": str(artifacts / "profile_export.jsonl")}
+
+    series = _load_tps_series(report, origin=1000.0)
+
+    assert [s["label"] for s in series] == ["output tok/s"]  # input intentionally not plotted
+    assert series[0]["t"] == [0.5, 1.5]  # slice midpoints, relative to the window origin
+    assert series[0]["w"] == [100.0, 120.0]
+
+
+def test_load_tps_series_is_empty_without_timeslices(tmp_path: Path) -> None:
+    from srtctl.analysis.power_report_html import _load_tps_series
+
+    assert _load_tps_series({"source": str(tmp_path / "profile_export.jsonl")}, origin=0.0) == []
+    assert _load_tps_series({}, origin=0.0) == []
+
+
+def test_derive_phase_tps_spreads_tokens_over_prefill_and_decode_spans(tmp_path: Path) -> None:
+    from srtctl.analysis.power_report_html import _derive_phase_tps
+
+    jsonl = tmp_path / "profile_export.jsonl"
+    t0_ns = 1_000 * 10**9
+
+    def rec(start_s: float, ttft_ms: float, decode_ms: float, isl: int, osl: int, phase: str = "profiling") -> str:
+        return json.dumps(
+            {
+                "metadata": {"request_start_ns": t0_ns + int(start_s * 1e9), "benchmark_phase": phase},
+                "metrics": {
+                    "time_to_first_token": {"value": ttft_ms, "unit": "ms"},
+                    "decode_duration": {"value": decode_ms, "unit": "ms"},
+                    "input_sequence_length": {"value": isl, "unit": "tokens"},
+                    "output_sequence_length": {"value": osl, "unit": "tokens"},
+                },
+            }
+        )
+
+    jsonl.write_text(
+        "\n".join(
+            [
+                # prefill 0.0-1.0 s (1000 tok), decode 1.0-3.0 s (200 tok -> 100 tok/s)
+                rec(0.0, 1000.0, 2000.0, 1000, 200),
+                # prefill 2.5-3.0 s (500 tok -> 1000 tok/s, half a bin), decode 3.0-4.0 s (50 tok)
+                rec(2.5, 500.0, 1000.0, 500, 50),
+                rec(0.0, 1000.0, 1000.0, 99_999, 99_999, phase="warmup"),  # ignored
+            ]
+        )
+    )
+    report = {"source": str(jsonl), "start_unix": 1000.0, "end_unix": 1004.0}
+
+    prefill, decode = _derive_phase_tps(report, origin=1000.0)
+
+    assert prefill[0]["t"] == [0.5, 1.5, 2.5, 3.5]  # 1 s bins, midpoints relative to origin
+    assert prefill[0]["w"] == [1000.0, 0.0, 500.0, 0.0]  # 500 tok at 1000 tok/s over half of bin 2
+    assert decode[0]["w"] == [0.0, 100.0, 100.0, 50.0]
+    assert sum(prefill[0]["w"]) == 1500 and sum(decode[0]["w"]) == 250  # integrates to token totals
+
+
+def test_derive_phase_tps_is_none_without_per_request_export(tmp_path: Path) -> None:
+    from srtctl.analysis.power_report_html import _derive_phase_tps
+
+    agg = tmp_path / "profile_export_aiperf.json"
+    agg.write_text("{}")
+    assert _derive_phase_tps({"source": str(agg), "start_unix": 0.0, "end_unix": 10.0}, origin=0.0) is None
+    assert _derive_phase_tps({"start_unix": 0.0, "end_unix": 10.0}, origin=0.0) is None
+
+
+# ---------------------------------------------------------------------------
+# Missing power legs are called out, not silently dropped
+# ---------------------------------------------------------------------------
+
+
+def test_coverage_warnings_explain_a_cancelled_cpu_exporter_step(tmp_path: Path) -> None:
+    from srtctl.analysis.power_report_html import _power_coverage_warnings
+
+    (tmp_path / "telemetry_cpu_power_exporter.node-a.out").write_text(
+        "srun: error: node-a: task 0: Exited\nslurmstepd: error: *** STEP 1.2 CANCELLED DUE TO TASK FAILURE ***\n"
+    )
+    (tmp_path / "telemetry_cpu_power_exporter.node-b.out").write_text("listening addr=0.0.0.0:9405\nreceived SIGTERM\n")
+    empty_csv = tmp_path / "power" / "cpu" / "samples.csv"
+    empty_csv.parent.mkdir(parents=True)
+    empty_csv.write_text("ts_unix\n")
+
+    warnings = _power_coverage_warnings(
+        tmp_path,
+        cpu_csv=empty_csv,
+        gpu_csv=tmp_path / "power" / "samples.csv",
+        gpu_per_device={("node-a", 0): _series([1.0])},
+        cpu_per_socket={},
+    )
+
+    assert len(warnings) == 1
+    assert warnings[0].startswith("CPU power missing: exporter started on 2 host(s) but wrote no samples")
+    assert "TASK FAILURE on node-a" in warnings[0]
+
+
+def test_coverage_warnings_list_gpu_hosts_without_cpu_samples(tmp_path: Path) -> None:
+    from srtctl.analysis.power_report_html import _power_coverage_warnings
+
+    warnings = _power_coverage_warnings(
+        tmp_path,
+        cpu_csv=tmp_path / "cpu.csv",
+        gpu_csv=tmp_path / "gpu.csv",
+        gpu_per_device={("node-a", 0): _series([1.0]), ("node-b", 0): _series([1.0])},
+        cpu_per_socket={("node-a", 0): _series([1.0])},
+    )
+
+    assert warnings == [
+        "CPU power missing on 1 of 2 GPU host(s): node-b. CPU totals cover only the hosts that reported."
+    ]
+
+
+def test_coverage_warnings_are_silent_when_both_legs_are_present(tmp_path: Path) -> None:
+    from srtctl.analysis.power_report_html import _power_coverage_warnings
+
+    assert (
+        _power_coverage_warnings(
+            tmp_path,
+            cpu_csv=tmp_path / "cpu.csv",
+            gpu_csv=tmp_path / "gpu.csv",
+            gpu_per_device={("node-a", 0): _series([1.0])},
+            cpu_per_socket={("node-a", 0): _series([1.0])},
+        )
+        == []
+    )
+
+
+def test_power_charts_render_notices_strip() -> None:
+    from srtctl.analysis.power_report_html import _power_charts_html
+
+    gpu = _build_run_series({("node-a", 0): _series([1.0, 2.0])}, label_fmt="{host}/gpu{index}")
+    content = _power_charts_html(gpu, [], notices=["CPU power missing: <test>"])
+    assert 'class="chart-notices"' in content
+    assert "CPU power missing: &lt;test&gt;" in content
+    assert 'class="chart-notices"' not in _power_charts_html(gpu, [])
+
+
+def test_node_power_card_has_a_notices_slot_for_coverage_warnings() -> None:
+    from srtctl.analysis.power_report_html import _node_power_card_html
+
+    content = _node_power_card_html()
+    assert 'class="chart-notices node-power-notices" hidden' in content
+    # the JS fills it from point.warnings matching "power missing" / "not collected"
