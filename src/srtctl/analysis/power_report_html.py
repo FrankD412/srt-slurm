@@ -338,6 +338,8 @@ svg.pareto-svg { width: 100%; height: auto; aspect-ratio: 900 / 520; display: bl
 .phase-idle { fill: var(--ink-muted); fill-opacity: .10; }
 .phase-warmup { fill: var(--slot-1); fill-opacity: .16; }
 .phase-profile { fill: var(--slot-2); fill-opacity: .14; }
+.phase-drain { fill: var(--slot-2); fill-opacity: .06; stroke: var(--slot-2); stroke-opacity: .5; stroke-dasharray: 3 3; }
+.phase-band.phase-focus.phase-drain { fill-opacity: .12; }
 .phase-band.phase-other { fill-opacity: .05; }
 .phase-band.phase-focus.phase-warmup { fill-opacity: .28; }
 .phase-band.phase-focus.phase-profile { fill-opacity: .24; }
@@ -347,6 +349,7 @@ svg.pareto-svg { width: 100%; height: auto; aspect-ratio: 900 / 520; display: bl
 .phase-key.phase-idle .phase-swatch { background: var(--ink-muted); opacity: .45; }
 .phase-key.phase-warmup .phase-swatch { background: var(--slot-1); opacity: .6; }
 .phase-key.phase-profile .phase-swatch { background: var(--slot-2); opacity: .6; }
+.phase-key.phase-drain .phase-swatch { background: transparent; border: 1px dashed var(--slot-2); opacity: .8; }
 .scope-controls { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; margin: 0 0 4px; }
 .scope-controls select { font: inherit; font-size: 12px; padding: 2px 6px; background: var(--surface); color: var(--ink-primary); border: 1px solid var(--border); border-radius: 4px; }
 .baseline-note { color: var(--ink-muted); font-size: 11px; margin: 6px 0 0; min-height: 1em; }
@@ -1801,6 +1804,7 @@ _PHASE_KINDS: tuple[tuple[str, str], ...] = (
     ("idle", "Idle (pre/post/between)"),
     ("warmup", "Warmup"),
     ("profile", "Profile (measured)"),
+    ("drain", "Drain (in-flight tail, excluded)"),
 )
 
 
@@ -1821,6 +1825,9 @@ def _phase_bands(reports: list[dict], *, origin: float, run_end: float) -> list[
         if ws is not None and we is not None and we > ws:
             busy.append((ws, min(we, r["start_unix"]), "warmup", label, point))
         busy.append((r["start_unix"], r["end_unix"], "profile", label, point))
+        de = r.get("drain_end_unix")
+        if de is not None and de > r["end_unix"]:
+            busy.append((r["end_unix"], de, "drain", label, point))
     busy.sort()
 
     bands: list[dict] = []

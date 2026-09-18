@@ -255,6 +255,11 @@ class ConcurrencyWindow:
     # engines that don't expose it (sa-bench). Used to colour the run timeline.
     warmup_start_unix: float | None = None
     warmup_end_unix: float | None = None
+    # Drain: from ``end_unix`` (aiperf stopped issuing requests) to the last
+    # in-flight request's completion. Load falls from the concurrency target to a
+    # handful of stragglers here, so it is excluded from the measured window and
+    # shown as its own phase band. None when the engine does not expose it.
+    drain_end_unix: float | None = None
 
     @property
     def duration_seconds(self) -> float:
@@ -438,6 +443,13 @@ def aiperf_window(concurrency: int, profile_jsonl: Path, *, benchmark_out: Path 
     ``measurement_window.py`` uses -- so the window reflects actual request
     activity, not the phase's grace-period timeout deadline (which can run
     long after the last real response, as observed in practice).
+
+    The window starts at the first profiling request and ends when aiperf stopped
+    *issuing* requests: ``start + benchmark_duration`` from the aggregate. Requests
+    still in flight past that point are the drain -- concurrency collapses from the
+    target to a few stragglers, so integrating over it would dilute the average.
+    The drain is kept as ``drain_end_unix`` for the timeline. If the aggregate has
+    no duration the window falls back to the last request's completion.
     """
     starts_ns: list[int] = []
     ends_ns: list[int] = []
@@ -475,11 +487,15 @@ def aiperf_window(concurrency: int, profile_jsonl: Path, *, benchmark_out: Path 
 
     tpot_p50_ms, tpot_p90_ms = _tpot_from_aiperf_aggregate(aggregate)
 
+    start_unix = min(starts_ns) / 1e9
+    last_end_unix = max(ends_ns) / 1e9
+    issue_end_unix = _issuing_end(start_unix, aggregate)
+    end_unix = min(issue_end_unix, last_end_unix) if issue_end_unix is not None else last_end_unix
     return ConcurrencyWindow(
         benchmark_type=BENCHMARK_TYPE_AIPERF,
         concurrency=concurrency,
-        start_unix=min(starts_ns) / 1e9,
-        end_unix=max(ends_ns) / 1e9,
+        start_unix=start_unix,
+        end_unix=end_unix,
         output_tokens=output_tokens,
         input_tokens=input_tokens,
         source=profile_jsonl,
@@ -488,7 +504,23 @@ def aiperf_window(concurrency: int, profile_jsonl: Path, *, benchmark_out: Path 
         tpot_p90_ms=tpot_p90_ms,
         warmup_start_unix=min(warmup_starts_ns) / 1e9 if warmup_starts_ns else None,
         warmup_end_unix=max(warmup_ends_ns) / 1e9 if warmup_ends_ns else None,
+        drain_end_unix=last_end_unix if last_end_unix > end_unix else None,
     )
+
+
+def _issuing_end(start_unix: float, aggregate: dict) -> float | None:
+    """``start + benchmark_duration``: when aiperf stopped issuing requests. The
+    aggregate's ``benchmark_duration`` is in seconds (``unit`` is checked)."""
+    duration = aggregate.get("benchmark_duration")
+    if not isinstance(duration, dict):
+        return None
+    value, unit = duration.get("avg"), duration.get("unit", "sec")
+    if not isinstance(value, (int, float)):
+        return None
+    scale = {"sec": 1.0, "s": 1.0, "seconds": 1.0, "ms": 1e-3}.get(unit)
+    if scale is None:
+        return None
+    return start_unix + float(value) * scale
 
 
 def aiperf_aggregate_window(
@@ -497,9 +529,10 @@ def aiperf_aggregate_window(
     """Window from ``profile_export_aiperf.json`` alone, for runs that did not export
     per-record ``profile_export.jsonl``.
 
-    aiperf's ``start_time``/``end_time`` bracket the whole profiling phase (including
-    its drain), so this window is a little wider than the per-record one and has no
-    warmup span. Stamps are naive local time; the run's recorded timezone offset
+    aiperf's ``start_time``/``end_time`` bracket the whole profiling phase including
+    its drain, so the window is cut at ``start_time + benchmark_duration`` (end of
+    request issuing) like the per-record path, with ``end_time`` kept as the drain
+    end. Stamps are naive local time; the run's recorded timezone offset
     (``agentic_power_timezone_offset.txt``) is required to place them -- without it
     the host's zone is used, which is only right when the report is built where the
     benchmark ran.
@@ -516,11 +549,13 @@ def aiperf_aggregate_window(
     warmup = None
     if benchmark_out is not None and benchmark_out.is_file():
         warmup = _warmup_span(benchmark_out, aggregate.get("start_time"), reported.start_unix, tz)
+    issue_end_unix = _issuing_end(reported.start_unix, aggregate)
+    end_unix = min(issue_end_unix, reported.end_unix) if issue_end_unix is not None else reported.end_unix
     return ConcurrencyWindow(
         benchmark_type=BENCHMARK_TYPE_AIPERF,
         concurrency=concurrency,
         start_unix=reported.start_unix,
-        end_unix=reported.end_unix,
+        end_unix=end_unix,
         output_tokens=aggregate["total_osl"]["avg"],
         input_tokens=aggregate["total_isl"]["avg"],
         source=aggregate_path,
@@ -529,6 +564,7 @@ def aiperf_aggregate_window(
         tpot_p90_ms=tpot_p90_ms,
         warmup_start_unix=warmup[0] if warmup else None,
         warmup_end_unix=warmup[1] if warmup else None,
+        drain_end_unix=reported.end_unix if reported.end_unix > end_unix else None,
     )
 
 
@@ -1449,6 +1485,7 @@ def report_to_dict(report: ConcurrencyReport) -> dict:
         "tpot_p90_ms": w.tpot_p90_ms,
         "warmup_start_unix": w.warmup_start_unix,
         "warmup_end_unix": w.warmup_end_unix,
+        "drain_end_unix": w.drain_end_unix,
         "cpu_per_socket": dump(report.cpu_per_socket),
         "cpu_per_node": dump(report.cpu_per_node),
         "cpu_total_joules": report.cpu_total_joules,
