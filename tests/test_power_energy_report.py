@@ -972,13 +972,32 @@ def test_aiperf_window_reads_reported_timing_from_aggregate_json(tmp_path: Path)
 
     window = aiperf_window(8, jsonl_path)
 
-    assert window.duration_seconds == pytest.approx(100.0)
+    # The single request ran 1000 -> 1100 s but aiperf stopped issuing at +99.5 s:
+    # the window ends there and the 0.5 s tail is the drain.
+    assert window.duration_seconds == pytest.approx(99.5)
+    assert window.drain_end_unix == pytest.approx(1100.0)
     reported = window.reported
     assert reported.source == "aiperf-json"
     assert reported.duration_seconds == pytest.approx(99.5)
     # naive ISO stamps are aiperf's local wall clock; the report keeps them as a
     # local-time conversion and never treats them as authoritative.
     assert reported.end_unix - reported.start_unix == pytest.approx(99.5)
+
+
+def test_aiperf_window_without_a_duration_ends_at_the_last_request_and_has_no_drain(tmp_path: Path) -> None:
+    window = aiperf_window(8, _aiperf_case(tmp_path, {}))
+
+    assert window.duration_seconds == pytest.approx(100.0)
+    assert window.drain_end_unix is None
+
+
+def test_aiperf_window_never_extends_past_the_last_request(tmp_path: Path) -> None:
+    # benchmark_duration longer than the observed activity (e.g. a duration-bound run
+    # whose last request finished early): the window is the observed span.
+    window = aiperf_window(8, _aiperf_case(tmp_path, {"benchmark_duration": {"unit": "sec", "avg": 250.0}}))
+
+    assert window.end_unix == pytest.approx(1100.0)
+    assert window.drain_end_unix is None
 
 
 def test_aiperf_window_falls_back_to_a_single_phase_log_pair(tmp_path: Path) -> None:
@@ -1360,7 +1379,7 @@ def test_aiperf_aggregate_window_used_when_per_record_export_is_absent(tmp_path:
             {
                 "start_time": "2026-09-16T15:12:02.200000",
                 "end_time": "2026-09-16T16:12:42.200000",
-                "benchmark_duration": {"avg": 3640.0},
+                "benchmark_duration": {"avg": 3629.9, "unit": "sec"},  # end_time - start_time = 3640: 10.1 s drain
                 "total_osl": {"avg": 100.0},
                 "total_isl": {"avg": 50.0},
                 "inter_token_latency": {"p50": 9.0, "p90": 11.0},
@@ -1385,7 +1404,8 @@ def test_aiperf_aggregate_window_used_when_per_record_export_is_absent(tmp_path:
     assert w.concurrency == 8
     # 2026-09-16T15:12:02.2 at UTC-7 == 22:12:02.2Z
     assert w.start_unix == pytest.approx(1789596722.2, abs=0.01)
-    assert w.end_unix == pytest.approx(1789600362.2, abs=0.01)
+    assert w.end_unix == pytest.approx(1789596722.2 + 3629.9, abs=0.01)  # cut at end of request issuing
+    assert w.drain_end_unix == pytest.approx(1789600362.2, abs=0.01)  # aiperf's end_time
     assert w.output_tokens == 100.0
     assert w.tpot_p90_ms == 11.0
     assert w.reported.source == "aiperf-json"
