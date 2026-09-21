@@ -34,6 +34,7 @@ import html
 import json
 import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -248,18 +249,28 @@ tr:last-child td { border-bottom: none; }
 .legend { display: flex; gap: 8px 12px; flex-wrap: wrap; margin: 4px 0 10px; font-size: 12px; color: var(--ink-secondary); }
 .legend-key { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 4px; cursor: pointer; user-select: none; }
 .legend-key.off { opacity: .4; text-decoration: line-through; }
+.chart-extras { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 6px; }
+.chart-fold > summary { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; list-style: none;
+  font-size: 12px; font-weight: 600; color: var(--ink-secondary); padding: 5px 10px; border: 1px solid var(--border);
+  border-radius: 6px; background: color-mix(in srgb, var(--ink) 3%, transparent); }
+.chart-fold > summary:hover { border-color: var(--ink-muted); background: color-mix(in srgb, var(--ink) 7%, transparent); }
+.chart-fold > summary::-webkit-details-marker { display: none; }
+.chart-fold[open] > summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.fold-caret { width: 0; height: 0; border-style: solid; border-width: 5px 0 5px 7px; border-color: transparent transparent transparent currentColor;
+  flex: none; transition: transform .12s ease; }
+.chart-fold[open] .fold-caret { transform: rotate(90deg); }
+.fold-hint { font-weight: 400; color: var(--ink-muted); }
+.chart-fold > .legend, .chart-fold > .stats-table { margin: 0; padding: 8px 10px; border: 1px solid var(--border); border-top: 0;
+  border-radius: 0 0 6px 6px; }
 .legend-key.partial { opacity: .7; border-style: dashed; }
 .host-legend { margin: 0 0 12px; padding-bottom: 10px; border-bottom: 1px solid var(--grid); }
 .legend-label { color: var(--ink-muted); font-size: 11px; text-transform: uppercase; letter-spacing: .02em; align-self: center; }
 .host-key { font-weight: 600; }
-.role-legend { margin: 0 0 8px; }
 .chart-notices { color: var(--slot-1); font-size: 12px; margin: 0 0 10px; padding: 8px 10px;
   border: 1px solid color-mix(in srgb, var(--slot-1) 45%, transparent); border-radius: 6px;
   background: color-mix(in srgb, var(--slot-1) 8%, transparent); }
 .chart-notices div + div { margin-top: 3px; }
 .row-warn { color: var(--slot-1); cursor: help; }
-.role-key { font-weight: 600; text-transform: capitalize; }
-.role-count { color: var(--ink-muted); font-weight: 400; }
 .legend-swatch { width: 14px; height: 3px; border-radius: 1px; }
 .stat-cards { display: flex; gap: 12px; margin: 4px 0 24px; flex-wrap: wrap; }
 .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 12px 18px; min-width: 110px; }
@@ -267,8 +278,34 @@ tr:last-child td { border-bottom: none; }
 .stat-card-label { color: var(--ink-secondary); font-size: 12px; margin: 2px 0 0; }
 .chart-group { margin-top: 16px; }
 .chart-group-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin: 0 0 8px; }
+.chart-group-tools { display: inline-flex; align-items: center; gap: 12px; }
+.granularity-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; font-size: 11px; }
+.gran-btn { background: transparent; color: var(--ink-muted); border: 0; padding: 2px 9px; cursor: pointer; font: inherit; font-size: 11px; }
+.gran-btn + .gran-btn { border-left: 1px solid var(--line); }
+.gran-btn.on { background: var(--surface-2, rgba(127,127,127,0.18)); color: var(--ink); font-weight: 600; }
 .zoom-hint { color: var(--ink-muted); font-size: 11px; }
 .chart-sub + .chart-sub { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--grid); }
+/* Role sections: one tinted box per node type. --role-accent drives the heading
+   colour, the left rule and the faint background wash. */
+.chart-section { --role-accent: var(--ink-muted); position: relative; margin: 10px 0 0; padding: 10px 14px 6px 16px;
+  border: 1px solid color-mix(in srgb, var(--role-accent) 35%, var(--border)); border-left: 4px solid var(--role-accent);
+  border-radius: 8px; background: color-mix(in srgb, var(--role-accent) 5%, transparent); }
+.chart-section.role-prefill { --role-accent: hsl(28 85% 55%); }
+.chart-section.role-decode { --role-accent: hsl(158 60% 42%); }
+.chart-section.role-throughput { --role-accent: hsl(212 70% 55%); }
+.chart-section.role-all { --role-accent: hsl(212 70% 55%); }
+.chart-role-heading { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 12px; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--role-accent); margin: 0; cursor: pointer; user-select: none; list-style: none;
+  padding: 2px 0; border-radius: 4px; }
+.chart-role-heading::-webkit-details-marker { display: none; }
+.chart-role-heading:hover { background: color-mix(in srgb, var(--role-accent) 10%, transparent); }
+.section-caret { width: 0; height: 0; border-style: solid; border-width: 5px 0 5px 7px;
+  border-color: transparent transparent transparent currentColor; flex: none; transition: transform .12s ease; }
+.chart-section[open] .section-caret { transform: rotate(90deg); }
+.section-hint { font-weight: 500; letter-spacing: 0; text-transform: none; color: var(--ink-muted); margin-left: 2px; }
+.chart-section:not([open]) { padding-bottom: 10px; }
+.chart-section-body { margin-top: 8px; }
+.chart-section .chart-sub + .chart-sub { margin-top: 6px; }
 .chart-sub-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .chart-sub-title { font-weight: 600; font-size: 13px; margin: 0 0 4px; }
 .yscale-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; font-size: 11px; }
@@ -283,8 +320,8 @@ tr:last-child td { border-bottom: none; }
 svg.chart { width: 100%; height: 220px; display: block; overflow: visible; }  /* viewBox set from pixel width in JS */
 .gridline { stroke: var(--grid); stroke-width: 1; }
 .axis-text { fill: var(--ink-muted); font-size: 10px; }
+.axis-caption { font-size: 11px; fill: var(--ink-secondary); font-weight: 600; letter-spacing: .02em; }
 .axis-title { fill: var(--ink-secondary); font-size: 11px; font-weight: 600; }
-.end-label { font-size: 10px; fill: var(--ink-secondary); }
 .crosshair { stroke: var(--axis); stroke-width: 1; pointer-events: none; opacity: 0; }
 .tooltip {
   position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--border);
@@ -295,9 +332,7 @@ svg.chart { width: 100%; height: 220px; display: block; overflow: visible; }  /*
 .tooltip .t-row { display: flex; gap: 8px; align-items: center; }
 .tooltip .t-key { width: 12px; height: 2px; flex: none; }
 .tooltip .t-val { font-weight: 600; font-variant-numeric: tabular-nums; }
-.stats-toggle { color: var(--ink-muted); font-size: 11px; cursor: pointer; user-select: none; }
-.stats-table { display: none; margin: 8px 0 12px; font-size: 12px; }
-.stats-table.open { display: table; }
+.stats-table { font-size: 12px; width: 100%; }
 footer { color: var(--ink-muted); font-size: 12px; margin-top: 32px; }
 code { background: var(--page); padding: 1px 4px; border-radius: 3px; }
 .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
@@ -333,6 +368,20 @@ svg.pareto-svg { width: 100%; height: auto; aspect-ratio: 900 / 520; display: bl
 .filter-all, .filter-none { appearance: none; background: none; border: none; color: var(--ink-muted); font: inherit; font-size: 11px; cursor: pointer; padding: 0 4px; text-decoration: underline; }
 .filter-count { color: var(--ink-muted); font-size: 11px; margin: 6px 0 0; }
 .conc-card[hidden], .view-run[hidden], .view-window[hidden] { display: none; }
+/* Data-table cards: one collapsible box per run x concurrency, tinted per run. */
+.conc-card { --card-accent: hsl(215 10% 58%); margin: 0 0 14px; border: 1px solid color-mix(in srgb, var(--card-accent) 40%, var(--border));
+  border-left: 5px solid var(--card-accent); border-radius: 8px; background: color-mix(in srgb, var(--card-accent) 4%, var(--surface)); }
+.conc-card-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; cursor: pointer; user-select: none; list-style: none;
+  font-size: 13px; color: var(--ink); border-radius: 8px; }
+.conc-card-head::-webkit-details-marker { display: none; }
+.conc-card-head:hover { background: color-mix(in srgb, var(--card-accent) 10%, transparent); }
+.conc-card-head .section-caret { color: var(--card-accent); }
+.conc-card[open] > .conc-card-head { border-bottom: 1px solid color-mix(in srgb, var(--card-accent) 25%, var(--border)); border-radius: 8px 8px 0 0; }
+.conc-card-run { font-weight: 700; color: var(--ink); }
+.conc-card-conc { font-weight: 600; padding: 1px 8px; border-radius: 999px; font-size: 12px;
+  background: color-mix(in srgb, var(--card-accent) 16%, transparent); color: var(--ink); }
+.conc-card-body { padding: 6px 12px 10px; }
+.conc-card-body .chart-panel { border: 0; background: transparent; padding: 6px 0 0; margin: 0; }
 .scope-global { margin: 0 0 12px; }
 .phase-band { stroke: none; }
 .phase-idle { fill: var(--ink-muted); fill-opacity: .10; }
@@ -352,10 +401,37 @@ svg.pareto-svg { width: 100%; height: auto; aspect-ratio: 900 / 520; display: bl
 .phase-key.phase-drain .phase-swatch { background: transparent; border: 1px dashed var(--slot-2); opacity: .8; }
 .scope-controls { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; margin: 0 0 4px; }
 .scope-controls select { font: inherit; font-size: 12px; padding: 2px 6px; background: var(--surface); color: var(--ink-primary); border: 1px solid var(--border); border-radius: 4px; }
-.baseline-note { color: var(--ink-muted); font-size: 11px; margin: 6px 0 0; min-height: 1em; }
+.baseline-note, .pareto-note { color: var(--ink-muted); font-size: 11px; margin: 6px 0 0; min-height: 1em; }
 .pareto-point { stroke: var(--surface); stroke-width: 1.5; cursor: pointer; }
 .pareto-point.selected { stroke: var(--ink-primary); stroke-width: 2.5; }
 .pareto-point.dim { opacity: .18; }
+.pareto-point.grey { stroke: hsl(0 0% 30%); stroke-width: 1.5; }
+.pareto-point.grey.selected { stroke: var(--ink-primary); stroke-width: 2.5; }
+/* Budget editor: nested inside the inspect column, so it stacks its inputs. */
+.budget-card { margin: 16px 0 0; padding: 0 0 12px; border-top: 1px solid var(--grid); }
+.budget-head { display: flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; list-style: none; padding: 12px 0 6px; }
+.budget-head::-webkit-details-marker { display: none; }
+.budget-head h3 { margin: 0; font-size: 14px; }
+.budget-card[open] .section-caret { transform: rotate(90deg); }
+.budget-card > .pareto-subtitle { font-size: 11.5px; }
+.budget-row { margin: 8px 0 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.budget-row-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.budget-inputs { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 12px; }
+.budget-inputs label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--ink-muted); }
+.budget-inputs input { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px; padding: 3px 6px; background: var(--page);
+  color: var(--ink-primary); border: 1px solid var(--border); border-radius: 4px; font-variant-numeric: tabular-nums; }
+.budget-inputs input.changed { border-color: var(--slot-1); }
+.budget-meta, .budget-derived { color: var(--ink-muted); font-size: 11px; }
+.budget-derived { margin-top: 6px; }
+.budget-missing { color: var(--slot-1); font-size: 11px; margin-left: 6px; }
+.budget-reset { font: inherit; font-size: 12px; padding: 3px 10px; background: var(--surface); color: var(--ink-primary);
+  border: 1px solid var(--border); border-radius: 4px; cursor: pointer; }
+.budget-reset:hover { border-color: var(--ink-muted); }
+.est-warn { color: var(--slot-1); cursor: help; margin-right: 4px; font-weight: 600; }
+.basis-legend { display: flex; gap: 8px; flex-wrap: wrap; margin: -6px 0 12px; font-size: 12px; }
+.basis-legend[hidden] { display: none; }
+.basis-swatch { width: 34px; height: 12px; flex: none; overflow: visible; }
+.basis-key { display: inline-flex; align-items: center; gap: 8px; }
 .pareto-tooltip { transform: translate(12px, 12px); }
 .chart-wrap .tooltip { max-height: 200px; overflow: hidden; }
 .pareto-tooltip .t-row { justify-content: space-between; gap: 16px; }
@@ -367,6 +443,17 @@ svg.pareto-svg { width: 100%; height: auto; aspect-ratio: 900 / 520; display: bl
 .pareto-panel .stat-label { color: var(--ink-muted); font-size: 11px; margin: 0 0 2px; }
 .pareto-panel .stat-value { font-weight: 600; font-variant-numeric: tabular-nums; margin: 0; }
 .node-power-root { position: relative; }
+.type-power-root { position: relative; }
+.type-power-svg, .node-power-svg { display: block; width: 100%; }
+/* The two by-type summaries share a row; each card keeps its own width so the
+   bar charts size to their column. Stacks below ~1100px. */
+.type-cards-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+.type-cards-row > .pareto-card { margin-bottom: 16px; min-width: 0; }
+@media (max-width: 1100px) { .type-cards-row { grid-template-columns: 1fr; } }
+.type-power-group { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; fill: var(--ink-secondary); }
+.type-power-tooltip .t-row { justify-content: space-between; gap: 16px; }
+.type-power-tooltip .t-title { font-weight: 600; }
+.type-power-tooltip .t-sub { color: var(--ink-muted); font-size: 11px; margin-bottom: 4px; }
 svg.node-power-svg { width: 100%; display: block; overflow: visible; }
 .node-power-tooltip .t-row { justify-content: space-between; gap: 16px; }
 .node-power-tooltip .t-title { font-weight: 600; margin-bottom: 4px; }
@@ -396,13 +483,32 @@ function fmtAxis(v) {
   return v.toLocaleString(undefined, { maximumFractionDigits: a >= 100 ? 0 : a >= 10 ? 1 : 2 });
 }
 
-// Round tick positions for a linear axis: step is 1/2/2.5/5 x 10^n.
-function linearTicks(max, n) {
-  const rough = max / n, mag = Math.pow(10, Math.floor(Math.log10(rough || 1)));
+// Stroke for the single "node average" line: a neutral tone that reads on both
+// themes and is distinct from the host hues. (SVG stroke attributes can't take a
+// CSS variable reference via setAttribute in every renderer, so it is literal.)
+const TYPE_LINE_COLOR = "hsl(210 15% 62%)";
+const TOTAL_LINE_COLOR = "hsl(38 80% 58%)";
+const DEVAVG_LINE_COLOR = "hsl(262 55% 62%)";
+
+// Round tick positions for a linear axis over [min, max]: step is 1/2/2.5/5 x 10^n.
+function linearTicks(min, max, n) {
+  const rough = (max - min) / n || 1, mag = Math.pow(10, Math.floor(Math.log10(rough)));
   const step = [1, 2, 2.5, 5, 10].map(s => s * mag).find(s => s >= rough) || mag;
   const out = [];
-  for (let v = 0; v <= max + 1e-9; v += step) out.push(v);
+  for (let v = Math.ceil(min / step - 1e-9) * step; v <= max + 1e-9; v += step) out.push(Math.abs(v) < step * 1e-6 ? 0 : v);
   return out;
+}
+
+// Linear y-range for visible data in [lo, hi]. Anchors at 0 when the data comes
+// within 40% of the range of it (so idle-to-load traces keep their baseline);
+// otherwise starts just under the minimum so a band of lines sitting at
+// 300-600 W isn't drawn in the top half of an axis that begins at 0.
+function linearRange(lo, hi) {
+  if (!(hi > 0)) return [0, 1];
+  if (!(lo < hi)) lo = hi * 0.9;
+  const span = hi - lo;
+  const start = lo <= span * 0.4 ? 0 : lo - span * 0.08;
+  return [start, hi + span * 0.08];
 }
 
 function nearestIndex(arr, target) {
@@ -422,7 +528,6 @@ function svgEl(tag, attrs) {
 }
 
 const STROKE_PATTERNS = ["", "5 4", "1.5 3"];
-const MAX_END_LABELS = 4;
 let clipCounter = 0;
 
 function lowerBound(arr, target) {
@@ -434,6 +539,16 @@ function lowerBound(arr, target) {
 // A chart group is one or more stacked time-series charts (GPU over CPU) that share
 // an x domain: hovering any one drives the crosshair + tooltip on all of them, and a
 // drag on any one zooms all of them. Double-click resets the zoom.
+// Page-wide view preferences for every power-over-time panel, so switching
+// Pareto points (each point has its own pre-rendered chart group) or moving
+// between tabs keeps the chosen granularity and y-scales. Changing a toggle in
+// one panel broadcasts to all.
+const CHART_PREFS = { granularity: "type", scales: {} };   // scales: chart title -> "linear" | "log"; default view = node average
+const CHART_GROUPS = [];
+function broadcastChartPrefs(origin) {
+  CHART_GROUPS.forEach(g => { if (g !== origin && g.applyPrefs) g.applyPrefs(); });
+}
+
 function initChartGroup(group) {
   // Shared series: copy from the source group (same run) instead of re-parsing a
   // second embedded copy. Sources are initialised first (document order).
@@ -445,7 +560,13 @@ function initChartGroup(group) {
   const charts = [...group.querySelectorAll(".chart-sub")].map((sub, i) => ({
     sub,
     unit: sub.dataset.unit === undefined ? "W" : sub.dataset.unit,
+    ylabel: sub.dataset.ylabel || "",
     data: sub.dataset.series ? JSON.parse(sub.dataset.series) : (sourceSubs ? sourceSubs[i] : []),
+    deviceData: null,   // per-device series, kept while another view is shown
+    nodeData: null,     // per-node sums, built on first use
+    typeData: null,     // mean across the chart's nodes (one line), built on first use
+    totalData: null,    // sum of every device in the chart (one line), built on first use
+    devAvgData: null,   // mean across every device in the chart (one line), built on first use
     svg: sub.querySelector("svg.chart"),
     overlay: sub.querySelector(".overlay"),
     crosshair: sub.querySelector(".crosshair"),
@@ -463,11 +584,13 @@ function initChartGroup(group) {
 
   // The viewBox tracks the rendered pixel width (1 unit = 1 px) so text and
   // strokes never stretch; only the plot area widens with the window.
-  const H = 220, padL = 46, padR = 12, padT = 10, padB = 22;
+  const H = 220, padL = 62, padR = 12, padT = 10, padB = 22;   // padL leaves room for the rotated y-axis caption
   const plotH = H - padT - padB;
   let W = 900, plotW = W - padL - padR;
   function layout() {
-    W = Math.max(400, Math.round(charts[0].svg.getBoundingClientRect().width || 900));
+    // Width from any chart that is currently laid out (a collapsed section's charts measure 0).
+    const ref = charts.find(c => c.svg.getBoundingClientRect().width > 0) || charts[0];
+    W = Math.max(400, Math.round(ref.svg.getBoundingClientRect().width || 900));
     plotW = W - padL - padR;
     charts.forEach(c => {
       c.svg.setAttribute("viewBox", "0 0 " + W + " " + H);
@@ -489,7 +612,8 @@ function initChartGroup(group) {
     c.band.setAttribute("y", padT); c.band.setAttribute("height", plotH);
     const clipId = "clip-" + (clipCounter++);
     const clip = svgEl("clipPath", { id: clipId });
-    c.clipRect = svgEl("rect", { x: padL, y: 0, width: plotW, height: H });
+    // Clip to the plot area vertically too: with a non-zero y origin, a line can dip below the axis.
+    c.clipRect = svgEl("rect", { x: padL, y: padT, width: plotW, height: plotH });
     clip.appendChild(c.clipRect);
     c.svg.insertBefore(clip, c.overlay);
     c.gGrid = svgEl("g"); c.gLines = svgEl("g", { "clip-path": "url(#" + clipId + ")" }); c.gLabels = svgEl("g");
@@ -497,12 +621,18 @@ function initChartGroup(group) {
   });
 
   charts.forEach(c => {
+    c.title = (c.sub.querySelector(".chart-sub-title") || {}).textContent || "";
     c.sub.querySelectorAll(".yscale-btn").forEach(btn => btn.addEventListener("click", () => {
-      c.scale = btn.dataset.scale;
-      c.sub.querySelectorAll(".yscale-btn").forEach(b => b.classList.toggle("on", b === btn));
+      CHART_PREFS.scales[c.title] = btn.dataset.scale;
+      setScale(c, btn.dataset.scale);
       draw();
+      broadcastChartPrefs(group);
     }));
   });
+  function setScale(c, scale) {
+    c.scale = scale;
+    c.sub.querySelectorAll(".yscale-btn").forEach(b => b.classList.toggle("on", b.dataset.scale === scale));
+  }
 
   function draw() {
     const zoomed = tMin > fullMin || tMax < fullMax;
@@ -522,31 +652,36 @@ function initChartGroup(group) {
       // y scale: max over the visible time range of the *visible* series, so hiding a
       // role or host (or zooming) rescales to what's left. Falls back to every
       // series when all are hidden so the axis doesn't collapse.
-      let wMax = 0, wMinPos = Infinity;
+      let wMax = 0, wMin = Infinity, wMinPos = Infinity;
       const anyVisible = c.data.some((s, i) => !c.hidden.has(i));
       c.data.forEach((s, i) => {
         if (anyVisible && c.hidden.has(i)) return;
         const lo = lowerBound(s.t, tMin), hi = lowerBound(s.t, tMax + 1e-9);
-        for (let j = lo; j < hi; j++) { const v = s.w[j]; if (v > wMax) wMax = v; if (v > 0 && v < wMinPos) wMinPos = v; }
+        for (let j = lo; j < hi; j++) {
+          const v = s.w[j];
+          if (v > wMax) wMax = v; if (v < wMin) wMin = v; if (v > 0 && v < wMinPos) wMinPos = v;
+        }
       });
-      wMax = wMax <= 0 ? 1 : wMax * 1.08;
+      const [yLo, yHi] = linearRange(isFinite(wMin) ? wMin : 0, wMax);
+      wMax = isFinite(wMax) && wMax > 0 ? wMax : 1;
       const isLog = c.scale === "log" && isFinite(wMinPos);
       // Log floor: one decade below the smallest positive value, clamped so zeros and
       // gaps still land on the axis instead of at -infinity.
       const logLo = isLog ? Math.pow(10, Math.floor(Math.log10(wMinPos))) : 0;
-      const lgLo = isLog ? Math.log10(logLo) : 0, lgSpan = isLog ? Math.log10(wMax) - lgLo || 1 : 1;
+      const logHi = wMax * 1.08;
+      const lgLo = isLog ? Math.log10(logLo) : 0, lgSpan = isLog ? Math.log10(logHi) - lgLo || 1 : 1;
       const y = isLog
         ? w => padT + plotH - (w <= logLo ? 0 : (Math.log10(w) - lgLo) / lgSpan) * plotH
-        : w => padT + plotH - (w / wMax) * plotH;
+        : w => padT + plotH - ((w - yLo) / (yHi - yLo)) * plotH;
 
       let ticks;
       if (isLog) {
         ticks = [];
-        for (let e = Math.ceil(lgLo); Math.pow(10, e) <= wMax; e++) ticks.push(Math.pow(10, e));
+        for (let e = Math.ceil(lgLo); Math.pow(10, e) <= logHi; e++) ticks.push(Math.pow(10, e));
         if (!ticks.length || ticks[0] > logLo) ticks.unshift(logLo);
         if (ticks.length <= 2) [2, 5].forEach(m => { const v = m * logLo; if (v < wMax) ticks.push(v); const v2 = m * logLo * 10; if (v2 < wMax) ticks.push(v2); });
         ticks.sort((a, b) => a - b);
-      } else ticks = linearTicks(wMax, 4);
+      } else ticks = linearTicks(yLo, yHi, 4);
       ticks.forEach(v => {
         const gy = y(v);
         c.gGrid.appendChild(svgEl("line", { class: "gridline", x1: padL, x2: W - padR, y1: gy, y2: gy }));
@@ -554,6 +689,12 @@ function initChartGroup(group) {
         label.textContent = fmtAxis(v);
         c.gLabels.appendChild(label);
       });
+      if (c.ylabel) {
+        const cy = padT + plotH / 2;
+        const cap = svgEl("text", { class: "axis-caption", x: 11, y: cy, "text-anchor": "middle", transform: "rotate(-90 11 " + cy + ")" });
+        cap.textContent = c.ylabel + (isLog ? " \u2014 log" : "");
+        c.gLabels.appendChild(cap);
+      }
       [0, 0.25, 0.5, 0.75, 1].forEach(f => {
         const gx = padL + f * plotW;
         if (f > 0 && f < 1) c.gGrid.appendChild(svgEl("line", { class: "gridline", x1: gx, x2: gx, y1: padT, y2: padT + plotH }));
@@ -573,17 +714,9 @@ function initChartGroup(group) {
           "stroke-linejoin": "round", "stroke-linecap": "round" });
         if (STROKE_PATTERNS[s.pattern]) poly.setAttribute("stroke-dasharray", STROKE_PATTERNS[s.pattern]);
         c.gLines.appendChild(poly);
+        // No end-of-line labels or markers: the legend chips and the hover tooltip
+        // identify every line, and labels collided on charts with many series.
         const els = [poly];
-        if (!zoomed) {
-          const lastT = s.t[s.t.length - 1], lastW = s.w[s.w.length - 1];
-          const dot = svgEl("circle", { cx: x(lastT), cy: y(lastW), r: 3, fill: s.color, stroke: "var(--surface)", "stroke-width": "1.5" });
-          c.gLines.appendChild(dot); els.push(dot);
-          if (c.data.length > 1 && c.data.length <= MAX_END_LABELS) {  // a lone series is already named by its title
-            const label = svgEl("text", { class: "end-label", x: Math.min(x(lastT) + 6, W - padR - 2), y: y(lastW) + 3 });
-            label.textContent = s.label;
-            c.gLabels.appendChild(label); els.push(label);
-          }
-        }
         if (c.hidden.has(i)) els.forEach(el => { el.style.display = "none"; });
         return els;
       });
@@ -666,15 +799,180 @@ function initChartGroup(group) {
 
     c.keys = [...c.sub.querySelectorAll(".legend-key")];
     c.keys.forEach((key, i) => {
-      key.addEventListener("click", () => { setHidden(c, i, !c.hidden.has(i)); syncHostKeys(); syncRoleKeys(); rescale(); });
+      key.addEventListener("click", () => { setHidden(c, i, !c.hidden.has(i)); syncHostKeys(); rescale(); });
     });
   });
 
   function setHidden(c, i, off) {
     if (off) c.hidden.add(i); else c.hidden.delete(i);
-    c.keys[i].classList.toggle("off", off);
+    if (c.keys[i]) c.keys[i].classList.toggle("off", off);
     (c.lineEls[i] || []).forEach(el => { el.style.display = off ? "none" : ""; });
   }
+
+  // Per-node view: sum each host's device lines into one. Device series are
+  // min/max-downsampled independently, so their timestamps don't line up; each
+  // is sampled onto a shared grid (union of all timestamps, thinned to <= 2400
+  // points) by carrying the last value forward. Only power charts (unit W) with
+  // more than one device per host are affected.
+  function sharedGrid(series) {
+    const allT = []; series.forEach(s => s.t.forEach(v => allT.push(v)));
+    allT.sort((a, b) => a - b);
+    const grid = []; const stride = Math.max(1, Math.floor(allT.length / 2400));
+    for (let i = 0; i < allT.length; i += stride) if (!grid.length || allT[i] > grid[grid.length - 1]) grid.push(allT[i]);
+    return grid;
+  }
+  // Sum of the given series sampled onto grid (last value carried forward), scaled by k.
+  function sumOnGrid(series, grid, k) {
+    const w = new Float64Array(grid.length);
+    series.forEach(s => {
+      let j = 0;
+      for (let g = 0; g < grid.length; g++) {
+        while (j + 1 < s.t.length && s.t[j + 1] <= grid[g]) j++;
+        if (s.t[j] <= grid[g]) w[g] += s.w[j];
+      }
+    });
+    return Array.from(w, v => Math.round(v * k * 10) / 10);
+  }
+  function statsOf(arr) {
+    const sorted = [...arr].sort((a, b) => a - b), q = f => sorted[Math.min(sorted.length - 1, Math.floor(f * (sorted.length - 1)))];
+    return { mean: arr.reduce((a, b) => a + b, 0) / arr.length, min: sorted[0], p50: q(0.5), p95: q(0.95), max: sorted[sorted.length - 1] };
+  }
+  function deviceNoun(series) { return series[0].label.includes("socket") ? "sockets" : "GPUs"; }
+  // Always applicable: a host with one device just yields that device's line under
+  // the node's name, so every chart in the panel shows the same granularity.
+  function buildNodeData(series) {
+    const byHost = new Map();
+    series.forEach(s => { if (s.host) (byHost.get(s.host) || byHost.set(s.host, []).get(s.host)).push(s); });
+    if (!byHost.size) return null;
+    const grid = sharedGrid(series);
+    const out = [];
+    byHost.forEach((devs, host) => {
+      const arr = sumOnGrid(devs, grid, 1);
+      out.push({ label: host + " (" + devs.length + " " + deviceNoun(devs) + ")", host, roles: [...new Set(devs.flatMap(s => s.roles || []))],
+        color: devs[0].color, pattern: 0, t: grid, w: arr, stats: statsOf(arr) });
+    });
+    return out;
+  }
+  // Node-type average: this chart already holds one role's devices (or every
+  // device when the run has a single role), so its hosts *are* the node type.
+  // One line = sum over all devices / number of hosts, i.e. the mean node draw.
+  // A single-node type is the mean of one: the same line as its node sum, labelled
+  // as such, so the view stays consistent across sections.
+  function buildTypeData(series, heading) {
+    const hosts = new Set(series.map(s => s.host).filter(Boolean));
+    if (!hosts.size) return null;
+    const grid = sharedGrid(series);
+    const arr = sumOnGrid(series, grid, 1 / hosts.size);
+    const roles = [...new Set(series.flatMap(s => s.roles || []))];
+    const what = (heading || (roles.length ? roles.join("+") : "all")) + (hosts.size === 1 ? " node" : " nodes");
+    const count = hosts.size === 1 ? [...hosts][0] : hosts.size + " nodes";
+    return [{ label: (hosts.size === 1 ? "node total \u2014 " : "mean per node \u2014 ") + what + " (" + count + ", " + series.length + " " + deviceNoun(series) + ")",
+      host: "", roles, color: TYPE_LINE_COLOR, pattern: 0, t: grid, w: arr, stats: statsOf(arr) }];
+  }
+  function rebuildLegend(c) {
+    const legend = c.sub.querySelector(".legend-details .legend");
+    const hint = c.sub.querySelector(".legend-details .fold-hint");
+    if (!legend) return;
+    legend.innerHTML = "";
+    c.data.forEach(s => {
+      const key = document.createElement("span"); key.className = "legend-key"; key.title = "click to hide/show";
+      const sw = document.createElement("span"); sw.className = "legend-swatch"; sw.style.background = s.color;
+      key.appendChild(sw); key.appendChild(document.createTextNode(s.label)); legend.appendChild(key);
+    });
+    if (hint) hint.textContent = "\u2014 " + c.data.length + (c.data.length === 1 ? " line" : " lines") + (c.data.length > 1 ? "; click to show or hide individual " + (c.granularity === "node" ? "nodes" : "GPUs / sockets") : "");
+    const table = c.sub.querySelector(".stats-table tbody");
+    if (table) {
+      table.innerHTML = "";
+      c.data.forEach(s => {
+        const tr = document.createElement("tr");
+        [s.label, s.stats.mean, s.stats.min, s.stats.p50, s.stats.p95, s.stats.max].forEach((v, k) => {
+          const td = document.createElement("td"); td.textContent = k === 0 ? v : fmtNum(v, 2); tr.appendChild(td);
+        });
+        table.appendChild(tr);
+      });
+    }
+    c.keys = [...legend.querySelectorAll(".legend-key")];
+    c.keys.forEach((key, i) => key.addEventListener("click", () => { setHidden(c, i, !c.hidden.has(i)); syncHostKeys(); rescale(); }));
+  }
+  // Total: every device in the chart summed -- e.g. all decode GPUs, or all
+  // prefill sockets -- so the section's aggregate draw can be read directly.
+  function buildTotalData(series, heading) {
+    if (!series.length) return null;
+    const hosts = new Set(series.map(s => s.host).filter(Boolean));
+    const grid = sharedGrid(series);
+    const arr = sumOnGrid(series, grid, 1);
+    const roles = [...new Set(series.flatMap(s => s.roles || []))];
+    const what = (heading || (roles.length ? roles.join("+") : "all")) + (hosts.size === 1 ? " node" : " nodes");
+    return [{ label: "total \u2014 " + what + " (" + hosts.size + (hosts.size === 1 ? " node, " : " nodes, ") + series.length + " " + deviceNoun(series) + ")",
+      host: "", roles, color: TOTAL_LINE_COLOR, pattern: 0, t: grid, w: arr, stats: statsOf(arr) }];
+  }
+  // Device average: sum over every device in the chart / device count -- the mean
+  // draw of one GPU (or one socket) on this node type, comparable across topologies.
+  function buildDevAvgData(series, heading) {
+    if (!series.length) return null;
+    const hosts = new Set(series.map(s => s.host).filter(Boolean));
+    const grid = sharedGrid(series);
+    const arr = sumOnGrid(series, grid, 1 / series.length);
+    const roles = [...new Set(series.flatMap(s => s.roles || []))];
+    const what = (heading || (roles.length ? roles.join("+") : "all")) + (hosts.size === 1 ? " node" : " nodes");
+    const noun = deviceNoun(series) === "sockets" ? "socket" : "GPU";
+    return [{ label: "mean per " + noun + " \u2014 " + what + " (" + series.length + " " + deviceNoun(series) + " on " + hosts.size + (hosts.size === 1 ? " node)" : " nodes)"),
+      host: "", roles, color: DEVAVG_LINE_COLOR, pattern: 0, t: grid, w: arr, stats: statsOf(arr) }];
+  }
+  function chartHeading(c) {
+    // "Prefill nodes — GPU power (W)" -> "prefill"; plain "GPU power (W)" -> null
+    const title = c.sub.querySelector(".chart-sub-title");
+    const m = title && title.textContent.match(/^(.*?) nodes? \u2014/);
+    return m ? m[1].toLowerCase() : null;
+  }
+  let granularity = "device";
+  function setGranularity(gran) {
+    granularity = gran;
+    charts.forEach(c => {
+      if (c.unit !== "W") return;
+      const base = c.deviceData || c.data;
+      let next = null;
+      if (gran === "node") {
+        if (c.nodeData === null) c.nodeData = buildNodeData(base) || false;
+        next = c.nodeData || null;
+      } else if (gran === "type") {
+        if (c.typeData === null) c.typeData = buildTypeData(base, chartHeading(c)) || false;
+        next = c.typeData || null;
+      } else if (gran === "total") {
+        if (c.totalData === null) c.totalData = buildTotalData(base, chartHeading(c)) || false;
+        next = c.totalData || null;
+      } else if (gran === "dev") {
+        if (c.devAvgData === null) c.devAvgData = buildDevAvgData(base, chartHeading(c)) || false;
+        next = c.devAvgData || null;
+      } else next = c.deviceData;
+      if (!next) { if (gran === "device") return; next = base; }   // only when series carry no host at all
+      if (!c.deviceData) c.deviceData = c.data;
+      c.data = next;
+      c.granularity = gran;
+      c.hidden.clear();
+      rebuildLegend(c);
+    });
+    group.querySelectorAll(".gran-btn").forEach(b => b.classList.toggle("on", b.dataset.gran === gran));
+    syncHostKeys();
+    draw();
+  }
+  group.querySelectorAll(".gran-btn").forEach(btn => btn.addEventListener("click", () => {
+    CHART_PREFS.granularity = btn.dataset.gran;
+    setGranularity(btn.dataset.gran);
+    broadcastChartPrefs(group);
+  }));
+  // Bring this panel in line with the page-wide preferences (called at init and
+  // whenever another panel changes a toggle). Cheap when nothing changed.
+  group.applyPrefs = () => {
+    let changed = false;
+    charts.forEach(c => {
+      const want = CHART_PREFS.scales[c.title];
+      if (want && want !== c.scale) { setScale(c, want); changed = true; }
+    });
+    if (CHART_PREFS.granularity !== granularity) { granularity = CHART_PREFS.granularity; setGranularity(granularity); changed = false; }
+    else if (changed) draw();
+  };
+  CHART_GROUPS.push(group);
   // Visibility changes rescale the y-axis; callers batch their setHidden calls and
   // redraw once.
   function rescale() { draw(); }
@@ -700,31 +998,7 @@ function initChartGroup(group) {
       const devs = hostDevices(key.dataset.host);
       const allOff = devs.every(([c, i]) => c.hidden.has(i));
       devs.forEach(([c, i]) => setHidden(c, i, !allOff));
-      syncHostKeys(); syncRoleKeys(); rescale();
-    });
-  });
-
-  // Role chips (prefill / decode ...): toggle every device tagged with that role.
-  const roleKeys = [...group.querySelectorAll(".role-key")];
-  function roleDevices(role) {
-    const out = [];
-    charts.forEach(c => c.data.forEach((s, i) => { if ((s.roles || []).includes(role)) out.push([c, i]); }));
-    return out;
-  }
-  function syncRoleKeys() {
-    roleKeys.forEach(key => {
-      const devs = roleDevices(key.dataset.role);
-      const hiddenN = devs.filter(([c, i]) => c.hidden.has(i)).length;
-      key.classList.toggle("off", devs.length > 0 && hiddenN === devs.length);
-      key.classList.toggle("partial", hiddenN > 0 && hiddenN < devs.length);
-    });
-  }
-  roleKeys.forEach(key => {
-    key.addEventListener("click", () => {
-      const devs = roleDevices(key.dataset.role);
-      const allOff = devs.every(([c, i]) => c.hidden.has(i));
-      devs.forEach(([c, i]) => setHidden(c, i, !allOff));
-      syncHostKeys(); syncRoleKeys(); rescale();
+      syncHostKeys(); rescale();
     });
   });
 
@@ -741,6 +1015,9 @@ function initChartGroup(group) {
     layout(); draw();
   };
 
+  // Adopt page-wide prefs first (setGranularity draws), then the initial layout/draw.
+  charts.forEach(c => { const want = CHART_PREFS.scales[c.title]; if (want) setScale(c, want); });
+  if (CHART_PREFS.granularity !== "device") setGranularity(CHART_PREFS.granularity);
   if (group.dataset.focusBench) {
     group.focusPhase(group.dataset.focusBench, Number(group.dataset.focusConc));
   } else {
@@ -754,16 +1031,15 @@ function initChartGroup(group) {
       pending = requestAnimationFrame(() => { pending = null; layout(); draw(); });
     }).observe(charts[0].svg);
   }
+  // Charts inside a section that was collapsed at init (or while the panel was
+  // hidden) were never measured; lay out again when a section opens.
+  const relayoutOnOpen = el => el.addEventListener("toggle", () => { if (el.open) { layout(); draw(); } });
+  group.querySelectorAll("details.chart-section").forEach(relayoutOnOpen);
+  const card = group.closest("details.conc-card");
+  if (card) relayoutOnOpen(card);
 }
 
 document.querySelectorAll(".chart-group").forEach(initChartGroup);
-document.querySelectorAll(".stats-toggle").forEach(t => {
-  t.addEventListener("click", () => {
-    const table = t.nextElementSibling;
-    const open = table.classList.toggle("open");
-    t.textContent = (open ? "hide" : "show") + " device stats table";
-  });
-});
 
 document.querySelectorAll(".tabs").forEach(tabs => {
   const container = tabs.parentElement;
@@ -787,8 +1063,175 @@ const NODE_POWER_SEGMENTS = [
   { key: "dram",     label: "DRAM",             color: "hsl(20 80% 55%)" },
   { key: "cpu_rest", label: "CPU envelope (other)", color: "hsl(35 40% 72%)" },
   { key: "cpu",      label: "CPU (socket total)", color: "hsl(35 85% 50%)" },
+  { key: "cpu_est",  label: "CPU (estimated, not measured)", color: "hsl(35 30% 60%)" },
+  { key: "overhead", label: "Rack overhead (projected, assumed)", color: "hsl(262 45% 60%)" },
 ];
+// Assumed additions from the point's power budget (see GPU_POWER_BUDGETS in Python):
+// per-GPU rack overhead, and a per-socket CPU stand-in when the run has no CPU leg.
+function overheadPerGpu(point) { return point && point.budget ? point.budget.overhead_w_per_gpu || 0 : 0; }
+function cpuEstimatePerGpu(point) {
+  return point && point.budget && point.cpu_estimated ? point.budget.cpu_estimate_w_per_gpu || 0 : 0;
+}
+// Category visibility for the by-type chart, shared across points (a legend
+// click persists like the granularity toggle).
+const TYPE_POWER_HIDDEN = new Set();
+const TYPE_ROLE_ORDER = ["prefill", "decode"];
+function roleKeyOf(n) {
+  const r = (n.roles || []).filter(Boolean).sort();
+  return r.length ? r.join("+") : "";
+}
+function roleHeading(key) {
+  if (key === "prefill") return "Prefill nodes";
+  if (key === "decode") return "Decode nodes";
+  if (!key) return "Nodes without a worker role";
+  return key.charAt(0).toUpperCase() + key.slice(1) + " nodes";
+}
+
+function rerenderBreakdownCards() {
+  document.querySelectorAll(".type-power-card, .node-power-card").forEach(c => {
+    if (c.__point) (c.classList.contains("type-power-card") ? renderTypePower : renderNodePower)(c, c.__point);
+  });
+}
+
+function renderTypePower(card, point) {
+  card.__point = point;
+  const svg = card.querySelector("svg.type-power-svg");
+  const legend = card.querySelector(".type-power-legend");
+  const sub = card.querySelector(".type-power-sub");
+  const tip = card.querySelector(".type-power-tooltip");
+  const notices = card.querySelector(".type-power-notices");
+  const nodes = point.node_power || [];
+  svg.innerHTML = ""; legend.innerHTML = "";
+  card.hidden = !nodes.length;
+  if (!nodes.length) return;
+  sub.textContent = point.label;
+  const powerWarnings = (point.warnings || []).filter(w => /power (missing|not collected)/i.test(w));
+  notices.innerHTML = ""; powerWarnings.forEach(w => { const d = document.createElement("div"); d.textContent = "\u26a0 " + w; notices.appendChild(d); });
+  notices.hidden = !powerWarnings.length;
+
+  // Group nodes by role; per group compute mean W per GPU and per socket (with rails).
+  const groups = new Map();
+  nodes.forEach(n => { const k = roleKeyOf(n); (groups.get(k) || groups.set(k, []).get(k)).push(n); });
+  const keys = [...groups.keys()].sort((a, b) => {
+    const ia = TYPE_ROLE_ORDER.indexOf(a), ib = TYPE_ROLE_ORDER.indexOf(b);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || (a === "" ? 1 : b === "" ? -1 : a.localeCompare(b));
+  });
+  const anyRails = nodes.some(n => n.cpu_rails_w && Object.keys(n.cpu_rails_w).length);
+  const rows = [];   // { group, label, segs:[[key, w]], total, meta }
+  keys.forEach(k => {
+    const ns = groups.get(k);
+    const gpuN = ns.reduce((a, n) => a + (n.gpu_count || 0), 0);
+    const gpuW = ns.reduce((a, n) => a + (n.gpu_w || 0), 0);
+    const sockN = ns.reduce((a, n) => a + (n.socket_count || 0), 0);
+    const cpuW = ns.reduce((a, n) => a + (n.cpu_w || 0), 0);
+    const heading = roleHeading(k);
+    if (gpuN > 0) {
+      rows.push({ group: heading, label: "per GPU", segs: [["gpu", gpuW / gpuN]], meta: gpuN + " GPUs on " + ns.length + (ns.length === 1 ? " node" : " nodes") });
+    }
+    if (sockN === 0 && cpuEstimatePerGpu(point) > 0 && gpuN > 0) {
+      const b = point.budget, perSocket = cpuEstimatePerGpu(point) * b.gpus_per_node / b.sockets_per_node;
+      rows.push({ group: heading, label: "per CPU socket", segs: [["cpu_est", perSocket]],
+        meta: "assumed: " + fmtNum(cpuEstimatePerGpu(point), 0) + " W/GPU \u00d7 " + b.gpus_per_node + " GPUs / " + b.sockets_per_node + " sockets; CPU not measured" });
+    }
+    if (sockN > 0) {
+      const segs = [];
+      if (anyRails) {
+        let acc = 0;
+        ["cpu_rail", "soc", "dram"].forEach(rk => {
+          const tot = ns.reduce((a, n) => a + ((n.cpu_rails_w || {})[rk] || 0), 0);
+          if (tot > 0) { segs.push([rk, tot / sockN]); acc += tot / sockN; }
+        });
+        if (cpuW / sockN - acc > 0.5) segs.push(["cpu_rest", cpuW / sockN - acc]);
+        if (!segs.length) segs.push(["cpu", cpuW / sockN]);
+      } else segs.push(["cpu", cpuW / sockN]);
+      rows.push({ group: heading, label: "per CPU socket", segs, meta: sockN + " sockets on " + ns.length + (ns.length === 1 ? " node" : " nodes") });
+    }
+    // Assumed rack overhead gets its own row so the measured per-GPU bar stays a measurement.
+    if (gpuN > 0 && overheadPerGpu(point) > 0)
+      rows.push({ group: heading, label: "overhead per GPU", segs: [["overhead", overheadPerGpu(point)]], meta: "assumed rack overhead (projected basis); not measured" });
+  });
+
+  const used = new Set(rows.flatMap(r => r.segs.map(([k]) => k)));
+  NODE_POWER_SEGMENTS.filter(sg => used.has(sg.key)).forEach(sg => {
+    const key = document.createElement("span"); key.className = "legend-key" + (TYPE_POWER_HIDDEN.has(sg.key) ? " off" : "");
+    key.title = "click to hide/show this category";
+    const sw = document.createElement("span"); sw.className = "legend-swatch"; sw.style.background = sg.color; sw.style.height = "10px";
+    key.appendChild(sw); key.appendChild(document.createTextNode(sg.label)); legend.appendChild(key);
+    key.addEventListener("click", () => {
+      if (TYPE_POWER_HIDDEN.has(sg.key)) TYPE_POWER_HIDDEN.delete(sg.key); else TYPE_POWER_HIDDEN.add(sg.key);
+      rerenderBreakdownCards();
+    });
+  });
+  card.__point = point;
+
+  const visRows = rows.map(r => ({ ...r, segs: r.segs.filter(([k]) => !TYPE_POWER_HIDDEN.has(k)) }))
+    .map(r => ({ ...r, total: r.segs.reduce((a, [, v]) => a + v, 0) }));
+  const maxW = Math.max(...visRows.map(r => r.total), 0) * 1.08 || 1;
+  const W = Math.max(400, Math.round(svg.getBoundingClientRect().width || 900));
+  const rowH = 22, groupGap = 14, padL = 120, padR = 64, padT = 6, padB = 28;
+  const groupsInOrder = [...new Set(visRows.map(r => r.group))];
+  const H = padT + visRows.length * rowH + (groupsInOrder.length) * groupGap + padB;
+  svg.setAttribute("viewBox", "0 0 " + W + " " + H); svg.style.height = H + "px";
+  const x = v => padL + (v / maxW) * (W - padL - padR);
+  linearTicks(0, maxW, 5).forEach(v => {
+    const gx = x(v);
+    svg.appendChild(svgEl("line", { class: "gridline", x1: gx, x2: gx, y1: padT, y2: H - padB }));
+    const t = svgEl("text", { class: "axis-text", x: gx, y: H - padB + 12, "text-anchor": "middle" }); t.textContent = fmtAxis(v); svg.appendChild(t);
+  });
+  const xt = svgEl("text", { class: "axis-title", x: padL + (W - padL - padR) / 2, y: H - 4, "text-anchor": "middle" });
+  xt.textContent = "average watts per device (measured window)"; svg.appendChild(xt);
+
+  let yCursor = padT, lastGroup = null;
+  visRows.forEach(r => {
+    if (r.group !== lastGroup) {
+      yCursor += groupGap;
+      const gl = svgEl("text", { class: "type-power-group", x: 4, y: yCursor - 3 }); gl.textContent = r.group; svg.appendChild(gl);
+      lastGroup = r.group;
+    }
+    const y = yCursor + 3, h = rowH - 6;
+    const lbl = svgEl("text", { class: "axis-text", x: padL - 8, y: y + h / 2 + 3, "text-anchor": "end" }); lbl.textContent = r.label; svg.appendChild(lbl);
+    let acc = 0;
+    r.segs.forEach(([k, v]) => {
+      const sg = NODE_POWER_SEGMENTS.find(s2 => s2.key === k);
+      const rect = svgEl("rect", { x: x(acc), y, width: Math.max(0, x(acc + v) - x(acc)), height: h, fill: sg.color, stroke: "var(--surface)", "stroke-width": 1 });
+      rect.addEventListener("pointerenter", ev => {
+        tip.innerHTML = "<div class='t-title'>" + r.group + " \u2014 " + r.label + "</div><div class='t-sub'>" + r.meta + "</div>";
+        r.segs.forEach(([k2, vv]) => { const s2 = NODE_POWER_SEGMENTS.find(z => z.key === k2);
+          tip.innerHTML += "<div class='t-row'><span><span class='t-key' style='display:inline-block;width:10px;height:10px;margin-right:6px;background:" + s2.color + "'></span>" + s2.label + "</span><span class='t-val'>" + fmtNum(vv, 1) + " W</span></div>"; });
+        tip.innerHTML += "<div class='t-row'><span>total shown</span><span class='t-val'>" + fmtNum(r.total, 1) + " W</span></div>";
+        tip.style.opacity = 1;
+      });
+      rect.addEventListener("pointermove", ev => { const rc = card.querySelector(".type-power-root").getBoundingClientRect(); tip.style.left = (ev.clientX - rc.left + 12) + "px"; tip.style.top = (ev.clientY - rc.top + 12) + "px"; });
+      rect.addEventListener("pointerleave", () => { tip.style.opacity = 0; });
+      svg.appendChild(rect); acc += v;
+    });
+    const val = svgEl("text", { class: "axis-text", x: x(acc) + 6, y: y + h / 2 + 3 }); val.textContent = fmtNum(r.total, 0) + " W"; svg.appendChild(val);
+    yCursor += rowH;
+  });
+}
+
+// Mean node per worker role: average each component across the role's nodes.
+function meanNodesByType(nodes) {
+  const groups = new Map();
+  nodes.forEach(n => { const k = roleKeyOf(n); (groups.get(k) || groups.set(k, []).get(k)).push(n); });
+  const keys = [...groups.keys()].sort((a, b) => {
+    const ia = TYPE_ROLE_ORDER.indexOf(a), ib = TYPE_ROLE_ORDER.indexOf(b);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || (a === "" ? 1 : b === "" ? -1 : a.localeCompare(b));
+  });
+  return keys.map(k => {
+    const ns = groups.get(k);
+    const mean = pick => { const vals = ns.map(pick).filter(v => v != null); return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null; };
+    const railKeys = [...new Set(ns.flatMap(n => Object.keys(n.cpu_rails_w || {})))];
+    const rails = {}; railKeys.forEach(rk => { const m = mean(n => (n.cpu_rails_w || {})[rk]); if (m != null) rails[rk] = m; });
+    return { hostname: roleHeading(k) + " (mean of " + ns.length + (ns.length === 1 ? " node)" : " nodes)"),
+      gpu_w: mean(n => n.gpu_w), cpu_w: mean(n => n.cpu_w), cpu_rails_w: rails, roles: k ? k.split("+") : [],
+      gpu_count: mean(n => n.gpu_count), socket_count: mean(n => n.socket_count) };
+  });
+}
+
 function renderNodePower(card, point) {
+  card.__point = point;
+  if (card.classList.contains("type-node-card")) point = { ...point, node_power: meanNodesByType(point.node_power || []) };
   const svg = card.querySelector("svg.node-power-svg");
   const legend = card.querySelector(".node-power-legend");
   const sub = card.querySelector(".node-power-sub");
@@ -807,7 +1250,14 @@ function renderNodePower(card, point) {
   notices.hidden = !powerWarnings.length;
 
   const anyRails = nodes.some(n => n.cpu_rails_w && Object.keys(n.cpu_rails_w).length);
-  const rows = nodes.map(n => {
+  // Group by node type: prefill, decode, other roles, then role-less hosts; the
+  // by-type card's rows are already one per type so grouping is a no-op there.
+  const byType = !card.classList.contains("type-node-card") && nodes.some(n => (n.roles || []).length);
+  const roleRank = k => { const i = TYPE_ROLE_ORDER.indexOf(k); return i < 0 ? (k === "" ? 999 : 99) : i; };
+  const ordered = byType
+    ? [...nodes].sort((a, b) => roleRank(roleKeyOf(a)) - roleRank(roleKeyOf(b)) || roleKeyOf(a).localeCompare(roleKeyOf(b)) || a.hostname.localeCompare(b.hostname))
+    : nodes;
+  const rows = ordered.map(n => {
     const segs = [];
     if (n.gpu_w != null) segs.push(["gpu", n.gpu_w]);
     if (n.cpu_w != null) {
@@ -816,21 +1266,31 @@ function renderNodePower(card, point) {
         ["cpu_rail", "soc", "dram"].forEach(k => { if (n.cpu_rails_w[k] != null) { segs.push([k, n.cpu_rails_w[k]]); acc += n.cpu_rails_w[k]; } });
         if (n.cpu_w - acc > 0.5) segs.push(["cpu_rest", n.cpu_w - acc]);
       } else segs.push(["cpu", n.cpu_w]);
-    }
-    return { host: n.hostname, segs, total: segs.reduce((a, [, v]) => a + v, 0) };
+    } else if (cpuEstimatePerGpu(point) > 0 && (n.socket_count == null || n.socket_count === 0) && n.gpu_count)
+      segs.push(["cpu_est", cpuEstimatePerGpu(point) * n.gpu_count]);
+    if (overheadPerGpu(point) > 0 && n.gpu_count) segs.push(["overhead", overheadPerGpu(point) * n.gpu_count]);
+    return { host: n.hostname, group: byType ? roleHeading(roleKeyOf(n)) : null, segs, total: segs.reduce((a, [, v]) => a + v, 0) };
   });
+  const groupCount = byType ? new Set(rows.map(r => r.group)).size : 0;
   const used = new Set(rows.flatMap(r => r.segs.map(([k]) => k)));
   NODE_POWER_SEGMENTS.filter(sg => used.has(sg.key)).forEach(sg => {
-    const key = document.createElement("span"); key.className = "legend-key"; key.style.cursor = "default";
+    const key = document.createElement("span"); key.className = "legend-key" + (TYPE_POWER_HIDDEN.has(sg.key) ? " off" : "");
+    key.title = "Click to hide/show this category on all power-breakdown charts";
     const sw = document.createElement("span"); sw.className = "legend-swatch"; sw.style.background = sg.color; sw.style.height = "10px";
     key.appendChild(sw); key.appendChild(document.createTextNode(sg.label)); legend.appendChild(key);
+    key.addEventListener("click", () => {
+      if (TYPE_POWER_HIDDEN.has(sg.key)) TYPE_POWER_HIDDEN.delete(sg.key); else TYPE_POWER_HIDDEN.add(sg.key);
+      rerenderBreakdownCards();
+    });
   });
+  // Hidden categories drop out of the bars and the totals; the axis rescales to what's left.
+  rows.forEach(r => { r.segs = r.segs.filter(([k]) => !TYPE_POWER_HIDDEN.has(k)); r.total = r.segs.reduce((a, [, v]) => a + v, 0); });
 
-  const W = Math.max(500, Math.round(svg.getBoundingClientRect().width || 900));
-  const rowH = 22, padL = 110, padR = 60, padT = 8, padB = 28;
-  const H = padT + rows.length * rowH + padB;
+  const W = Math.max(400, Math.round(svg.getBoundingClientRect().width || 900));
+  const rowH = 22, groupGap = 16, padL = card.classList.contains("type-node-card") ? 180 : 110, padR = 60, padT = 8, padB = 28;
+  const H = padT + rows.length * rowH + groupCount * groupGap + padB;
   svg.setAttribute("viewBox", "0 0 " + W + " " + H); svg.style.height = H + "px";
-  const maxW = Math.max(...rows.map(r => r.total)) * 1.05 || 1;
+  const maxW = Math.max(0, ...rows.map(r => r.total)) * 1.05 || 1;
   const x = v => padL + (v / maxW) * (W - padL - padR);
   const unit = maxW >= 2000 ? "kW" : "W", div = unit === "kW" ? 1000 : 1;
   const step = [1, 2, 2.5, 5, 10].map(sf => sf * Math.pow(10, Math.floor(Math.log10(maxW / 5)))).find(sf => sf >= maxW / 6) || 1;
@@ -842,8 +1302,15 @@ function renderNodePower(card, point) {
   const xt = svgEl("text", { class: "axis-title", x: padL + (W - padL - padR) / 2, y: H - 4, "text-anchor": "middle" });
   xt.textContent = "Window-average power (" + unit + ")"; svg.appendChild(xt);
 
-  rows.forEach((r, i) => {
-    const y = padT + i * rowH + 3, h = rowH - 6;
+  let yCursor = padT, lastGroup = null;
+  rows.forEach(r => {
+    if (byType && r.group !== lastGroup) {
+      yCursor += groupGap;
+      const gl = svgEl("text", { class: "type-power-group", x: 4, y: yCursor - 4 }); gl.textContent = r.group; svg.appendChild(gl);
+      lastGroup = r.group;
+    }
+    const y = yCursor + 3, h = rowH - 6;
+    yCursor += rowH;
     const lbl = svgEl("text", { class: "axis-text", x: padL - 8, y: y + h / 2 + 3, "text-anchor": "end" });
     lbl.textContent = r.host; svg.appendChild(lbl);
     let acc = 0;
@@ -877,14 +1344,150 @@ const PARETO_AXES = {
   inv_tpot_p90:    { label: "1 / P90 TPOT (tok/s/user)", key: "inv_tpot_p90",    better: "max" },
   inv_tpot_p50:    { label: "1 / P50 TPOT (tok/s/user)", key: "inv_tpot_p50",    better: "max" },
   tpot_p90:        { label: "P90 TPOT (ms)",             key: "tpot_p90",        better: "min" },
-  tps_per_gpu_w:   { label: "Output tok/s / GPU W",      key: "tps_per_gpu_w",   better: "max" },
-  tps_per_total_w: { label: "Output tok/s / (GPU+CPU) W", key: "tps_per_total_w", better: "max" },
-  gpu_w:           { label: "Total GPU power (W)",       key: "gpu_w",           better: "min" },
-  gpu_w_per_gpu:   { label: "Power per GPU (W)",         key: "gpu_w_per_gpu",   better: "min" },
-  cpu_w:           { label: "Total CPU power (W)",       key: "cpu_w",           better: "min" },
-  total_w:         { label: "Total GPU+CPU power (W)",   key: "total_w",         better: "min" },
+  tps_per_gpu_w:   { label: "Output tok/s per GPU watt", key: "tps_per_gpu_w",   better: "max" },
+  tps_per_total_w: { label: "Output tok/s per watt (GPU+CPU)", key: "tps_per_total_w", better: "max" },
+  gpu_w:           { label: "Total GPU watts",           key: "gpu_w",           better: "min" },
+  gpu_w_per_gpu:   { label: "Watts per GPU",             key: "gpu_w_per_gpu",   better: "min" },
+  cpu_w:           { label: "Total CPU watts",           key: "cpu_w",           better: "min" },
+  total_w:         { label: "Total watts (GPU+CPU)",     key: "total_w",         better: "min" },
   concurrency:     { label: "Concurrency",               key: "concurrency",     better: "max" },
+  // Basis-split axes: one series (own frontier, own line style) per power basis.
+  // The metric key is suffixed with the variant key ("total_tps_per_mw__static").
+  total_tps_per_mw:  { label: "Total TPS / MW",  key: "total_tps_per_mw",  better: "max", split: true },
+  input_tps_per_mw:  { label: "Input TPS / MW",  key: "input_tps_per_mw",  better: "max", split: true },
+  output_tps_per_mw: { label: "Output TPS / MW", key: "output_tps_per_mw", better: "max", split: true },
+  node_w_per_gpu:    { label: "Watts per GPU",   key: "node_w_per_gpu",    better: "min", split: true },
 };
+
+// Power bases for the split axes (mirrors _POWER_VARIANTS in Python). Each has its
+// own frontier line style and point rendering so the series read apart even when
+// they share a family colour. `legend(p)` builds the chip text from the point's
+// budget figures so the assumed constants are always visible next to the data.
+const POWER_VARIANTS = [
+  { key: "measured", label: "Measured CPU+GPU", dash: "", hollow: false, tone: "base",
+    legend: () => "Measured CPU+GPU" },
+  { key: "projected", label: "Projected avg-rack", dash: "6 4", hollow: false, tone: "light",
+    legend: p => "Projected avg-rack" + (p ? " \u00b7 +" + fmtNum(p.budget.overhead_w_per_gpu, 0) + " W/GPU" : "") },
+  { key: "static", label: "Static budget", dash: "2 4", hollow: false, tone: "grey",
+    legend: p => "Static budget" + (p ? " \u00b7 " + fmtNum(p.budget.static_w_per_gpu, 0) + " W/GPU" : "") },
+];
+const NO_VARIANT = { key: "", dash: "", hollow: false, tone: "base" };
+// Legend/marker fill for a basis. (SVG fill attributes can't take a CSS variable
+// via setAttribute in every renderer -- an earlier hollow "var(--surface)" fill rendered black.)
+function variantFill(base, v) { return variantColor(base, v); }
+// Marker: circle for fully measured points, diamond when the point's CPU power is an
+// estimate from the budget (no CPU leg collected) -- the estimate flows into every
+// basis of that point, so all of its markers take the diamond.
+function paretoMarker(p, cx, cy, r, fill) {
+  if (!p.cpu_estimated) return svgEl("circle", { class: "pareto-point", cx, cy, r, fill });
+  const d = r * 1.25;
+  return svgEl("polygon", { class: "pareto-point estimated", fill,
+    points: cx + "," + (cy - d) + " " + (cx + d) + "," + cy + " " + cx + "," + (cy + d) + " " + (cx - d) + "," + cy });
+}
+function variantStroke(base, v) { return v.tone === "grey" ? "hsl(0 0% 30%)" : "var(--surface)"; }
+// Family colours are "hsl(H 70% 52%)"; derive the projected (lighter) and static
+// (desaturated grey) tones from the hue so the series stay tied to their family.
+function variantColor(base, variant) {
+  // No regex here: this JS lives in a non-raw Python string and backslash escapes get mangled.
+  if (!base || base.indexOf("hsl(") !== 0) return base;
+  const hue = base.slice(4).split(" ")[0];
+  if (variant.tone === "light") return "hsl(" + hue + " 60% 70%)";
+  if (variant.tone === "grey") return "hsl(" + hue + " 10% 62%)";
+  return base;
+}
+
+// Every scatter registers here so the budget editor can redraw them all.
+const PARETO_VIEWS = [];
+const BUDGET_FIELD_LABELS = ["Measured GPU + estimated CPU (avg)", "Projected avg-rack power (approx.)", "Static power budget"];
+const BUDGET_WARNING_RE = /^(No power budget for GPU type|CPU power not measured for this run)/;
+const POWER_BASES = ["measured", "projected", "static"];
+
+// Mirror of _power_variant_watts / _power_variant_metrics / the inspect-field and
+// warning text in Python: rewrite one point in place for a (possibly null) budget so
+// every consumer (scatter, legend chips, inspect panel, bar cards) sees the new
+// assumption without a rebuild.
+function applyBudget(p, b) {
+  p.budget = b;
+  const gpuW = p.m.gpu_w, cpuW = p.m.cpu_w, n = p.num_gpus;
+  const w = { measured: null, projected: null, static: null };
+  let est = false;
+  if (gpuW != null && n) {
+    if (cpuW != null) w.measured = gpuW + cpuW;
+    else if (b && b.cpu_estimate_w_per_gpu != null) { w.measured = gpuW + b.cpu_estimate_w_per_gpu * n; est = true; }
+    if (b) {
+      if (w.measured != null) w.projected = w.measured + b.overhead_w_per_gpu * n;
+      w.static = b.static_w_per_gpu * n;
+    }
+  }
+  p.power_basis_w = w; p.cpu_estimated = est;
+  const out = p.m.output_tps, tot = p.m.total_tps, inp = (out == null || tot == null) ? null : tot - out;
+  const perMw = (r, ww) => (r == null || !ww) ? null : r / (ww / 1e6);
+  POWER_BASES.forEach(k => {
+    p.m["total_tps_per_mw__" + k] = perMw(tot, w[k]); p.m["input_tps_per_mw__" + k] = perMw(inp, w[k]);
+    p.m["output_tps_per_mw__" + k] = perMw(out, w[k]); p.m["node_w_per_gpu__" + k] = (w[k] == null || !n) ? null : w[k] / n;
+  });
+  // Inspect-panel rows, spliced in after the measured total.
+  const f0 = fmtNum;
+  const fields = p.fields.filter(([k]) => !BUDGET_FIELD_LABELS.includes(k));
+  const add = [];
+  if (est && b) add.push(["Measured GPU + estimated CPU (avg)", f0(w.measured, 0) + " W (" + f0(b.cpu_estimate_w_per_gpu, 0) + " W per GPU assumed)"]);
+  if (b) {
+    add.push(["Projected avg-rack power (approx.)", f0(w.projected, 0) + " W (+" + f0(b.overhead_w_per_gpu, 0) + " W/GPU overhead)"]);
+    add.push(["Static power budget", f0(w.static, 0) + " W (" + f0(b.static_node_w, 0) + " W/node \u00f7 " + b.gpus_per_node + " GPUs)"]);
+  }
+  let at = fields.findIndex(([k]) => k === "Total watts, GPU+CPU (avg)");
+  at = at < 0 ? fields.length : at + 1;
+  fields.splice(at, 0, ...add);
+  p.fields = fields;
+  const warnings = (p.warnings || []).filter(x => !BUDGET_WARNING_RE.test(x));
+  if (!b) warnings.push("No power budget for GPU type '" + (p.gpu_type_key || "unknown") + "': projected and static series unavailable (add it to GPU_POWER_BUDGETS).");
+  else if (est) warnings.push("CPU power not measured for this run: the CPU+GPU, projected and static-vs-measured comparisons use an assumed " + f0(b.cpu_estimate_w_per_gpu, 0) + " W per GPU.");
+  p.warnings = warnings;
+}
+
+function initBudgetCard(card) {
+  if (!card) return;
+  const rows = [...card.querySelectorAll(".budget-row[data-gpu-type]")];
+  const num = el => { const v = parseFloat(el.value); return el.value.trim() === "" || !isFinite(v) ? null : v; };
+  function budgetFromRow(row) {
+    const d = JSON.parse(row.dataset.budgetDefaults);
+    const get = f => num(row.querySelector('[data-budget-field="' + f + '"]'));
+    const staticPerGpu = get("static_w_per_gpu"), overhead = get("overhead_w_per_gpu"), cpuEst = get("cpu_estimate_w_per_gpu");
+    if (staticPerGpu == null && overhead == null && cpuEst == null) return null;   // no budget at all
+    return { static_w_per_gpu: staticPerGpu || 0, static_node_w: (staticPerGpu || 0) * d.gpus_per_node, overhead_w_per_gpu: overhead || 0,
+      cpu_estimate_w_per_gpu: cpuEst, gpus_per_node: d.gpus_per_node, sockets_per_node: d.sockets_per_node };
+  }
+  function apply() {
+    rows.forEach(row => {
+      const gt = row.dataset.gpuType, b = budgetFromRow(row), d = JSON.parse(row.dataset.budgetDefaults);
+      row.querySelectorAll("input").forEach(el => {
+        const dv = d[el.dataset.budgetField]; el.classList.toggle("changed", (dv == null ? "" : String(dv)) !== (num(el) == null ? "" : String(num(el))));
+      });
+      const derived = row.querySelector(".budget-derived");
+      derived.textContent = b ? fmtNum(b.static_node_w, 0) + " W static per node \u00b7 " + fmtNum(b.overhead_w_per_gpu * b.gpus_per_node, 0) + " W overhead per node"
+        + (b.cpu_estimate_w_per_gpu != null ? " \u00b7 " + fmtNum(b.cpu_estimate_w_per_gpu * b.gpus_per_node / b.sockets_per_node, 0) + " W CPU est. per socket" : "") : "no budget: measured series only";
+      PARETO_VIEWS.forEach(v => v.points.forEach(p => { if ((p.gpu_type_key || "") === gt) applyBudget(p, b); }));
+    });
+    PARETO_VIEWS.forEach(v => v.refresh());
+    rerenderBreakdownCards();
+  }
+  card.querySelectorAll("input").forEach(el => { el.addEventListener("change", apply); el.addEventListener("input", apply); });
+  function resetToDefaults() {
+    rows.forEach(row => { const d = JSON.parse(row.dataset.budgetDefaults);
+      row.querySelectorAll("input").forEach(el => { const v = d[el.dataset.budgetField]; el.value = v == null ? "" : String(v); }); });
+  }
+  card.querySelector(".budget-reset").addEventListener("click", () => { resetToDefaults(); apply(); });
+  // Every page load starts from the defaults: browsers restore form values across a
+  // reload / back-forward, which would silently carry an edited assumption into a
+  // fresh view of the page while the embedded metrics still hold the defaults.
+  resetToDefaults();
+  window.addEventListener("pageshow", ev => { if (ev.persisted) { resetToDefaults(); apply(); } });
+  // Initial pass only fills the "Derived" column (points already carry the Python-computed values).
+  rows.forEach(row => { const b = budgetFromRow(row); row.querySelector(".budget-derived").textContent = b
+    ? fmtNum(b.static_node_w, 0) + " W static per node \u00b7 " + fmtNum(b.overhead_w_per_gpu * b.gpus_per_node, 0) + " W overhead per node"
+      + (b.cpu_estimate_w_per_gpu != null ? " \u00b7 " + fmtNum(b.cpu_estimate_w_per_gpu * b.gpus_per_node / b.sockets_per_node, 0) + " W CPU est. per socket" : "")
+    : "no budget: measured series only"; });
+}
 
 function initPareto(root) {
   const points = JSON.parse(root.dataset.points);
@@ -898,6 +1501,8 @@ function initPareto(root) {
   const xSel = card.querySelector("select[data-axis=x]") || { value: root.dataset.x };
   const ySel = card.querySelector("select[data-axis=y]") || { value: root.dataset.y };
   const drawFrontier = root.dataset.frontier !== "off";
+  const frontierOnlyBox = card.querySelector("input[data-frontier-only]");
+  const frontierOnly = () => !!(frontierOnlyBox && frontierOnlyBox.checked);
   const modelSel = card.querySelector("select[data-model]");
   const modelOk = p => !modelSel || !modelSel.value || p.model === modelSel.value;
   // Baseline mode: Y is divided by the baseline run's Y at the same concurrency.
@@ -910,9 +1515,14 @@ function initPareto(root) {
   // Legend, frontier lines and hide/show all work on the point's group (GPU type x model).
   const runs = [...new Set(points.map(p => p.group))];
   const hiddenRuns = new Set();
+  const hiddenVariants = new Set();
+  const basisLegend = card.querySelector(".basis-legend");
   let selected = 0;
   let plotted = [];   // indexes into points that have both metrics
+  let items = [];     // [{ i, v }] -- one drawn marker per (point, power basis); v = NO_VARIANT on plain axes
   let xAxis, yAxis, xScale, yScale;
+  const variantsFor = axis => axis.split ? POWER_VARIANTS : [NO_VARIANT];
+  const variantKey = (axis, v) => axis.split ? axis.key + "__" + v.key : axis.key;
 
   const gGrid = svgEl("g"), gLines = svgEl("g"), gPoints = svgEl("g"), gAxes = svgEl("g");
   svg.appendChild(gGrid); svg.appendChild(gLines); svg.appendChild(gPoints); svg.appendChild(gAxes);
@@ -934,19 +1544,63 @@ function initPareto(root) {
     runLegend.appendChild(key);
   });
 
-  function metric(p, axis) { const v = p.m[axis.key]; return v === null || v === undefined ? null : v; }
+  function metric(p, axis, v) { const val = p.m[variantKey(axis, v || NO_VARIANT)]; return val === null || val === undefined ? null : val; }
   function baselineFor(p) {
     if (!normalize) return null;
     return points.find(b => b.run === baseSel.value && b.m.concurrency === p.m.concurrency
       && b.bench === p.bench) || null;
   }
-  function yVal(p) {
-    const raw = metric(p, yAxis);
+  function yVal(p, v) {
+    const raw = metric(p, yAxis, v);
     if (!normalize) return raw;
     const b = baselineFor(p);
     if (raw === null || !b) return null;
-    const bv = metric(b, yAxis);
+    const bv = metric(b, yAxis, v);
     return bv === null || bv === 0 ? null : raw / bv;
+  }
+  // Basis chips: shown only on a split axis; the label carries the budget figure of
+  // the first point that has one so the assumption is visible on the chart.
+  function renderBasisLegend() {
+    if (!basisLegend) return;
+    basisLegend.innerHTML = "";
+    basisLegend.hidden = !yAxis.split;
+    if (!yAxis.split) return;
+    POWER_VARIANTS.forEach(v => {
+      const has = points.filter(p => modelOk(p) && metric(p, yAxis, v) !== null);
+      if (!has.length) return;
+      const withBudget = has.find(p => p.budget) || null;
+      const key = document.createElement("span");
+      key.className = "run-key basis-key" + (hiddenVariants.has(v.key) ? " off" : "");
+      const sw = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      sw.setAttribute("viewBox", "0 0 34 12"); sw.setAttribute("class", "basis-swatch");
+      const line = svgEl("line", { x1: 1, x2: 33, y1: 6, y2: 6, stroke: variantColor(has[0].color, v), "stroke-width": 2 });
+      if (v.dash) line.setAttribute("stroke-dasharray", v.dash);
+      sw.appendChild(line);
+      sw.appendChild(svgEl("circle", { cx: 17, cy: 6, r: 4, fill: variantFill(has[0].color, v),
+        stroke: variantStroke(has[0].color, v), "stroke-width": 1.5 }));
+      key.appendChild(sw);
+      key.appendChild(document.createTextNode(v.legend(withBudget)));
+      key.title = "Click to hide or show this power basis";
+      key.addEventListener("click", () => {
+        if (hiddenVariants.has(v.key)) hiddenVariants.delete(v.key); else hiddenVariants.add(v.key);
+        draw();
+      });
+      basisLegend.appendChild(key);
+    });
+    const est = points.filter(p => modelOk(p) && p.cpu_estimated);
+    if (est.length) {
+      const key = document.createElement("span");
+      key.className = "run-key basis-key basis-shape-key";
+      const sw = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      sw.setAttribute("viewBox", "0 0 34 12"); sw.setAttribute("class", "basis-swatch");
+      sw.appendChild(svgEl("polygon", { points: "17,1 22,6 17,11 12,6", fill: est[0].color, stroke: "var(--surface)", "stroke-width": 1 }));
+      key.appendChild(sw);
+      const b = est[0].budget;
+      key.appendChild(document.createTextNode("\u25c6 = CPU not measured; " + fmtNum(b.cpu_estimate_w_per_gpu, 0) + " W/GPU assumed (" + est.length + " point" + (est.length === 1 ? "" : "s") + ")"));
+      key.title = "CPU power collection failed on these runs; the CPU leg is the budget's per-socket estimate";
+      key.style.cursor = "default";
+      basisLegend.appendChild(key);
+    }
   }
   const yLabel = () => normalize ? yAxis.label + " / baseline" : yAxis.label;
 
@@ -959,24 +1613,30 @@ function initPareto(root) {
     return out;
   }
 
-  function frontier(idxs) {
-    // Sort by x ascending; walk keeping points not dominated on y (given each axis's direction).
-    const xs = idxs.map(i => [i, metric(points[i], xAxis), yVal(points[i])]);
+  function frontier(its) {
+    // Sort by x ascending; walk keeping items not dominated on y (given each axis's direction).
+    const xs = its.map(it => [it, metric(points[it.i], xAxis), yVal(points[it.i], it.v)]);
     xs.sort((a, b) => xAxis.better === "max" ? a[1] - b[1] : b[1] - a[1]);
-    // Walk from best-x to worst-x: a point is on the frontier if its y beats every better-x point's y.
+    // Walk from best-x to worst-x: an item is on the frontier if its y beats every better-x item's y.
     const ordered = xs.reverse();
     const out = [];
     let bestY = null;
-    ordered.forEach(([i, , y]) => {
+    ordered.forEach(([it, , y]) => {
       const beats = bestY === null || (yAxis.better === "max" ? y > bestY : y < bestY);
-      if (beats) { out.push(i); bestY = y; }
+      if (beats) { out.push(it); bestY = y; }
     });
     return out.reverse();
   }
 
   function draw() {
     xAxis = PARETO_AXES[xSel.value]; yAxis = PARETO_AXES[ySel.value];
-    plotted = points.map((p, i) => i).filter(i => modelOk(points[i]) && metric(points[i], xAxis) !== null && yVal(points[i]) !== null);
+    renderBasisLegend();
+    items = [];
+    points.forEach((p, i) => {
+      if (!modelOk(p) || metric(p, xAxis) === null) return;
+      variantsFor(yAxis).forEach(v => { if (yVal(p, v) !== null) items.push({ i, v }); });
+    });
+    plotted = [...new Set(items.map(it => it.i))];
     // Legend chips for families outside the chosen model drop out with their points.
     runLegend.querySelectorAll(".run-key").forEach(key => {
       key.hidden = !points.some(p => p.group === key.dataset.group && modelOk(p));
@@ -987,8 +1647,8 @@ function initPareto(root) {
     if (!plotted.length) return;
 
     let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
-    plotted.forEach(i => {
-      const px = metric(points[i], xAxis), py = yVal(points[i]);
+    items.forEach(it => {
+      const px = metric(points[it.i], xAxis), py = yVal(points[it.i], it.v);
       if (px < xMin) xMin = px; if (px > xMax) xMax = px;
       if (py < yMin) yMin = py; if (py > yMax) yMax = py;
     });
@@ -1027,50 +1687,81 @@ function initPareto(root) {
       bl.textContent = "baseline = 1.0";
       gAxes.appendChild(bl);
     }
-    const note = card.querySelector(".baseline-note");
+    const note = card.querySelector(".baseline-note, .pareto-note");
     if (note) {
-      const dropped = points.filter(p => metric(p, xAxis) !== null && metric(p, yAxis) !== null && yVal(p) === null).length;
+      const dropped = normalize ? points.filter(p => metric(p, xAxis) !== null && metric(p, yAxis) !== null && yVal(p) === null).length : 0;
       note.textContent = dropped ? dropped + " point(s) hidden: no baseline measurement at the same concurrency." : "";
     }
 
+    // One frontier per (family, power basis): on a split axis the measured,
+    // projected and static series of one family each get their own line style.
+    const frontierSet = new Set();
+    const itemHidden = it => hiddenRuns.has(points[it.i].group) || hiddenVariants.has(it.v.key);
     if (drawFrontier) runs.forEach(run => {
       if (hiddenRuns.has(run)) return;
-      const idxs = plotted.filter(i => points[i].group === run);
-      const front = frontier(idxs);
-      if (front.length >= 2) {
-        const d = front.map(i => xScale(metric(points[i], xAxis)) + "," + yScale(yVal(points[i]))).join(" ");
-        gLines.appendChild(svgEl("polyline", { class: "pareto-frontier", points: d, stroke: points[idxs[0]].color }));
-      }
+      variantsFor(yAxis).forEach(v => {
+        if (hiddenVariants.has(v.key)) return;
+        const its = items.filter(it => points[it.i].group === run && it.v === v);
+        const front = frontier(its);
+        front.forEach(it => frontierSet.add(it));
+        if (front.length >= 2) {
+          const d = front.map(it => xScale(metric(points[it.i], xAxis)) + "," + yScale(yVal(points[it.i], it.v))).join(" ");
+          const line = svgEl("polyline", { class: "pareto-frontier", points: d, stroke: variantColor(points[its[0].i].color, v) });
+          if (v.dash) line.setAttribute("stroke-dasharray", v.dash);
+          gLines.appendChild(line);
+        }
+      });
     });
+    // "Frontier points only": dominated items are left out entirely (the axis
+    // range and the frontier are computed from the full set, so nothing shifts).
+    const shown = frontierOnly() && drawFrontier ? items.filter(it => frontierSet.has(it) || itemHidden(it)) : items;
+    if (frontierOnly() && drawFrontier && note) {
+      const n = items.length - shown.length;
+      if (n) note.textContent = (note.textContent ? note.textContent + " " : "") + n + " dominated point(s) hidden (frontier only).";
+    }
 
-    plotted.forEach(i => {
-      const p = points[i];
-      const c = svgEl("circle", { class: "pareto-point", cx: xScale(metric(p, xAxis)), cy: yScale(yVal(p)),
-        r: i === selected ? 8 : 6, fill: p.color });
-      if (hiddenRuns.has(p.group)) c.classList.add("dim");
-      if (i === selected) c.classList.add("selected");
-      c.addEventListener("click", () => select(i));
-      c.addEventListener("pointerenter", (ev) => showTip(p, ev));
+    shown.forEach(it => {
+      const p = points[it.i], v = it.v, col = variantColor(p.color, v);
+      const c = paretoMarker(p, xScale(metric(p, xAxis)), yScale(yVal(p, v)), it.i === selected ? 8 : 6, variantFill(p.color, v));
+      if (v.tone === "grey") c.classList.add("grey");
+      if (itemHidden(it)) c.classList.add("dim");
+      if (it.i === selected) c.classList.add("selected");
+      c.addEventListener("click", () => select(it.i));
+      c.addEventListener("pointerenter", (ev) => showTip(p, ev, v));
       c.addEventListener("pointermove", (ev) => moveTip(ev));
       c.addEventListener("pointerleave", () => { tooltip.style.opacity = 0; });
       gPoints.appendChild(c);
     });
   }
 
-  function showTip(p, ev) {
+  // Values that rest on the CPU estimate get a hoverable warning glyph so a reader
+  // scanning numbers can't miss that part of the watts is assumed, not measured.
+  const EST_WARN_TEXT = p => "CPU power was not measured for this run; " + fmtNum(p.budget.cpu_estimate_w_per_gpu, 0) + " W per GPU (from the power budget) is assumed in this value.";
+  const EST_FIELD_PREFIXES = ["Measured GPU + estimated CPU", "Projected avg-rack power", "Output tok/s / (GPU+CPU) W", "Total watts, GPU+CPU"];
+  function estWarn(p) {
+    const w = document.createElement("span"); w.className = "est-warn"; w.textContent = "\\u26a0"; w.title = EST_WARN_TEXT(p);
+    return w;
+  }
+  function showTip(p, ev, v) {
     tooltip.innerHTML = "";
     const title = document.createElement("div");
     title.className = "t-title";
     title.textContent = p.label;
     tooltip.appendChild(title);
-    const rows = [[xAxis.label, fmtNum(metric(p, xAxis))], [yLabel(), normalize ? fmtNum(yVal(p), 3) : fmtNum(yVal(p))]];
-    if (normalize) rows.push([yAxis.label + " (raw)", fmtNum(metric(p, yAxis))]);
+    // A basis whose watts include the CPU estimate: measured and projected (static is budget-only).
+    const estBasis = p.cpu_estimated && v && v.key && v.key !== "static";
+    const rows = [[xAxis.label, fmtNum(metric(p, xAxis))], [yLabel(), normalize ? fmtNum(yVal(p, v), 3) : fmtNum(yVal(p, v)), estBasis]];
+    if (yAxis.split && v && v.key) rows.push(["Power basis", v.legend(p.budget ? p : null), estBasis],
+      ["Total watts on this basis", fmtNum(p.power_basis_w[v.key], 0) + " W", estBasis]);
+    if (p.cpu_estimated) rows.push(["CPU power", "not measured \\u2014 " + fmtNum(p.budget.cpu_estimate_w_per_gpu, 0) + " W/GPU assumed", true]);
+    if (normalize) rows.push([yAxis.label + " (raw)", fmtNum(metric(p, yAxis, v)), estBasis]);
     p.hover.forEach(([k, v]) => rows.push([k, v]));
-    rows.forEach(([k, v]) => {
+    rows.forEach(([k, v, est]) => {
       const row = document.createElement("div");
       row.className = "t-row";
       const kEl = document.createElement("span"); kEl.textContent = k; kEl.style.color = "var(--ink-muted)";
       const vEl = document.createElement("span"); vEl.className = "t-val"; vEl.textContent = v;
+      if (est) vEl.insertBefore(estWarn(p), vEl.firstChild);
       row.appendChild(kEl); row.appendChild(vEl);
       tooltip.appendChild(row);
     });
@@ -1094,6 +1785,7 @@ function initPareto(root) {
       const cell = document.createElement("div");
       const l = document.createElement("p"); l.className = "stat-label"; l.textContent = label;
       const v = document.createElement("p"); v.className = "stat-value"; v.textContent = value;
+      if (p.cpu_estimated && value !== "n/a" && !String(value).startsWith("n/a ") && EST_FIELD_PREFIXES.some(pre => label.startsWith(pre))) v.insertBefore(estWarn(p), v.firstChild);
       cell.appendChild(l); cell.appendChild(v);
       panel.appendChild(cell);
     });
@@ -1104,6 +1796,7 @@ function initPareto(root) {
     renderPanel(points[i]);
     if (root.dataset.drivesCharts !== "off") {
       document.querySelectorAll(".node-power-card").forEach(card => renderNodePower(card, points[i]));
+      document.querySelectorAll(".type-power-card").forEach(card => renderTypePower(card, points[i]));
       document.querySelectorAll(".power-scope-card").forEach(card => {
         card.dataset.pointLabel = points[i].label;
         updateScopeTitle(card);
@@ -1121,15 +1814,35 @@ function initPareto(root) {
     draw();
   }
 
+  // Budget editor hook: recompute is done on the shared point objects; this just redraws.
+  PARETO_VIEWS.push({ points, refresh: () => { draw(); if (plotted.length) select(selected); } });
   if (modelSel) modelSel.addEventListener("change", () => { draw(); if (plotted.length) select(selected); });
   if (xSel.addEventListener) xSel.addEventListener("change", draw);
+  if (frontierOnlyBox) frontierOnlyBox.addEventListener("change", draw);
   if (ySel.addEventListener) ySel.addEventListener("change", draw);
   if (baseSel) baseSel.addEventListener("change", draw);
   select(0);
 }
 
 document.querySelectorAll(".pareto-root").forEach(initPareto);
+initBudgetCard(document.querySelector(".budget-card"));
 document.querySelectorAll(".node-power-card[data-point]").forEach(card => renderNodePower(card, JSON.parse(card.dataset.point)));
+document.querySelectorAll(".type-power-card[data-point]").forEach(card => renderTypePower(card, JSON.parse(card.dataset.point)));
+// Bar cards derive their pixel width at render time; redraw when their column resizes.
+if (window.ResizeObserver) {
+  let barPending = null;
+  const barObserver = new ResizeObserver(() => {
+    if (barPending) return;
+    barPending = requestAnimationFrame(() => {
+      barPending = null;
+      document.querySelectorAll(".node-power-card, .type-power-card").forEach(card => {
+        if (card.hidden || !card.__point) return;
+        if (card.classList.contains("type-power-card")) renderTypePower(card, card.__point); else renderNodePower(card, card.__point);
+      });
+    });
+  });
+  document.querySelectorAll(".node-power-card, .type-power-card").forEach(card => barObserver.observe(card));
+}
 
 // Data table: whole-run (zoomed) vs profile-window view for every per-concurrency card.
 document.querySelectorAll(".view-window-only").forEach(box => {
@@ -1199,8 +1912,9 @@ def _fmt(value: float | None, decimals: int = 2) -> str:
 
 _SUMMARY_TABLE_HEADER = (
     "<tr><th>Run</th><th>Output tok/s</th><th>Tok/s/GPU</th><th>TPOT p50 (ms)</th><th>TPOT p90 (ms)</th>"
-    "<th>Total GPU W</th><th>W / GPU</th><th>Total CPU W</th><th>GPU-only tok/s/W</th><th>CPU-only tok/s/W</th>"
-    "<th>Combined tok/s/W</th></tr>"
+    "<th>Total GPU watts</th><th>Watts per GPU</th><th>Total CPU watts</th><th>Watts per CPU socket</th>"
+    "<th>Tok/s per GPU watt</th><th>Tok/s per CPU watt</th>"
+    "<th>Tok/s per watt (GPU+CPU)</th></tr>"
 )
 
 
@@ -1237,7 +1951,8 @@ def _summary_rows_html(
             f"<td>{_fmt(w['tpot_p90_ms'])}</td>"
             f"<td>{_fmt(ppw['gpu_avg_power_w'], 0)}</td>"
             f"<td>{_fmt(_per_gpu(ppw['gpu_avg_power_w'], ppw['num_gpus']), 0)}</td>"
-            f"<td>{_fmt(ppw['cpu_avg_power_w'])}</td>"
+            f"<td>{_fmt(ppw['cpu_avg_power_w'], 0)}</td>"
+            f"<td>{_fmt(_per_gpu(ppw['cpu_avg_power_w'], _socket_count(r)), 0)}</td>"
             f"<td>{_fmt(ppw['output_tokens_per_second_per_gpu_watt'], 4)}</td>"
             f"<td>{_fmt(ppw['output_tokens_per_second_per_cpu_watt'], 4)}</td>"
             f"<td>{_fmt(ppw['output_tokens_per_second_per_combined_watt'], 4)}</td>"
@@ -1303,8 +2018,174 @@ def _family_label(gpu_type: str | None, model: str | None) -> str:
     return f"{gpu_type or 'unknown gpu'} · {model or 'unknown model'}"
 
 
+def _hosts_summary(hosts: list[str] | None, *, full: bool = False) -> str:
+    """Allocated hosts, compact for the hover tooltip and complete for the inspect
+    panel. Tooltip form collapses a same-prefix numeric range: ``nvl72d090-T10…T18 (9)``."""
+    if not hosts:
+        return "—"
+    hosts = sorted(set(hosts))
+    if full or len(hosts) <= 3:
+        return ", ".join(hosts) + (f" ({len(hosts)})" if len(hosts) > 3 else "")
+    m_first, m_last = re.match(r"^(.*?)(\d+)$", hosts[0]), re.match(r"^(.*?)(\d+)$", hosts[-1])
+    if m_first and m_last and m_first.group(1) == m_last.group(1):
+        return f"{hosts[0]}…{m_last.group(2)} ({len(hosts)})"
+    return f"{hosts[0]} … {hosts[-1]} ({len(hosts)})"
+
+
+def _socket_count(report: dict) -> int:
+    """Number of CPU sockets that reported power in this window (one per-socket energy row each)."""
+    return len(report.get("cpu_per_socket") or ())
+
+
 def _per_gpu(total: float | None, num_gpus: int | None) -> float | None:
     return None if total is None or not num_gpus else total / num_gpus
+
+
+# -- Power budgets per GPU type --------------------------------------------------
+#
+# The Pareto view plots efficiency against three power bases side by side:
+#   measured   -- window-average CPU+GPU watts from the collectors (nothing assumed);
+#   projected  -- measured plus a fixed per-GPU overhead for everything the collectors
+#                 don't see (NVLink switches, fans, PSU loss, ...), an approximation of
+#                 the rack's average draw;
+#   static     -- a fixed nameplate budget per node, i.e. what a datacenter provisions,
+#                 independent of what the run actually drew.
+# The numbers are assumptions, not measurements. Edit them here (one record per GPU
+# type, keyed by the lower-cased ``resources.gpu_type`` from the run's config.yaml).
+# A GPU type with no entry gets the measured series only, plus a warning.
+
+
+@dataclass(frozen=True)
+class GpuPowerBudget:
+    """Fixed power assumptions for one GPU type (see the block comment above)."""
+
+    static_node_w: float
+    """Provisioned / nameplate power of one node, watts."""
+    gpus_per_node: int
+    overhead_w_per_gpu: float
+    """Unmeasured rack overhead attributed to each active GPU, watts (added to measured CPU+GPU)."""
+    sockets_per_node: int = 2
+    cpu_estimate_w_per_gpu: float | None = None
+    """Amortised CPU watts per active GPU, the stand-in for the CPU leg when the run has
+    no CPU measurements at all; ``None`` leaves such points without a measured value."""
+
+    @property
+    def static_w_per_gpu(self) -> float:
+        return self.static_node_w / self.gpus_per_node
+
+    @property
+    def cpu_estimate_w_per_socket(self) -> float | None:
+        """The per-GPU estimate expressed per socket (display only)."""
+        if self.cpu_estimate_w_per_gpu is None:
+            return None
+        return self.cpu_estimate_w_per_gpu * self.gpus_per_node / self.sockets_per_node
+
+
+GPU_POWER_BUDGETS: dict[str, GpuPowerBudget] = {
+    # Source for every number: Kyle Liang (SemiAnalysis), Slack, Sep 2026 -- the
+    # "avg-per-GPU rack power" (static), "avg everything-else power" (overhead) and the
+    # amortised CPU-per-GPU figures used on SA's dashboard.
+    #
+    # GB300 NVL72 compute tray: 4 GPUs + 2 Grace sockets.
+    #   static   2,120 W/GPU  -> 8,480 W per 4-GPU node
+    #   overhead   670 W/GPU  ("avg everything-else power")
+    #   CPU stand-in when CPU collection failed: 50 W/GPU (amortised CPU power per GPU)
+    "gb300": GpuPowerBudget(
+        static_node_w=8_480.0,
+        gpus_per_node=4,
+        overhead_w_per_gpu=670.0,
+        sockets_per_node=2,
+        cpu_estimate_w_per_gpu=50.0,
+    ),
+    # VR NVL72 (Vera Rubin) compute tray, assumed 4 GPUs + 2 Vera sockets.
+    #   static   3,300 W/GPU  -> 13,200 W per 4-GPU node
+    #   overhead   900 W/GPU
+    #   CPU stand-in: 100 W/GPU
+    # No VR run has been reported yet, so the config.yaml ``gpu_type`` spelling is a
+    # guess; ``GPU_TYPE_ALIASES`` maps the likely variants onto this entry.
+    "vr200": GpuPowerBudget(
+        static_node_w=13_200.0,
+        gpus_per_node=4,
+        overhead_w_per_gpu=900.0,
+        sockets_per_node=2,
+        cpu_estimate_w_per_gpu=100.0,
+    ),
+}
+
+# Alternate ``resources.gpu_type`` spellings -> budget key.
+GPU_TYPE_ALIASES: dict[str, str] = {
+    "vr": "vr200",
+    "vr-nvl72": "vr200",
+    "vr_nvl72": "vr200",
+    "vera_rubin": "vr200",
+    "vera-rubin": "vr200",
+    "rubin": "vr200",
+}
+
+
+# Power bases in display order. ``key`` suffixes every per-basis Pareto metric
+# (``total_tps_per_mw__projected``); ``POWER_VARIANTS`` in ``_JS`` mirrors this list
+# and owns the line styles.
+_POWER_VARIANTS: tuple[str, ...] = ("measured", "projected", "static")
+
+
+def _power_budget_for(gpu_type: str | None) -> GpuPowerBudget | None:
+    if not gpu_type:
+        return None
+    key = gpu_type.lower()
+    return GPU_POWER_BUDGETS.get(GPU_TYPE_ALIASES.get(key, key))
+
+
+def _power_variant_watts(
+    *, gpu_w: float | None, cpu_w: float | None, num_gpus: int | None, budget: GpuPowerBudget | None
+) -> tuple[dict[str, float | None], bool]:
+    """``({basis: total watts}, cpu_estimated)`` for one concurrency point.
+
+    ``measured`` is GPU + CPU; when the CPU leg is missing and the budget carries a
+    per-socket estimate, that estimate stands in and ``cpu_estimated`` is True (the
+    chart draws the point with a different marker). With neither, ``measured`` is
+    None -- never silently GPU-only. ``projected`` adds the per-GPU overhead to
+    ``measured``; ``static`` is the budget alone times the active GPU count.
+    """
+    out: dict[str, float | None] = dict.fromkeys(_POWER_VARIANTS)
+    if gpu_w is None or not num_gpus:
+        return out, False
+    estimated = False
+    if cpu_w is not None:
+        out["measured"] = gpu_w + cpu_w
+    elif budget is not None and budget.cpu_estimate_w_per_gpu is not None:
+        out["measured"] = gpu_w + budget.cpu_estimate_w_per_gpu * num_gpus
+        estimated = True
+    if budget is None:
+        return out, estimated
+    if out["measured"] is not None:
+        out["projected"] = out["measured"] + budget.overhead_w_per_gpu * num_gpus
+    out["static"] = budget.static_w_per_gpu * num_gpus
+    return out, estimated
+
+
+def _per_mw(rate: float | None, watts: float | None) -> float | None:
+    return None if rate is None or not watts else rate / (watts / 1e6)
+
+
+def _power_variant_metrics(
+    *,
+    output_tps: float | None,
+    total_tps: float | None,
+    num_gpus: int | None,
+    watts: dict[str, float | None],
+) -> dict[str, float | None]:
+    """``m`` entries for the basis-split axes: ``<axis>__<variant>`` for total, input
+    and output tok/s per MW plus watts per GPU (node power / active GPUs)."""
+    input_tps = None if output_tps is None or total_tps is None else total_tps - output_tps
+    m: dict[str, float | None] = {}
+    for variant in _POWER_VARIANTS:
+        w = watts.get(variant)
+        m[f"total_tps_per_mw__{variant}"] = _per_mw(total_tps, w)
+        m[f"input_tps_per_mw__{variant}"] = _per_mw(input_tps, w)
+        m[f"output_tps_per_mw__{variant}"] = _per_mw(output_tps, w)
+        m[f"node_w_per_gpu__{variant}"] = _per_gpu(w, num_gpus)
+    return m
 
 
 def _cpu_sensor_summary(report: dict) -> str:
@@ -1331,6 +2212,8 @@ def _pareto_points(
     group_position: int | None = None,
     model: str | None = None,
     coverage_warnings: list[str] | None = None,
+    gpu_type: str | None = None,
+    hosts: list[str] | None = None,
 ) -> list[dict]:
     """Scatter points for the Pareto view, one per summary-table row.
 
@@ -1361,6 +2244,44 @@ def _pareto_points(
         total_tps = ppw["total_tokens_per_second"]
         combined_w = ppw["combined_avg_power_w"]
         duration = r["timing"]["computed"]["duration_seconds"]
+        budget = _power_budget_for(gpu_type)
+        variant_w, cpu_estimated = _power_variant_watts(
+            gpu_w=ppw["gpu_avg_power_w"], cpu_w=ppw["cpu_avg_power_w"], num_gpus=num_gpus, budget=budget
+        )
+        basis_fields: list[tuple[str, str]] = []
+        if cpu_estimated and budget is not None:
+            basis_fields.append(
+                (
+                    "Measured GPU + estimated CPU (avg)",
+                    f"{_fmt(variant_w['measured'], 0)} W ({_fmt(budget.cpu_estimate_w_per_gpu, 0)} W per GPU assumed)",
+                )
+            )
+        if budget is not None:
+            basis_fields.append(
+                (
+                    "Projected avg-rack power (approx.)",
+                    f"{_fmt(variant_w['projected'], 0)} W (+{_fmt(budget.overhead_w_per_gpu, 0)} W/GPU overhead)",
+                )
+            )
+            basis_fields.append(
+                (
+                    "Static power budget",
+                    f"{_fmt(variant_w['static'], 0)} W ({_fmt(budget.static_node_w, 0)} W/node ÷ {budget.gpus_per_node} GPUs)",
+                )
+            )
+        point_warnings = [w for w in r.get("warnings", []) if "CPU energy mismatch" in w] + list(
+            coverage_warnings or ()
+        )
+        if budget is None:
+            point_warnings.append(
+                f"No power budget for GPU type {gpu_type or 'unknown'!r}: projected and static series unavailable "
+                "(add it to GPU_POWER_BUDGETS)."
+            )
+        elif cpu_estimated:
+            point_warnings.append(
+                "CPU power not measured for this run: the CPU+GPU, projected and static-vs-measured comparisons use "
+                f"an assumed {_fmt(budget.cpu_estimate_w_per_gpu, 0)} W per GPU."
+            )
         points.append(
             {
                 "id": _point_id(run_label, r),
@@ -1369,6 +2290,8 @@ def _pareto_points(
                 "run": run_label or "",
                 "group": group,
                 "model": model or "",
+                "gpu_type_key": (gpu_type or "").lower(),
+                "num_gpus": num_gpus,
                 "color": _run_color(colour_position),
                 "m": {
                     "output_tps": output_tps,
@@ -1385,16 +2308,34 @@ def _pareto_points(
                     "cpu_w": ppw["cpu_avg_power_w"],
                     "total_w": combined_w,
                     "concurrency": r["concurrency"],
+                    **_power_variant_metrics(
+                        output_tps=output_tps, total_tps=total_tps, num_gpus=num_gpus, watts=variant_w
+                    ),
+                },
+                "power_basis_w": variant_w,
+                "cpu_estimated": cpu_estimated,
+                "budget": None
+                if budget is None
+                else {
+                    "static_node_w": budget.static_node_w,
+                    "static_w_per_gpu": budget.static_w_per_gpu,
+                    "overhead_w_per_gpu": budget.overhead_w_per_gpu,
+                    "cpu_estimate_w_per_gpu": budget.cpu_estimate_w_per_gpu,
+                    "gpus_per_node": budget.gpus_per_node,
+                    "sockets_per_node": budget.sockets_per_node,
                 },
                 "hover": [
+                    ("GPU type / hosts", f"{gpu_type or '—'} · {_hosts_summary(hosts)}"),
                     ("Concurrency / GPUs", f"{r['concurrency']} / {num_gpus}"),
                     ("P90 TPOT", f"{_fmt(r['tpot_p90_ms'])} ms"),
-                    ("Total GPU power", f"{_fmt(ppw['gpu_avg_power_w'], 0)} W"),
-                    ("Per GPU", f"{_fmt(_per_gpu(ppw['gpu_avg_power_w'], num_gpus), 0)} W"),
-                    ("Output tok/s / GPU W", _fmt(ppw["output_tokens_per_second_per_gpu_watt"], 3)),
+                    ("Total GPU watts", f"{_fmt(ppw['gpu_avg_power_w'], 0)} W"),
+                    ("Watts per GPU", f"{_fmt(_per_gpu(ppw['gpu_avg_power_w'], num_gpus), 0)} W"),
+                    ("Output tok/s per GPU watt", _fmt(ppw["output_tokens_per_second_per_gpu_watt"], 3)),
                 ],
                 "fields": [
                     ("Run", run_label or "—"),
+                    ("GPU type", gpu_type or "—"),
+                    ("Hosts", _hosts_summary(hosts, full=True)),
                     ("Concurrency / active GPUs", f"{r['concurrency']} / {num_gpus}"),
                     ("Output tok/s", _fmt(output_tps)),
                     ("Output tok/s / active GPU", _fmt(tps_per_gpu)),
@@ -1402,18 +2343,23 @@ def _pareto_points(
                     ("P50 TPOT", f"{_fmt(r['tpot_p50_ms'])} ms"),
                     ("P90 TPOT", f"{_fmt(r['tpot_p90_ms'])} ms"),
                     ("1 / P90 TPOT", f"{_fmt(_inverse_ms(r['tpot_p90_ms']), 1)} tok/s/user"),
-                    ("Total GPU power (all GPUs, avg)", f"{_fmt(ppw['gpu_avg_power_w'], 0)} W"),
-                    ("Power per GPU (avg)", f"{_fmt(_per_gpu(ppw['gpu_avg_power_w'], num_gpus), 1)} W"),
-                    ("Total CPU power (all sockets, avg)", f"{_fmt(ppw['cpu_avg_power_w'], 0)} W"),
-                    ("Total GPU+CPU power (avg)", f"{_fmt(combined_w, 0)} W"),
-                    ("Output tok/s / GPU W", _fmt(ppw["output_tokens_per_second_per_gpu_watt"], 4)),
+                    ("Total GPU watts (all GPUs, avg)", f"{_fmt(ppw['gpu_avg_power_w'], 0)} W"),
+                    ("Watts per GPU (avg)", f"{_fmt(_per_gpu(ppw['gpu_avg_power_w'], num_gpus), 1)} W"),
+                    ("Total CPU watts (all sockets, avg)", f"{_fmt(ppw['cpu_avg_power_w'], 0)} W"),
+                    (
+                        "Watts per CPU socket (avg)",
+                        f"{_fmt(_per_gpu(ppw['cpu_avg_power_w'], _socket_count(r)), 1)} W"
+                        + (f" ({_socket_count(r)} sockets)" if _socket_count(r) else ""),
+                    ),
+                    ("Total watts, GPU+CPU (avg)", f"{_fmt(combined_w, 0)} W"),
+                    *basis_fields,
+                    ("Output tok/s per GPU watt", _fmt(ppw["output_tokens_per_second_per_gpu_watt"], 4)),
                     ("Output tok/s / (GPU+CPU) W", _fmt(ppw["output_tokens_per_second_per_combined_watt"], 4)),
                     ("Joules / output token", _fmt(r["joules_per_output_token"], 4)),
                     ("Measured window", f"{_fmt(duration, 1)} s"),
                     ("CPU power source", _cpu_sensor_summary(r)),
                 ],
-                "warnings": [w for w in r.get("warnings", []) if "CPU energy mismatch" in w]
-                + list(coverage_warnings or ()),
+                "warnings": point_warnings,
                 "node_power": r.get("node_power", []),
             }
         )
@@ -1428,16 +2374,20 @@ _PARETO_AXIS_OPTIONS: tuple[tuple[str, str], ...] = (
     ("inv_tpot_p90", "1 / P90 TPOT (tok/s/user)"),
     ("inv_tpot_p50", "1 / P50 TPOT (tok/s/user)"),
     ("tpot_p90", "P90 TPOT (ms)"),
-    ("tps_per_gpu_w", "Output tok/s / GPU W"),
+    ("tps_per_gpu_w", "Output tok/s per GPU watt"),
     ("tps_per_total_w", "Output tok/s / (GPU+CPU) W"),
-    ("gpu_w", "Total GPU power (W)"),
-    ("gpu_w_per_gpu", "Power per GPU (W)"),
-    ("cpu_w", "Total CPU power (W)"),
-    ("total_w", "Total GPU+CPU power (W)"),
+    ("total_tps_per_mw", "Total TPS / MW · measured vs projected vs static"),
+    ("input_tps_per_mw", "Input TPS / MW · measured vs projected vs static"),
+    ("output_tps_per_mw", "Output TPS / MW · measured vs projected vs static"),
+    ("node_w_per_gpu", "Watts per GPU · measured vs projected vs static"),
+    ("gpu_w", "Total GPU watts"),
+    ("gpu_w_per_gpu", "Watts per GPU (GPU only)"),
+    ("cpu_w", "Total CPU watts"),
+    ("total_w", "Total watts (GPU+CPU)"),
     ("concurrency", "Concurrency"),
 )
 _PARETO_DEFAULT_X = "inv_tpot_p90"
-_PARETO_DEFAULT_Y = "tps_per_gpu"
+_PARETO_DEFAULT_Y = "total_tps_per_mw"
 
 
 def _axis_select_html(axis: str, default: str) -> str:
@@ -1449,11 +2399,12 @@ def _axis_select_html(axis: str, default: str) -> str:
 
 
 def _model_select_html(points: list[dict]) -> str:
-    """Model filter for the Pareto scatter. With one model it's a no-op (omitted);
-    with several it defaults to the first so unrelated models aren't drawn on the
-    same frontier by default -- "All models" is still there for a deliberate overlay."""
+    """Model dropdown for the Pareto scatter, always rendered so the page states which
+    model is plotted. Defaults to the first model so unrelated models aren't drawn on
+    the same frontier by default -- "All models" is still there for a deliberate overlay.
+    Omitted only when no point carries a model name at all."""
     models = list(dict.fromkeys(p["model"] for p in points if p.get("model")))
-    if len(models) < 2:
+    if not models:
         return ""
     options = "".join(
         f'<option value="{html.escape(m, quote=True)}"{" selected" if i == 0 else ""}>{html.escape(m)}</option>'
@@ -1462,26 +2413,159 @@ def _model_select_html(points: list[dict]) -> str:
     return f'<label>Model <select data-model><option value="">All models</option>{options}</select></label>'
 
 
-def _node_power_card_html(point: dict | None = None) -> str:
-    """ "Average power by node" stacked-bar card. On the Pareto page it follows the
+def _type_power_card_html(point: dict | None = None) -> str:
+    """ "Average power per device by node type" card: for each worker role (prefill /
+    decode / ...) one bar for the mean GPU draw per GPU and one for the mean CPU draw
+    per socket, the latter split into rails when the collector recorded them. Legend
+    keys toggle categories. Same data flow as the per-node card (``renderTypePower``)."""
+    point_attr = f' data-point="{html.escape(json.dumps(point), quote=True)}"' if point is not None else ""
+    what = "the selected point" if point is None else "this concurrency"
+    return f"""
+<div class="pareto-card type-power-card"{point_attr}>
+  <div class="chart-group-head">
+    <h3>Average power per device by node type</h3>
+    <span class="type-power-sub pareto-subtitle" style="margin:0"></span>
+  </div>
+  <p class="pareto-subtitle">Window-average watts for {what}, averaged over every device of that kind on nodes of the
+  same worker role: one bar per GPU (mean across the role's GPUs) and one per CPU socket (mean across its sockets; drawn
+  as rails when recorded). The rack-overhead row is the budget's assumed per-GPU overhead, not a
+  measurement. Click a legend key to hide or show that category.</p>
+  <div class="chart-notices type-power-notices" hidden></div>
+  <div class="type-power-legend legend"></div>
+  <div class="type-power-root"><svg class="type-power-svg"></svg><div class="tooltip type-power-tooltip"></div></div>
+</div>
+"""
+
+
+def _node_power_card_html(point: dict | None = None, *, by_type: bool = False) -> str:
+    """ "Average power by node" stacked-bar card.
+
+    ``by_type=True`` renders the sibling "Average node power by node type" card: one
+    bar per worker role whose segments are each component's mean across that role's
+    nodes (so the bar total is the mean node draw). Same markup and renderer; the JS
+    collapses the nodes per role before drawing (``meanNodesByType``). On the Pareto page it follows the
     selected point (the scatter calls ``renderNodePower`` on click). For a page with
     a single concurrency point there is no scatter, so the point is embedded in
     ``data-point`` and the card renders itself at load."""
     point_attr = f' data-point="{html.escape(json.dumps(point), quote=True)}"' if point is not None else ""
     what = "the selected point" if point is None else "this concurrency"
+    if by_type:
+        cls = "pareto-card node-power-card type-node-card"
+        heading = "Average node power by node type"
+        blurb = (
+            f"Window-average power for {what}, one bar per node type (worker role). Each segment is that component's "
+            "mean across the type's nodes -- GPUs summed per node then averaged, likewise the CPU envelope and its rails -- "
+            "so the bar total is the mean draw of one node of that type. The rack-overhead segment is the assumed "
+            "per-GPU overhead from the GPU type's power budget (not measured), so the bar total matches the projected "
+            "avg-rack basis. Legend keys toggle categories across all breakdown charts."
+        )
+    else:
+        cls = "pareto-card node-power-card"
+        heading = "Average power by node"
+        blurb = (
+            f"Window-average power for {what}, one bar per allocated node. GPU is the node's GPUs summed; CPU is the "
+            "socket envelope (ACPI total / DCGM). When the collector recorded component rails, the CPU bar is drawn as "
+            "its rails (CPU rail, SoC, DRAM) plus the remainder of the envelope they don't account for. "
+            "Rack overhead is the assumed per-GPU overhead from the power budget (not measured); a CPU (estimated) "
+            "segment appears only when the run has no CPU measurements. "
+            "Click a legend key to hide or show that category on every breakdown chart."
+        )
     return f"""
-<div class="pareto-card node-power-card"{point_attr}>
+<div class="{cls}"{point_attr}>
   <div class="chart-group-head">
-    <h3>Average power by node</h3>
+    <h3>{heading}</h3>
     <span class="node-power-sub pareto-subtitle" style="margin:0"></span>
   </div>
-  <p class="pareto-subtitle">Window-average power for {what}, one bar per allocated node. GPU is the
-  node's GPUs summed; CPU is the socket envelope (ACPI total / DCGM). When the collector recorded component rails,
-  the CPU bar is drawn as its rails (CPU rail, SoC, DRAM) plus the remainder of the envelope they don't account for.</p>
+  <p class="pareto-subtitle">{blurb}</p>
   <div class="chart-notices node-power-notices" hidden></div>
   <div class="node-power-legend legend"></div>
   <div class="node-power-root"><svg class="node-power-svg"></svg><div class="tooltip node-power-tooltip"></div></div>
 </div>
+"""
+
+
+def _power_basis_blurb(points: list[dict]) -> str:
+    """Intro sentence for the basis-split Y axes, spelling out the assumed constants
+    for every GPU type on the page so the chart never shows a number whose origin
+    isn't written next to it."""
+    text = (
+        "The <b>measured vs projected vs static</b> Y-axis options draw one series per power basis. "
+        "<b>Measured</b> uses benchmark-window averages from the assigned GPUs plus every CPU socket on "
+        "participating nodes; where a run has no CPU measurements at all, a per-socket estimate stands in "
+        "and the point is drawn as a diamond instead of a circle."
+    )
+    seen: list[tuple[str, GpuPowerBudget]] = []
+    for p in points:
+        gt = (p.get("gpu_type_key") or "").lower()
+        b = _power_budget_for(gt)
+        if b is not None and all(k != gt for k, _ in seen):
+            seen.append((gt, b))
+    for gt, b in seen:
+        text += (
+            f" <b>{html.escape(gt.upper())}</b>: <b>projected avg-rack</b> adds {b.overhead_w_per_gpu:,.0f} W per active GPU "
+            f"to measured power; <b>static budget</b> is {b.static_node_w:,.0f} W per node "
+            f"({b.static_w_per_gpu:,.0f} W/GPU); CPU estimate {b.cpu_estimate_w_per_gpu or 0:,.0f} W per GPU."
+        )
+    text += " Edit the constants in <code>GPU_POWER_BUDGETS</code>."
+    return text
+
+
+def _budget_card_html(points: list[dict]) -> str:
+    """ "Power budget assumptions" editor under the Pareto scatter: one row per GPU type
+    present on the page with the static W/GPU, overhead W/GPU and CPU-estimate
+    W/GPU inputs. Edits are session-only -- the JS recomputes every basis metric,
+    marker, frontier, inspect field and bar-card segment in place (``applyBudget``);
+    the permanent values live in ``GPU_POWER_BUDGETS``."""
+    gpu_types = list(dict.fromkeys(p.get("gpu_type_key") or "" for p in points))
+    if not gpu_types:
+        return ""
+    rows = []
+    for gt in gpu_types:
+        b = _power_budget_for(gt)
+        gpn = b.gpus_per_node if b else 4
+        spn = b.sockets_per_node if b else 2
+        defaults = {
+            "static_w_per_gpu": b.static_w_per_gpu if b else None,
+            "overhead_w_per_gpu": b.overhead_w_per_gpu if b else None,
+            "cpu_estimate_w_per_gpu": b.cpu_estimate_w_per_gpu if b else None,
+            "gpus_per_node": gpn,
+            "sockets_per_node": spn,
+        }
+        n_points = sum(1 for p in points if (p.get("gpu_type_key") or "") == gt)
+
+        def inp(field: str, step: str = "10", d: dict = defaults) -> str:
+            v = d[field]
+            val = "" if v is None else f"{v:g}"
+            return (
+                f'<input type="number" min="0" step="{step}" data-budget-field="{field}" value="{val}" '
+                f'placeholder="n/a" autocomplete="off">'
+            )
+
+        name = html.escape(gt.upper() if gt else "unknown GPU type")
+        status = "" if b else ' <span class="budget-missing" title="No entry in GPU_POWER_BUDGETS">no default</span>'
+        rows.append(
+            f'<div class="budget-row" data-gpu-type="{html.escape(gt, quote=True)}" '
+            f'data-budget-defaults="{html.escape(json.dumps(defaults), quote=True)}">'
+            f'<div class="budget-row-head"><b>{name}</b>{status}<span class="budget-meta">{n_points} point'
+            f"{'s' if n_points != 1 else ''} · {gpn} GPUs / {spn} sockets per node</span></div>"
+            f'<div class="budget-inputs">'
+            f"<label>Static W per GPU{inp('static_w_per_gpu')}</label>"
+            f"<label>Overhead W per GPU{inp('overhead_w_per_gpu')}</label>"
+            f"<label>CPU estimate W per GPU{inp('cpu_estimate_w_per_gpu', '5')}</label>"
+            f"</div>"
+            f'<div class="budget-derived"></div></div>'
+        )
+    return f"""
+<details class="budget-card" open>
+  <summary class="budget-head"><span class="section-caret"></span><h3>Power budget assumptions</h3>
+    <span class="section-hint">edits apply to every chart</span></summary>
+  <p class="pareto-subtitle">Static = provisioned rack power per GPU (the <b>static budget</b> basis, × active GPUs).
+  Overhead = unmeasured "everything else" per active GPU, added to measured CPU+GPU for the <b>projected avg-rack</b>
+  basis and the violet bar segment. CPU estimate = amortised CPU watts per GPU, used only for runs whose CPU power was
+  not collected (◆ points). Live but not saved: make changes permanent in <code>GPU_POWER_BUDGETS</code>.</p>
+  {"".join(rows)}
+  <div class="budget-actions"><button type="button" class="budget-reset">Reset to defaults</button></div>
+</details>
 """
 
 
@@ -1536,26 +2620,35 @@ def _pareto_view_html(
   <p class="pareto-subtitle">One point per run &times; concurrency, coloured by GPU type &times; model. Lines connect
   each family's nondominated points for the chosen axes (visual guide, not interpolation). Hover for the headline
   numbers; click to inspect.</p>
+  <p class="pareto-subtitle">{_power_basis_blurb(points)}</p>
   <div class="pareto-layout">
     <div>
       <div class="pareto-controls">
         {_model_select_html(points)}
         <label>X {_axis_select_html("x", _PARETO_DEFAULT_X)}</label>
         <label>Y {_axis_select_html("y", _PARETO_DEFAULT_Y)}</label>
+        <label class="frontier-only" title="Hide points that another point of the same group beats on both axes"><input type="checkbox" data-frontier-only checked> Frontier points only</label>
       </div>
       <div class="run-legend"></div>
+      <div class="basis-legend run-legend" hidden></div>
       <div class="pareto-root" data-points="{points_json}">
         <svg class="pareto-svg" viewBox="0 0 900 520" preserveAspectRatio="xMidYMid meet"></svg>
+        <p class="pareto-note"></p>
         <div class="tooltip pareto-tooltip"></div>
       </div>
+      <div class="pareto-warnings"></div>
     </div>
     <div class="pareto-inspect">
       <h3>Inspect a point</h3>
       <p class="pareto-panel-title"></p>
       <div class="pareto-panel"></div>
-      <div class="pareto-warnings"></div>
+      {_budget_card_html(points)}
     </div>
   </div>
+</div>
+<div class="type-cards-row">
+{_type_power_card_html()}
+{_node_power_card_html(by_type=True)}
 </div>
 {_node_power_card_html()}
 {charts_section}
@@ -1648,8 +2741,10 @@ def _concurrency_cards_html(
     run_key: str,
     run_charts_source_id: str,
     point_charts: dict[str, str],
+    accent: str | None = None,
 ) -> str:
     """Data-table cards for one run: one card per concurrency holding two views of it.
+    ``accent`` (a CSS colour) tints the card so a run's cards read as a group.
     ``.view-run`` (default) is the whole-run chart zoomed to that concurrency's
     warmup+profile span with its bands emphasised (double-click for the full run);
     ``.view-window`` is the sliced measured-window chart (``point_charts``, the same
@@ -1680,11 +2775,16 @@ def _concurrency_cards_html(
                 1,
             )
         if run_view or window_view:
+            style = f' style="--card-accent: {html.escape(accent, quote=True)}"' if accent else ""
             cards.append(
-                f'<div class="conc-card" data-run="{html.escape(run_key, quote=True)}" data-conc="{conc}">'
+                f'<details class="conc-card" open data-run="{html.escape(run_key, quote=True)}" data-conc="{conc}"{style}>'
+                f'<summary class="conc-card-head"><span class="section-caret"></span>'
+                f'<span class="conc-card-run">{html.escape(display_label)}</span>'
+                f'<span class="conc-card-conc">{html.escape(bench)} c={conc}</span></summary>'
+                f'<div class="conc-card-body">'
                 f'<div class="view-run">{run_view}</div>'
                 f'<div class="view-window" hidden>{window_view}</div>'
-                "</div>"
+                "</div></details>"
             )
     return "".join(cards)
 
@@ -1729,13 +2829,27 @@ def _tabs_html(pareto_html: str, table_html: str, power_html: str, baseline_html
 """
 
 
-def _chart_sub_html(title: str, series: list[dict], *, embed: bool = True, unit: str = "W") -> str:
+def _ylabel_from_title(title: str) -> str:
+    """ "Prefill throughput (input tok/s)" -> "Input tok/s"; "Output throughput (tok/s, aiperf timeslices)" -> "Tok/s"."""
+    m = re.search(r"\(([^)]*)\)", title)
+    if not m:
+        return ""
+    inner = m.group(1).split(",")[0].strip()
+    return inner[:1].upper() + inner[1:] if inner else ""
+
+
+def _chart_sub_html(
+    title: str, series: list[dict], *, embed: bool = True, unit: str = "W", ylabel: str | None = None
+) -> str:
     """``embed=False`` leaves ``data-series`` empty; the group's ``data-source`` tells
     the JS which sibling group to copy the (identical) series from -- see
-    ``_power_charts_html``."""
+    ``_power_charts_html``. ``ylabel`` is the rotated y-axis caption; defaults to
+    "Power (W)" for power charts."""
     series_json = html.escape(json.dumps(series), quote=True) if embed else ""
+    if ylabel is None:
+        ylabel = "Power (W)" if unit == "W" else ""
     return f"""
-<div class="chart-sub" data-series="{series_json}" data-unit="{html.escape(unit, quote=True)}">
+<div class="chart-sub" data-series="{series_json}" data-unit="{html.escape(unit, quote=True)}" data-ylabel="{html.escape(ylabel, quote=True)}">
   <div class="chart-sub-head">
     <p class="chart-sub-title">{html.escape(title)}</p>
     <span class="yscale-toggle" title="y-axis scale">
@@ -1750,11 +2864,52 @@ def _chart_sub_html(title: str, series: list[dict], *, embed: bool = True, unit:
     </svg>
     <div class="tooltip"></div>
   </div>
-  {_legend_html(series)}
-  <span class="stats-toggle">show stats table</span>
-  {_stats_table_html(series, unit)}
+  <div class="chart-extras">
+    <details class="chart-fold legend-details">
+      <summary><span class="fold-caret"></span>Series toggles <span class="fold-hint">— {len(series)} line{"s" if len(series) != 1 else ""}{"; click to show or hide individual GPUs / sockets" if len(series) > 1 else ""}</span></summary>
+      {_legend_html(series)}
+    </details>
+    <details class="chart-fold stats-details">
+      <summary><span class="fold-caret"></span>Stats table <span class="fold-hint">— mean / min / p50 / p95 / max per line</span></summary>
+      {_stats_table_html(series, unit)}
+    </details>
+  </div>
 </div>
 """
+
+
+_ROLE_ORDER = ("prefill", "decode")
+_ROLE_HEADINGS = {"prefill": "Prefill nodes", "decode": "Decode nodes", "": "Nodes without a worker role"}
+
+
+def _split_by_role(gpu_series: list[dict], cpu_series: list[dict]) -> list[tuple[str, list[dict], list[dict]]]:
+    """Partition series by worker role for one chart section per role.
+
+    Returns ``[]`` when the run has fewer than two roles (a single-role run is
+    drawn as one section without headings). A device tagged with several roles
+    appears in each; devices with no role fall into a trailing '' section so
+    frontend-only or unmanifested hosts are still shown.
+    """
+    roles: set[str] = set()
+    for series in (*gpu_series, *cpu_series):
+        roles.update(series.get("roles") or ())
+    if len(roles) < 2:
+        return []
+    ordered = [r for r in _ROLE_ORDER if r in roles] + sorted(roles - set(_ROLE_ORDER))
+    out: list[tuple[str, list[dict], list[dict]]] = []
+    for role in ordered:
+        out.append(
+            (
+                role,
+                [s for s in gpu_series if role in (s.get("roles") or ())],
+                [s for s in cpu_series if role in (s.get("roles") or ())],
+            )
+        )
+    untagged_gpu = [s for s in gpu_series if not s.get("roles")]
+    untagged_cpu = [s for s in cpu_series if not s.get("roles")]
+    if untagged_gpu or untagged_cpu:
+        out.append(("", untagged_gpu, untagged_cpu))
+    return out
 
 
 def _notices_html(notices: list[str] | None) -> str:
@@ -1762,25 +2917,6 @@ def _notices_html(notices: list[str] | None) -> str:
         return ""
     items = "".join(f"<div>\u26a0 {html.escape(n)}</div>" for n in notices)
     return f'<div class="chart-notices">{items}</div>'
-
-
-def _role_legend_html(gpu_series: list[dict], cpu_series: list[dict]) -> str:
-    """One chip per worker role (prefill / decode / aggregated ...); clicking toggles
-    every device carrying that role across both charts. Omitted when the run has
-    fewer than two roles (nothing to separate)."""
-    roles: dict[str, int] = {}
-    for series in (*gpu_series, *cpu_series):
-        for role in series.get("roles", ()):
-            roles[role] = roles.get(role, 0) + 1
-    if len(roles) < 2:
-        return ""
-    keys = "".join(
-        f'<span class="legend-key role-key" data-role="{html.escape(role, quote=True)}" '
-        f'title="click to hide/show every device with this role">{html.escape(role)} '
-        f'<span class="role-count">({count})</span></span>'
-        for role, count in sorted(roles.items())
-    )
-    return f'<div class="legend role-legend"><span class="legend-label">Roles</span>{keys}</div>'
 
 
 def _host_legend_html(gpu_series: list[dict], cpu_series: list[dict]) -> str:
@@ -1885,13 +3021,58 @@ def _power_charts_html(
     series from the source group at init. ``focus`` (``benchmark_type, concurrency``)
     makes a group start zoomed to that concurrency's warmup+profile span."""
     subs = []
-    if gpu_series:
-        subs.append(_chart_sub_html("GPU power (W)", gpu_series, embed=reuse_source is None))
-    if cpu_series:
-        subs.append(_chart_sub_html("CPU socket power (W)", cpu_series, embed=reuse_source is None))
-    for title_extra, series in extra_subs or ():
-        if series:
-            subs.append(_chart_sub_html(title_extra, series, embed=reuse_source is None, unit=""))
+    embed = reuse_source is None
+    extras = [(t, ser) for t, ser in (extra_subs or ()) if ser]
+
+    def tps_chart(title_extra: str, series: list[dict]) -> str:
+        return _chart_sub_html(title_extra, series, embed=embed, unit="", ylabel=_ylabel_from_title(title_extra))
+
+    def section(role_key: str, heading: str, charts: list[str]) -> str:
+        # A collapsible box per node type: the coloured heading is the toggle.
+        cls = f"chart-section role-{html.escape(role_key or 'none', quote=True)}"
+        n = len(charts)
+        hint = f"{n} chart{'s' if n != 1 else ''}"
+        return (
+            f'<details class="{cls}" open><summary class="chart-role-heading">'
+            f'<span class="section-caret"></span>{html.escape(heading)} <span class="section-hint">{hint}</span></summary>'
+            f'<div class="chart-section-body">{"".join(charts)}</div></details>'
+        )
+
+    role_groups = _split_by_role(gpu_series, cpu_series)
+    if role_groups:
+        # One box per worker role (prefill, decode, then anything else, then hosts
+        # with no role), each holding that role's GPU power, CPU power and -- when
+        # the throughput chart's title names the role -- its throughput chart.
+        placed: set[str] = set()
+        for role, role_gpu, role_cpu in role_groups:
+            heading = _ROLE_HEADINGS.get(role, role.capitalize() if role else "No worker role")
+            charts: list[str] = []
+            if role_gpu:
+                charts.append(
+                    _chart_sub_html(f"{heading} — GPU power (W)", role_gpu, embed=embed, ylabel="GPU power (W)")
+                )
+            if role_cpu:
+                charts.append(
+                    _chart_sub_html(f"{heading} — CPU socket power (W)", role_cpu, embed=embed, ylabel="CPU power (W)")
+                )
+            for title_extra, series in extras:
+                if role and title_extra.lower().startswith(role.lower()):
+                    charts.append(tps_chart(title_extra, series))
+                    placed.add(title_extra)
+            subs.append(section(role, heading, charts))
+        leftover = [(t, ser) for t, ser in extras if t not in placed]
+        if leftover:
+            subs.append(section("throughput", "Throughput", [tps_chart(t, ser) for t, ser in leftover]))
+    else:
+        charts = []
+        if gpu_series:
+            charts.append(_chart_sub_html("GPU power (W)", gpu_series, embed=embed, ylabel="GPU power (W)"))
+        if cpu_series:
+            charts.append(_chart_sub_html("CPU socket power (W)", cpu_series, embed=embed, ylabel="CPU power (W)"))
+        if charts:
+            subs.append(section("all", "Power", charts))
+        if extras:
+            subs.append(section("throughput", "Throughput", [tps_chart(t, ser) for t, ser in extras]))
     if not subs:
         return ""
     bands = phase_bands or []
@@ -1908,11 +3089,15 @@ def _power_charts_html(
 <div class="chart-panel chart-group"{attrs}>
   <div class="chart-group-head">
     <p class="chart-panel-title">{html.escape(title)}</p>
-    <span class="zoom-hint">drag to zoom</span>
+    <span class="chart-group-tools">
+      <span class="granularity-toggle" title="Draw one line per device; sum each host's devices into one line per node; average the node lines of each chart (one line per node type); average every device in the chart (mean watts per GPU / per socket); or sum every device into one total line">
+        <button type="button" class="gran-btn" data-gran="device">per GPU / socket</button><button type="button" class="gran-btn" data-gran="node">per node</button><button type="button" class="gran-btn on" data-gran="type">node average</button><button type="button" class="gran-btn" data-gran="dev">device average</button><button type="button" class="gran-btn" data-gran="total">total</button>
+      </span>
+      <span class="zoom-hint">drag to zoom</span>
+    </span>
   </div>
   {_notices_html(notices)}
   {_phase_legend_html(bands)}
-  {_role_legend_html(gpu_series, cpu_series)}
   {_host_legend_html(gpu_series, cpu_series)}
   {"".join(subs)}
 </div>
@@ -2213,6 +3398,8 @@ def _render_page(bundles: list[dict], *, title: str, subtitle: str, single_run: 
                 group_position=group_position,
                 model=bundle["model"] or "unknown model",
                 coverage_warnings=bundle.get("coverage_warnings"),
+                gpu_type=bundle.get("gpu_type"),
+                hosts=bundle.get("hosts"),
             )
         )
         run_point_charts = _point_charts_html(bundle, run_label=rl)
@@ -2270,7 +3457,15 @@ def _render_page(bundles: list[dict], *, title: str, subtitle: str, single_run: 
     else:
         # Single (or no) concurrency point: no scatter to drive the per-node bars, so
         # embed the one point's figures and let the card render itself.
-        node_card = _node_power_card_html(points[0]) if points and points[0].get("node_power") else ""
+        node_card = (
+            '<div class="type-cards-row">'
+            + _type_power_card_html(points[0])
+            + _node_power_card_html(points[0], by_type=True)
+            + "</div>"
+            + _node_power_card_html(points[0])
+            if points and points[0].get("node_power")
+            else ""
+        )
         # Directly under the summary table (h2 + table), before the power-over-time charts.
         table_end = next((i + 1 for i, part in enumerate(table_parts) if part.startswith("<table>")), 0)
         body_parts = [*header_parts, *table_parts[:table_end], node_card, *table_parts[table_end:]]
@@ -2551,6 +3746,7 @@ def _build_run_bundle(log_dir: Path, *, cpu_samples_csv: Path | None = None) -> 
         "total_gpus": total_gpus,
         "gpu_type": gpu_type,
         "model": model,
+        "hosts": sorted({s["host"] for s in (*gpu_series, *cpu_series) if s.get("host")}),
         "reports": reports,
         "gpu_series": gpu_series,
         "cpu_series": cpu_series,
