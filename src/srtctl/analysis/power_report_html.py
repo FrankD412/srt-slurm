@@ -502,6 +502,7 @@ function fmtAxis(v) {
 const TYPE_LINE_COLOR = "hsl(210 15% 62%)";
 const TOTAL_LINE_COLOR = "hsl(38 80% 58%)";
 const DEVAVG_LINE_COLOR = "hsl(262 55% 62%)";
+const PERGPU_LINE_COLOR = "hsl(190 60% 55%)";
 
 // Round tick positions for a linear axis over [min, max]: step is 1/2/2.5/5 x 10^n.
 function linearTicks(min, max, n) {
@@ -580,6 +581,7 @@ function initChartGroup(group) {
     typeData: null,     // mean across the chart's nodes (one line), built on first use
     totalData: null,    // sum of every device in the chart (one line), built on first use
     devAvgData: null,   // mean across every device in the chart (one line), built on first use
+    perGpuData: null,   // sum of every device in the chart / GPU count of the section (one line), built on first use
     svg: sub.querySelector("svg.chart"),
     overlay: sub.querySelector(".overlay"),
     crosshair: sub.querySelector(".crosshair"),
@@ -932,6 +934,31 @@ function initChartGroup(group) {
     return [{ label: "mean per " + noun + " \u2014 " + what + " (" + series.length + " " + deviceNoun(series) + " on " + hosts.size + (hosts.size === 1 ? " node)" : " nodes)"),
       host: "", roles, color: DEVAVG_LINE_COLOR, pattern: 0, t: grid, w: arr, stats: statsOf(arr) }];
   }
+  // Strictly per GPU: every W chart normalised by the *GPU* count of its section,
+  // so the CPU line reads "CPU watts per GPU" (total CPU / GPUs) rather than per
+  // socket. For the GPU chart this equals the device average. GPU count comes from
+  // the section's GPU chart; a CPU-only section has none and keeps the device average.
+  function sectionGpuCount(c) {
+    // The GPU chart living in the same role section (<details.chart-section>) as
+    // chart c; the panel holds several sections, each with its own GPU count.
+    const section = c.sub.closest(".chart-section");
+    const gpuChart = charts.find(o => o.unit === "W" && (!section || o.sub.closest(".chart-section") === section)
+      && (o.deviceData || o.data).length && deviceNoun(o.deviceData || o.data) === "GPUs");
+    return gpuChart ? (gpuChart.deviceData || gpuChart.data).length : 0;
+  }
+  function buildPerGpuData(c, series, heading) {
+    if (!series.length) return null;
+    const gpus = sectionGpuCount(c);
+    if (!gpus) return null;
+    const hosts = new Set(series.map(s => s.host).filter(Boolean));
+    const grid = sharedGrid(series);
+    const arr = sumOnGrid(series, grid, 1 / gpus);
+    const roles = [...new Set(series.flatMap(s => s.roles || []))];
+    const what = (heading || (roles.length ? roles.join("+") : "all")) + (hosts.size === 1 ? " node" : " nodes");
+    const noun = deviceNoun(series) === "sockets" ? "CPU watts" : "GPU watts";
+    return [{ label: noun + " per GPU \u2014 " + what + " (" + series.length + " " + deviceNoun(series) + " \u00f7 " + gpus + " GPUs)",
+      host: "", roles, color: PERGPU_LINE_COLOR, pattern: 0, t: grid, w: arr, stats: statsOf(arr) }];
+  }
   function chartHeading(c) {
     // "Prefill nodes — GPU power (W)" -> "prefill"; plain "GPU power (W)" -> null
     const title = c.sub.querySelector(".chart-sub-title");
@@ -957,6 +984,10 @@ function initChartGroup(group) {
       } else if (gran === "dev") {
         if (c.devAvgData === null) c.devAvgData = buildDevAvgData(base, chartHeading(c)) || false;
         next = c.devAvgData || null;
+      } else if (gran === "gpu") {
+        if (c.perGpuData === null) c.perGpuData = buildPerGpuData(c, base, chartHeading(c)) || false;
+        if (!c.perGpuData) { if (c.devAvgData === null) c.devAvgData = buildDevAvgData(base, chartHeading(c)) || false; }
+        next = c.perGpuData || c.devAvgData || null;
       } else next = c.deviceData;
       if (!next) { if (gran === "device") return; next = base; }   // only when series carry no host at all
       if (!c.deviceData) c.deviceData = c.data;
@@ -3107,8 +3138,8 @@ def _power_charts_html(
   <div class="chart-group-head">
     <p class="chart-panel-title">{html.escape(title)}</p>
     <span class="chart-group-tools">
-      <span class="granularity-toggle" title="Draw one line per device; sum each host's devices into one line per node; average the node lines of each chart (one line per node type); average every device in the chart (mean watts per GPU / per socket); or sum every device into one total line">
-        <button type="button" class="gran-btn" data-gran="device">per GPU / socket</button><button type="button" class="gran-btn" data-gran="node">per node</button><button type="button" class="gran-btn" data-gran="type">node average</button><button type="button" class="gran-btn on" data-gran="dev">device average</button><button type="button" class="gran-btn" data-gran="total">total</button>
+      <span class="granularity-toggle" title="Draw one line per device; sum each host's devices into one line per node; average the node lines of each chart (one line per node type); average every device in the chart (mean watts per GPU / per socket); divide every chart by the section's GPU count (GPU watts per GPU, CPU watts per GPU); or sum every device into one total line">
+        <button type="button" class="gran-btn" data-gran="device">per GPU / socket</button><button type="button" class="gran-btn" data-gran="node">per node</button><button type="button" class="gran-btn" data-gran="type">node average</button><button type="button" class="gran-btn on" data-gran="dev">device average</button><button type="button" class="gran-btn" data-gran="gpu">per GPU</button><button type="button" class="gran-btn" data-gran="total">total</button>
       </span>
       <span class="zoom-hint">drag to zoom</span>
     </span>
