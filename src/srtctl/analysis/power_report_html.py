@@ -263,6 +263,18 @@ tr:last-child td { border-bottom: none; }
 .chart-fold > .legend, .chart-fold > .stats-table { margin: 0; padding: 8px 10px; border: 1px solid var(--border); border-top: 0;
   border-radius: 0 0 6px 6px; }
 .legend-key.partial { opacity: .7; border-style: dashed; }
+/* Summary-table column groups: perf stats (neutral), GPU (green, matches the GPU bar
+   segment), CPU (orange, matches the CPU segments), efficiency (blue). A slightly
+   stronger wash on the header and a hairline on each group's first column. */
+td.cg-perf, th.cg-perf { background: hsl(0 0% 50% / .07); }
+td.cg-gpu,  th.cg-gpu  { background: hsl(158 60% 40% / .10); }
+td.cg-cpu,  th.cg-cpu  { background: hsl(35 85% 50% / .10); }
+td.cg-eff,  th.cg-eff  { background: hsl(210 70% 55% / .10); }
+th.cg-perf { background: hsl(0 0% 50% / .14); }
+th.cg-gpu  { background: hsl(158 60% 40% / .20); }
+th.cg-cpu  { background: hsl(35 85% 50% / .20); }
+th.cg-eff  { background: hsl(210 70% 55% / .20); }
+td.cg-start, th.cg-start { border-left: 1px solid var(--border); }
 .host-legend { margin: 0 0 12px; padding-bottom: 10px; border-bottom: 1px solid var(--grid); }
 .legend-label { color: var(--ink-muted); font-size: 11px; text-transform: uppercase; letter-spacing: .02em; align-self: center; }
 .host-key { font-weight: 600; }
@@ -1911,10 +1923,12 @@ def _fmt(value: float | None, decimals: int = 2) -> str:
 
 
 _SUMMARY_TABLE_HEADER = (
-    "<tr><th>Run</th><th>Output tok/s</th><th>Tok/s/GPU</th><th>TPOT p50 (ms)</th><th>TPOT p90 (ms)</th>"
-    "<th>Total GPU watts</th><th>Watts per GPU</th><th>Total CPU watts</th><th>Watts per CPU socket</th>"
-    "<th>Tok/s per GPU watt</th><th>Tok/s per CPU watt</th>"
-    "<th>Tok/s per watt (GPU+CPU)</th></tr>"
+    '<tr><th>Run</th><th class="cg-perf cg-start">Output tok/s</th><th class="cg-perf">Tok/s/GPU</th>'
+    '<th class="cg-perf">TPOT p50 (ms)</th><th class="cg-perf">TPOT p90 (ms)</th>'
+    '<th class="cg-gpu cg-start">Total GPU watts</th><th class="cg-gpu">Watts per GPU</th>'
+    '<th class="cg-cpu cg-start">Total CPU watts</th><th class="cg-cpu">Watts per CPU socket</th>'
+    '<th class="cg-eff cg-start">Tok/s per GPU watt</th><th class="cg-eff">Tok/s per CPU watt</th>'
+    '<th class="cg-eff">Tok/s per watt (GPU+CPU)</th></tr>'
 )
 
 
@@ -1945,17 +1959,17 @@ def _summary_rows_html(
         rows.append(
             "<tr>"
             f"<td>{html.escape(run_cell)}{warn_mark}</td>"
-            f"<td>{_fmt(ppw['output_tokens_per_second'])}</td>"
-            f"<td>{_fmt(ppw['output_tokens_per_second_per_gpu'])} ({ppw['num_gpus']} gpu)</td>"
-            f"<td>{_fmt(w['tpot_p50_ms'])}</td>"
-            f"<td>{_fmt(w['tpot_p90_ms'])}</td>"
-            f"<td>{_fmt(ppw['gpu_avg_power_w'], 0)}</td>"
-            f"<td>{_fmt(_per_gpu(ppw['gpu_avg_power_w'], ppw['num_gpus']), 0)}</td>"
-            f"<td>{_fmt(ppw['cpu_avg_power_w'], 0)}</td>"
-            f"<td>{_fmt(_per_gpu(ppw['cpu_avg_power_w'], _socket_count(r)), 0)}</td>"
-            f"<td>{_fmt(ppw['output_tokens_per_second_per_gpu_watt'], 4)}</td>"
-            f"<td>{_fmt(ppw['output_tokens_per_second_per_cpu_watt'], 4)}</td>"
-            f"<td>{_fmt(ppw['output_tokens_per_second_per_combined_watt'], 4)}</td>"
+            f"<td class='cg-perf cg-start'>{_fmt(ppw['output_tokens_per_second'])}</td>"
+            f"<td class='cg-perf'>{_fmt(ppw['output_tokens_per_second_per_gpu'])} ({ppw['num_gpus']} gpu)</td>"
+            f"<td class='cg-perf'>{_fmt(w['tpot_p50_ms'])}</td>"
+            f"<td class='cg-perf'>{_fmt(w['tpot_p90_ms'])}</td>"
+            f"<td class='cg-gpu cg-start'>{_fmt(ppw['gpu_avg_power_w'], 0)}</td>"
+            f"<td class='cg-gpu'>{_fmt(_per_gpu(ppw['gpu_avg_power_w'], ppw['num_gpus']), 0)}</td>"
+            f"<td class='cg-cpu cg-start'>{_fmt(ppw['cpu_avg_power_w'], 0)}</td>"
+            f"<td class='cg-cpu'>{_fmt(_per_gpu(ppw['cpu_avg_power_w'], _socket_count(r)), 0)}</td>"
+            f"<td class='cg-eff cg-start'>{_fmt(ppw['output_tokens_per_second_per_gpu_watt'], 4)}</td>"
+            f"<td class='cg-eff'>{_fmt(ppw['output_tokens_per_second_per_cpu_watt'], 4)}</td>"
+            f"<td class='cg-eff'>{_fmt(ppw['output_tokens_per_second_per_combined_watt'], 4)}</td>"
             "</tr>"
         )
     return "".join(rows)
