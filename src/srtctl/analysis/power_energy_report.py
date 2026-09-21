@@ -680,6 +680,11 @@ class NodePower:
     gpu_w: float | None
     cpu_w: float | None
     cpu_rails_w: dict[str, float] = field(default_factory=dict)
+    # Device counts behind the sums (for per-device averages) and the worker roles
+    # the node's GPUs carry (from the GPU manifest), so nodes can be grouped by type.
+    gpu_count: int = 0
+    socket_count: int = 0
+    roles: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1283,6 +1288,17 @@ def _node_power(
     gpu_by_host = {b.label.removeprefix("gpu/"): b.avg_power_w for b in gpu_per_node}
     hosts = sorted(set(cpu_by_host) | set(gpu_by_host))
 
+    gpu_count: dict[str, int] = {}
+    roles_by_host: dict[str, set[str]] = {}
+    if gpu_samples is not None:
+        for host, index in gpu_samples.per_device:
+            gpu_count[host] = gpu_count.get(host, 0) + 1
+            roles_by_host.setdefault(host, set()).update(gpu_samples.device_roles.get((host, index), ()))
+    socket_count: dict[str, int] = {}
+    if cpu_samples is not None:
+        for host, _socket in cpu_samples.per_socket:
+            socket_count[host] = socket_count.get(host, 0) + 1
+
     rails_by_host: dict[str, dict[str, float]] = {}
     if cpu_samples is not None:
         for (host, _socket), kinds in cpu_samples.per_socket_rails.items():
@@ -1301,6 +1317,9 @@ def _node_power(
                 for kind in CPU_COMPONENT_RAIL_KINDS
                 if kind in rails_by_host.get(host, {})
             },
+            gpu_count=gpu_count.get(host, 0),
+            socket_count=socket_count.get(host, 0),
+            roles=tuple(sorted(roles_by_host.get(host, ()))),
         )
         for host in hosts
     )
@@ -1490,7 +1509,15 @@ def report_to_dict(report: ConcurrencyReport) -> dict:
         "cpu_per_node": dump(report.cpu_per_node),
         "cpu_total_joules": report.cpu_total_joules,
         "node_power": [
-            {"hostname": n.hostname, "gpu_w": n.gpu_w, "cpu_w": n.cpu_w, "cpu_rails_w": dict(n.cpu_rails_w)}
+            {
+                "hostname": n.hostname,
+                "gpu_w": n.gpu_w,
+                "cpu_w": n.cpu_w,
+                "cpu_rails_w": dict(n.cpu_rails_w),
+                "gpu_count": n.gpu_count,
+                "socket_count": n.socket_count,
+                "roles": list(n.roles),
+            }
             for n in report.node_power
         ],
         "cpu_sensors": [

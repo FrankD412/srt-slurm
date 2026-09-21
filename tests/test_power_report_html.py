@@ -141,23 +141,6 @@ def test_build_run_series_tags_roles_from_manifest_and_host_fallback() -> None:
     assert cpu[0]["roles"] == ["decode", "prefill"]  # socket inherits every role on its host
 
 
-def test_role_legend_lists_roles_with_device_counts_and_needs_two_roles() -> None:
-    from srtctl.analysis.power_report_html import _role_legend_html
-
-    per_device = {("node-a", i): _series([1.0]) for i in range(3)}
-    one_role = _build_run_series(per_device, label_fmt="{host}/gpu{index}", roles={k: {"decode"} for k in per_device})
-    assert _role_legend_html(one_role, []) == ""
-
-    two = _build_run_series(
-        per_device,
-        label_fmt="{host}/gpu{index}",
-        roles={("node-a", 0): {"prefill"}, ("node-a", 1): {"decode"}, ("node-a", 2): {"decode"}},
-    )
-    content = _role_legend_html(two, [])
-    assert 'data-role="decode"' in content and "(2)" in content
-    assert 'data-role="prefill"' in content and "(1)" in content
-
-
 def test_build_run_series_origin_overrides_the_time_zero() -> None:
     per_device = {("node-a", 0): (np.array([105.0, 106.0]), np.array([1.0, 2.0]))}
 
@@ -290,12 +273,19 @@ def test_pareto_points_includes_panel_and_hover_fields() -> None:
     assert "Concurrency / active GPUs" in field_names
     assert "Output tok/s / active GPU" in field_names
     assert "P90 TPOT" in field_names
-    assert "Total GPU power (all GPUs, avg)" in field_names
-    assert "Power per GPU (avg)" in field_names
+    assert "Total GPU watts (all GPUs, avg)" in field_names
+    assert "Watts per GPU (avg)" in field_names
     assert "Output tok/s / (GPU+CPU) W" in field_names
     assert "Measured window" in field_names
     hover_names = [name for name, _ in points[0]["hover"]]
-    assert hover_names == ["Concurrency / GPUs", "P90 TPOT", "Total GPU power", "Per GPU", "Output tok/s / GPU W"]
+    assert hover_names == [
+        "GPU type / hosts",
+        "Concurrency / GPUs",
+        "P90 TPOT",
+        "Total GPU watts",
+        "Watts per GPU",
+        "Output tok/s per GPU watt",
+    ]
     assert points[0]["m"]["gpu_w_per_gpu"] == 150.0  # 300 W across 2 GPUs
 
 
@@ -859,10 +849,11 @@ def test_pareto_points_group_and_colour_follow_the_family_not_the_run() -> None:
     assert c["group"] != a["group"] and c["color"] != a["color"]
 
 
-def test_model_select_omitted_for_one_model_and_defaults_to_first_of_several() -> None:
+def test_model_select_always_rendered_and_defaults_to_first_of_several() -> None:
     reports = [_report_dict(concurrency=4, output_tps=100.0, tps_per_gpu=50.0)]
+    assert _model_select_html(_pareto_points(reports, run_label="runA")) == ""  # no model known
     one = _pareto_points(reports, run_label="runA", model="M1")
-    assert _model_select_html(one) == ""
+    assert '<option value="M1" selected>M1</option>' in _model_select_html(one)
 
     two = one + _pareto_points(reports, run_label="runB", run_position=1, model="M2")
     content = _model_select_html(two)
@@ -1061,3 +1052,100 @@ def test_node_power_card_has_a_notices_slot_for_coverage_warnings() -> None:
     content = _node_power_card_html()
     assert 'class="chart-notices node-power-notices" hidden' in content
     # the JS fills it from point.warnings matching "power missing" / "not collected"
+
+
+def test_hosts_summary_collapses_numeric_ranges_for_the_tooltip() -> None:
+    from srtctl.analysis.power_report_html import _hosts_summary
+
+    hosts = [f"nvl72d090-T{n:02d}" for n in (10, 11, 12, 13, 14, 16, 18)]
+    assert _hosts_summary(hosts) == "nvl72d090-T10…18 (7)"
+    assert _hosts_summary(hosts, full=True) == ", ".join(hosts) + " (7)"
+    assert _hosts_summary(["a", "b"]) == "a, b"
+    assert _hosts_summary(None) == "—"
+    assert _hosts_summary(["alpha1", "beta9", "gamma3", "delta2"]) == "alpha1 … gamma3 (4)"
+
+
+def test_pareto_points_carry_gpu_type_and_hosts() -> None:
+    from srtctl.analysis.power_report_html import _pareto_points
+
+    reports = [_report_dict(concurrency=4, output_tps=100.0, tps_per_gpu=50.0)]
+    points = _pareto_points(reports, run_label="runA", gpu_type="gb300", hosts=["n1", "n2"])
+    hover = dict(points[0]["hover"])
+    fields = dict(points[0]["fields"])
+    assert hover["GPU type / hosts"] == "gb300 · n1, n2"
+    assert fields["GPU type"] == "gb300"
+    assert fields["Hosts"] == "n1, n2"
+
+
+def test_power_variant_watts_measured_projected_static() -> None:
+    from srtctl.analysis.power_report_html import GpuPowerBudget, _power_variant_watts
+
+    b = GpuPowerBudget(static_node_w=8_000.0, gpus_per_node=4, overhead_w_per_gpu=500.0, cpu_estimate_w_per_gpu=50.0)
+    w, est = _power_variant_watts(gpu_w=3_000.0, cpu_w=400.0, num_gpus=4, budget=b)
+    assert est is False
+    assert w["measured"] == 3_400.0
+    assert w["projected"] == 3_400.0 + 500.0 * 4
+    assert w["static"] == 8_000.0  # 4 GPUs = one node's static budget
+
+    # No CPU leg: the per-GPU estimate stands in (50 W x 4 GPUs), flagged, and projected builds on it.
+    w, est = _power_variant_watts(gpu_w=3_000.0, cpu_w=None, num_gpus=4, budget=b)
+    assert est is True
+    assert w["measured"] == 3_000.0 + 200.0
+    assert w["projected"] == 3_200.0 + 2_000.0
+    assert w["static"] == 8_000.0
+
+    # Unknown GPU type: only what was measured; no CPU and no budget -> no measured value either.
+    w, est = _power_variant_watts(gpu_w=3_000.0, cpu_w=400.0, num_gpus=4, budget=None)
+    assert (w, est) == ({"measured": 3_400.0, "projected": None, "static": None}, False)
+    w, est = _power_variant_watts(gpu_w=3_000.0, cpu_w=None, num_gpus=4, budget=None)
+    assert (w["measured"], est) == (None, False)
+
+
+def test_pareto_points_carry_basis_split_metrics_and_budget() -> None:
+    from srtctl.analysis.power_report_html import GPU_POWER_BUDGETS
+
+    reports = [_report_dict(concurrency=4, output_tps=100.0, tps_per_gpu=50.0)]
+    p = _pareto_points(reports, run_label="runA", gpu_type="GB300")[0]
+    b = GPU_POWER_BUDGETS["gb300"]
+    assert p["power_basis_w"]["measured"] == 340.0
+    assert p["power_basis_w"]["projected"] == pytest.approx(340.0 + 2 * b.overhead_w_per_gpu)
+    assert p["power_basis_w"]["static"] == pytest.approx(2 * b.static_w_per_gpu)
+    assert p["m"]["total_tps_per_mw__measured"] == pytest.approx(140.0 / 340.0 * 1e6)
+    assert p["m"]["input_tps_per_mw__measured"] == pytest.approx(40.0 / 340.0 * 1e6)
+    assert p["m"]["output_tps_per_mw__static"] == pytest.approx(100.0 / (2 * b.static_w_per_gpu) * 1e6)
+    assert p["m"]["node_w_per_gpu__static"] == pytest.approx(b.static_w_per_gpu)
+    assert p["cpu_estimated"] is False
+    assert p["budget"]["static_w_per_gpu"] == b.static_w_per_gpu
+    fields = dict(p["fields"])
+    assert "Static power budget" in fields and "Projected avg-rack power (approx.)" in fields
+    assert not any("No power budget" in w for w in p["warnings"])
+
+    from srtctl.analysis.power_report_html import _power_budget_for
+
+    assert _power_budget_for("VR") is GPU_POWER_BUDGETS["vr200"]  # alias, case-insensitive
+    assert _power_budget_for("gb200") is None  # no budget agreed for GB200
+
+    unknown = _pareto_points(reports, run_label="runA", gpu_type="h100")[0]
+    assert unknown["budget"] is None
+    assert unknown["m"]["total_tps_per_mw__static"] is None
+    assert any("No power budget for GPU type 'h100'" in w for w in unknown["warnings"])
+
+
+def test_pareto_points_estimate_cpu_when_leg_missing() -> None:
+    r = _report_dict(concurrency=4, output_tps=100.0, tps_per_gpu=50.0)
+    r["perf_per_watt"]["cpu_avg_power_w"] = None
+    r["perf_per_watt"]["combined_avg_power_w"] = None
+    p = _pareto_points([r], run_label="runA", gpu_type="gb300")[0]
+    assert p["cpu_estimated"] is True
+    assert p["power_basis_w"]["measured"] == pytest.approx(300.0 + 50.0 * 2)
+    assert p["m"]["total_tps_per_mw__measured"] is not None
+    assert any("CPU power not measured" in w for w in p["warnings"])
+    assert "Measured GPU + estimated CPU (avg)" in dict(p["fields"])
+
+
+def test_type_power_card_is_emitted_above_the_node_power_card() -> None:
+    from srtctl.analysis.power_report_html import _node_power_card_html, _type_power_card_html
+
+    content = _type_power_card_html() + _node_power_card_html()
+    assert content.index('class="pareto-card type-power-card"') < content.index('class="pareto-card node-power-card"')
+    assert 'class="chart-notices type-power-notices" hidden' in content
