@@ -543,7 +543,7 @@ function lowerBound(arr, target) {
 // Pareto points (each point has its own pre-rendered chart group) or moving
 // between tabs keeps the chosen granularity and y-scales. Changing a toggle in
 // one panel broadcasts to all.
-const CHART_PREFS = { granularity: "type", scales: {} };   // scales: chart title -> "linear" | "log"; default view = node average
+const CHART_PREFS = { granularity: "dev", scales: {} };   // scales: chart title -> "linear" | "log"; default view = device average
 const CHART_GROUPS = [];
 function broadcastChartPrefs(origin) {
   CHART_GROUPS.forEach(g => { if (g !== origin && g.applyPrefs) g.applyPrefs(); });
@@ -3091,7 +3091,7 @@ def _power_charts_html(
     <p class="chart-panel-title">{html.escape(title)}</p>
     <span class="chart-group-tools">
       <span class="granularity-toggle" title="Draw one line per device; sum each host's devices into one line per node; average the node lines of each chart (one line per node type); average every device in the chart (mean watts per GPU / per socket); or sum every device into one total line">
-        <button type="button" class="gran-btn" data-gran="device">per GPU / socket</button><button type="button" class="gran-btn" data-gran="node">per node</button><button type="button" class="gran-btn on" data-gran="type">node average</button><button type="button" class="gran-btn" data-gran="dev">device average</button><button type="button" class="gran-btn" data-gran="total">total</button>
+        <button type="button" class="gran-btn" data-gran="device">per GPU / socket</button><button type="button" class="gran-btn" data-gran="node">per node</button><button type="button" class="gran-btn" data-gran="type">node average</button><button type="button" class="gran-btn on" data-gran="dev">device average</button><button type="button" class="gran-btn" data-gran="total">total</button>
       </span>
       <span class="zoom-hint">drag to zoom</span>
     </span>
