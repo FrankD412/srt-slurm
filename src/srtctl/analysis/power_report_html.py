@@ -31,12 +31,13 @@ store with no network access.
 from __future__ import annotations
 
 import html
+import itertools
 import json
 import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import yaml
@@ -103,7 +104,7 @@ def _downsample_minmax(
     edges = np.linspace(0, n, max_buckets + 1).astype(int)
     out_t: list[float] = []
     out_w: list[float] = []
-    for lo, hi in zip(edges[:-1], edges[1:], strict=False):
+    for lo, hi in itertools.pairwise(edges):
         if hi <= lo:
             continue
         seg_t, seg_w = times[lo:hi], watts[lo:hi]
@@ -1926,7 +1927,7 @@ _SUMMARY_TABLE_HEADER = (
     '<tr><th>Run</th><th class="cg-perf cg-start">Output tok/s</th><th class="cg-perf">Tok/s/GPU</th>'
     '<th class="cg-perf">TPOT p50 (ms)</th><th class="cg-perf">TPOT p90 (ms)</th>'
     '<th class="cg-gpu cg-start">Total GPU watts</th><th class="cg-gpu">Watts per GPU</th>'
-    '<th class="cg-cpu cg-start">Total CPU watts</th><th class="cg-cpu">Watts per CPU socket</th>'
+    '<th class="cg-cpu cg-start">Total CPU watts</th><th class="cg-cpu">Watts per CPU socket</th><th class="cg-cpu">CPU watts per GPU</th>'
     '<th class="cg-eff cg-start">Tok/s per GPU watt</th><th class="cg-eff">Tok/s per CPU watt</th>'
     '<th class="cg-eff">Tok/s per watt (GPU+CPU)</th></tr>'
 )
@@ -1967,6 +1968,7 @@ def _summary_rows_html(
             f"<td class='cg-gpu'>{_fmt(_per_gpu(ppw['gpu_avg_power_w'], ppw['num_gpus']), 0)}</td>"
             f"<td class='cg-cpu cg-start'>{_fmt(ppw['cpu_avg_power_w'], 0)}</td>"
             f"<td class='cg-cpu'>{_fmt(_per_gpu(ppw['cpu_avg_power_w'], _socket_count(r)), 0)}</td>"
+            f"<td class='cg-cpu'>{_fmt(_per_gpu(ppw['cpu_avg_power_w'], ppw['num_gpus']), 1)}</td>"
             f"<td class='cg-eff cg-start'>{_fmt(ppw['output_tokens_per_second_per_gpu_watt'], 4)}</td>"
             f"<td class='cg-eff'>{_fmt(ppw['output_tokens_per_second_per_cpu_watt'], 4)}</td>"
             f"<td class='cg-eff'>{_fmt(ppw['output_tokens_per_second_per_combined_watt'], 4)}</td>"
@@ -2365,6 +2367,7 @@ def _pareto_points(
                         f"{_fmt(_per_gpu(ppw['cpu_avg_power_w'], _socket_count(r)), 1)} W"
                         + (f" ({_socket_count(r)} sockets)" if _socket_count(r) else ""),
                     ),
+                    ("CPU watts per GPU (avg)", f"{_fmt(_per_gpu(ppw['cpu_avg_power_w'], num_gpus), 1)} W"),
                     ("Total watts, GPU+CPU (avg)", f"{_fmt(combined_w, 0)} W"),
                     *basis_fields,
                     ("Output tok/s per GPU watt", _fmt(ppw["output_tokens_per_second_per_gpu_watt"], 4)),
@@ -2967,7 +2970,7 @@ def _phase_bands(reports: list[dict], *, origin: float, run_end: float) -> list[
     """
     if not reports:
         return []
-    busy: list[tuple[float, float, str, str]] = []
+    busy: list[tuple[float, float, str, str, tuple[str, int]]] = []
     for r in sorted(reports, key=lambda r: r["start_unix"]):
         label = f"{r['benchmark_type']} c={r['concurrency']}"
         ws, we = r.get("warmup_start_unix"), r.get("warmup_end_unix")
@@ -3210,7 +3213,7 @@ def _derive_phase_tps(
 def _metric_value(metric: object) -> float | None:
     """aiperf per-request metrics are ``{"value": x, "unit": "ms"}``; tolerate bare numbers."""
     if isinstance(metric, dict):
-        metric = metric.get("value")
+        metric = cast(dict[str, object], metric).get("value")
     return float(metric) if isinstance(metric, (int, float)) else None
 
 
@@ -3370,7 +3373,7 @@ def _render_page(bundles: list[dict], *, title: str, subtitle: str, single_run: 
     With fewer than two plottable points, the table view is the whole page.
     """
     labels = _dedupe_labels([b["label"] for b in bundles])
-    run_labels: list[str | None] = [None] * len(bundles) if single_run else labels
+    run_labels: list[str | None] = [None] * len(bundles) if single_run else list(labels)
 
     header_parts = ["<h1>Power &amp; performance report</h1>", f'<p class="subtitle">{html.escape(subtitle)}</p>']
     concurrency_points = sum(len(b["reports"]) for b in bundles)

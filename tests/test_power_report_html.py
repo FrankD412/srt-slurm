@@ -876,7 +876,7 @@ def test_embedded_javascript_parses(tmp_path: Path) -> None:
 
     script = tmp_path / "report.js"
     script.write_text(_JS)
-    result = subprocess.run(["node", "--check", str(script)], capture_output=True, text=True)
+    result = subprocess.run(["node", "--check", str(script)], capture_output=True, text=True, check=False)
 
     assert result.returncode == 0, result.stderr
 

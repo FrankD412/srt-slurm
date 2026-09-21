@@ -1432,9 +1432,11 @@ def _render_perf_per_watt(report: ConcurrencyReport) -> str:
         return f"output {output:.4f} tok/s/W, total {total:.4f} tok/s/W"
 
     parts = [
-        f"output={_fmt(report.output_tokens_per_second)} tok/s "
-        f"({_fmt(report.output_tokens_per_second_per_gpu)} tok/s/gpu across {report.num_gpus} gpu(s)) "
-        f"total={_fmt(report.total_tokens_per_second)} tok/s"
+        (
+            f"output={_fmt(report.output_tokens_per_second)} tok/s "
+            f"({_fmt(report.output_tokens_per_second_per_gpu)} tok/s/gpu across {report.num_gpus} gpu(s)) "
+            f"total={_fmt(report.total_tokens_per_second)} tok/s"
+        )
     ]
     if report.gpu_avg_power_w is not None:
         parts.append(
