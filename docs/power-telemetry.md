@@ -57,7 +57,9 @@ inconsistent values with actionable messages; in particular
 `collect_interval_ms` must not exceed three seconds. Each endpoint runs on an
 independent fixed schedule, so a slow node cannot delay healthy nodes and an
 endpoint never starts a second request while its previous request is in
-flight. Slots missed because of a failed request or schedule overrun are
+flight. A slot that comes due while the previous request is still running is
+polled late rather than skipped; only slots whose entire span has elapsed are
+forfeited. Slots missed because of a failed request or such an overrun are
 recorded in compact `missed_sample_ranges` manifest entries.
 
 Coverage validation derives its normal gap budget from the recorded sample

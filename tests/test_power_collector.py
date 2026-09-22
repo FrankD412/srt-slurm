@@ -450,6 +450,80 @@ class TestCollection:
         )
         assert Reason.SAMPLE_SCHEDULE_OVERRUN in manifest["reason_codes"]
 
+    def test_slightly_slow_endpoint_keeps_its_samples(self, tmp_path, exporters):
+        """A request that overruns its slot by less than one interval fires late instead of forfeiting.
+
+        Slot ``N`` may start any time before slot ``N + 1`` is due. With a 1.2x
+        latency the endpoint therefore keeps ~5 of every 6 slots (the physical
+        ceiling for one non-overlapping request stream) rather than losing
+        every other slot to an immediate skip.
+        """
+        a = exporters(_body("a"))
+        b = exporters(_body("b"), delay=0.06)  # 1.2x the 0.05 s interval
+        session = _session(
+            tmp_path,
+            _endpoints(("node-a", a.url), ("node-b", b.url)),
+            sample_interval_seconds=0.05,
+            request_timeout_seconds=0.5,
+        )
+        session.initialize()
+        assert session.start_and_wait_for_readiness() is True
+        time.sleep(0.6)
+        session.stop_and_finalize()
+
+        rows, _ = read_samples(session.samples_path)
+        seqs_b = sorted({row.scrape_seq for row in rows if row.hostname == "node-b"})
+        seqs_a = sorted({row.scrape_seq for row in rows if row.hostname == "node-a"})
+        manifest = _manifest(session)
+        # node-b covers well over half of node-a's slots: an immediate-skip
+        # rule would cap it at ~50 %, the physical ceiling is 1/1.2 = 83 %.
+        assert len(seqs_b) >= 0.7 * len(seqs_a), (seqs_a, seqs_b)
+        # Every forfeited slot is still accounted for, and only whole slots are forfeited.
+        missed = {
+            s
+            for item in manifest["missed_sample_ranges"]
+            for s in range(item["first_scrape_seq"], item["last_scrape_seq"] + 1)
+        }
+        assert missed.isdisjoint(seqs_b)
+        assert missed | set(seqs_b) >= set(seqs_a) - {max(seqs_a)}, (sorted(missed), seqs_a, seqs_b)
+
+    def test_overrun_longer_than_one_interval_forfeits_only_elapsed_slots(self, tmp_path, exporters, monkeypatch):
+        """A 2*timeout hang forfeits exactly the slots that fully elapsed, resuming at the next one.
+
+        This keeps the resulting row gap at ``interval + 2*timeout`` -- the
+        validator's ``normal_gap_budget`` -- instead of one interval beyond it.
+        """
+        a = exporters(_body("a"))
+        session = _session(
+            tmp_path,
+            _endpoints(("node-a", a.url)),
+            processes=_processes()[:1],
+            sample_interval_seconds=0.1,
+            request_timeout_seconds=0.5,
+        )
+        session.initialize()
+        real_poll = session._poll
+
+        def poll(endpoint, scrape_seq):
+            if scrape_seq == 1:
+                time.sleep(0.45)  # overruns slot 1 by 0.35 s = 3.5 intervals
+            return real_poll(endpoint, scrape_seq)
+
+        monkeypatch.setattr(session, "_poll", poll)
+        assert session.start_and_wait_for_readiness() is True
+        time.sleep(1.0)
+        session.stop_and_finalize()
+
+        manifest = _manifest(session)
+        overruns = [
+            i for i in manifest["missed_sample_ranges"] if i["reason_codes"] == [Reason.SAMPLE_SCHEDULE_OVERRUN]
+        ]
+        assert len(overruns) == 1, manifest["missed_sample_ranges"]
+        # slot 1 started at 0.1 and settled at ~0.55: slots 2, 3, 4 (0.2-0.5) elapsed in full; slot 5 (0.5-0.6) still fires.
+        assert (overruns[0]["first_scrape_seq"], overruns[0]["last_scrape_seq"]) == (2, 4), overruns
+        rows, _ = read_samples(session.samples_path)
+        assert 5 in {row.scrape_seq for row in rows}
+
 
 class TestReadiness:
     def test_readiness_uses_the_persisted_cycle_signal_without_rescanning_csv(self, tmp_path, exporters):

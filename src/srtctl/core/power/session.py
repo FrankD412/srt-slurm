@@ -464,7 +464,14 @@ class PowerTelemetrySession:
         started_monotonic: float,
         started_unix: float,
     ) -> None:
-        """Poll one endpoint on its own fixed schedule without overlapping requests."""
+        """Poll one endpoint on its own slot grid without overlapping requests.
+
+        Slot ``N`` is scheduled at ``start + N * interval``. A late slot still
+        fires as long as slot ``N + 1`` is not yet due, so a request that runs
+        slightly longer than the interval costs cadence, not a sample. Only
+        slots whose entire span has elapsed while the previous request was in
+        flight are forfeited and recorded as ``sample_schedule_overrun``.
+        """
         interval = self._settings.sample_interval_seconds
         scrape_seq = initial_scrape_seq
         next_cycle = started_monotonic
@@ -483,8 +490,8 @@ class PowerTelemetrySession:
                 next_cycle += interval
 
                 now = time.monotonic()
-                if not self._stop.is_set() and next_cycle <= now:
-                    missed_count = int((now - next_cycle) / interval) + 1
+                if not self._stop.is_set() and next_cycle + interval <= now:
+                    missed_count = int((now - next_cycle) / interval)
                     last_scrape_seq = scrape_seq + missed_count - 1
                     self._record_missed_sample_range(
                         hostname=endpoint.hostname,
