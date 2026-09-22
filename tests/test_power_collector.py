@@ -21,6 +21,7 @@ from srtctl.core.power.contract import MANIFEST_FILENAME, SAMPLES_FILENAME, WIND
 from srtctl.core.power.manifest import ExpectedWindow
 from srtctl.core.power.samples import read_samples
 from srtctl.core.power.session import PowerEndpoint, PowerSessionSettings, PowerTelemetrySession, _run_daemon_workers
+from srtctl.core.power.slot_alignment import render_slot_alignment
 from srtctl.core.power.topology import build_expected_devices
 from srtctl.core.power.validate_artifacts import validate_power_artifacts
 from srtctl.core.processes import ManagedProcess, ProcessRegistry
@@ -523,6 +524,39 @@ class TestCollection:
         assert (overruns[0]["first_scrape_seq"], overruns[0]["last_scrape_seq"]) == (2, 4), overruns
         rows, _ = read_samples(session.samples_path)
         assert 5 in {row.scrape_seq for row in rows}
+
+    def test_slot_alignment_table_reads_a_slow_endpoint_session(self, tmp_path, exporters):
+        """The offline validator rebuilds the slot grid from the manifest and classifies every host's slots.
+
+        Every forfeited slot on the slow host must be accounted for (no
+        ``unaccounted`` cells) and the late-fire spill shows up as ``late``
+        rather than as a missing sample.
+        """
+        a = exporters(_body("a"))
+        b = exporters(_body("b"), delay=0.06)  # 1.2x the 0.05 s interval
+        session = _session(
+            tmp_path,
+            _endpoints(("node-a", a.url), ("node-b", b.url)),
+            sample_interval_seconds=0.05,
+            request_timeout_seconds=0.5,
+        )
+        session.initialize()
+        assert session.start_and_wait_for_readiness() is True
+        time.sleep(0.6)
+        session.stop_and_finalize()
+
+        report = validate_power_artifacts(power_dir=session.power_dir, result_root=session.power_dir.parent)
+        alignment = report.slot_alignment
+        assert alignment is not None
+        assert alignment.hosts == ("node-a", "node-b")
+        by_host = {host.hostname: host for host in alignment.per_host}
+        assert by_host["node-a"].late == 0
+        assert by_host["node-b"].late >= 1
+        assert by_host["node-b"].missed.get("overrun", 0) >= 1
+        assert by_host["node-b"].unaccounted <= 1  # only the final bracket slot may be off-grid (PR shape)
+        assert report.summary["late_slots"] == by_host["node-b"].late
+        text = render_slot_alignment(alignment)
+        assert "missed:overrun" in text and "late +" in text
 
 
 class TestReadiness:

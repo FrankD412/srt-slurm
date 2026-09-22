@@ -60,7 +60,15 @@ endpoint never starts a second request while its previous request is in
 flight. A slot that comes due while the previous request is still running is
 polled late rather than skipped; only slots whose entire span has elapsed are
 forfeited. Slots missed because of a failed request or such an overrun are
-recorded in compact `missed_sample_ranges` manifest entries.
+recorded in compact `missed_sample_ranges` manifest entries. The manifest also
+records `slot_grid_started_at_unix`, the wall-clock time of slot 0, so an offline
+reader can rebuild every slot's scheduled time as `anchor + scrape_seq × interval`.
+`srtctl-validate-power --slot-table folded|full` prints that grid: one column per
+host, each slot classified `ok` (row inside its slot), `late` (row spilled past
+the slot end), `missed:<cause>` (accounted for by a missed range) or
+`unaccounted` (no row and no range — the collector lost track of the slot).
+Manifests from older producers lack the anchor; the table then calibrates it
+from the median row residual and says so.
 
 Coverage validation derives its normal gap budget from the recorded sample
 interval plus twice the request timeout (the connect and read timeout phases).
