@@ -10,6 +10,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from srtctl.core.power.slot_alignment import render_slot_alignment
 from srtctl.core.power.topology import WORKER_ROLES
 from srtctl.core.power.validate_artifacts import validate_power_artifacts
 
@@ -49,6 +50,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="require each worker role to occupy its own heterogeneous Slurm group",
     )
+    parser.add_argument(
+        "--slot-table",
+        choices=("off", "folded", "full"),
+        default="off",
+        help=(
+            "print per-slot, per-host sample alignment on the collector's slot grid; "
+            "'folded' collapses runs of all-ok slots, 'full' lists every slot"
+        ),
+    )
     args = parser.parse_args(argv)
 
     expected_roles: dict[str, int] | None = None
@@ -66,6 +76,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         require_distinct_het_groups=args.require_distinct_het_groups,
     )
     print(report.render())
+    if args.slot_table != "off":
+        if report.slot_alignment is None:
+            print("slot table: unavailable (manifest lacks started_at_unix / sample_interval_seconds, or no samples)")
+        else:
+            print()
+            print(render_slot_alignment(report.slot_alignment, full=args.slot_table == "full"))
     return 0 if report.ok else 1
 
 

@@ -262,6 +262,10 @@ class PowerTelemetrySession:
         started_unix = time.time()
         with self._state_lock:
             self._collector_grid = (initial_scrape_seq, started_monotonic, started_unix)
+        # Slot 0 of the shared grid, so offline readers can rebuild every slot's scheduled time.
+        self._manifest.slot_grid_started_at_unix = (
+            started_unix - initial_scrape_seq * self._settings.sample_interval_seconds
+        )
         self._threads = [
             threading.Thread(
                 target=self._run_endpoint,

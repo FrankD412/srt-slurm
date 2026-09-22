@@ -62,6 +62,15 @@ fully elapsed slots are marked missed. Shutdown chooses one shared final slot
 for every endpoint, so an endpoint that was in flight cannot leave schedule
 holes or close on an earlier slot than its peers.
 
+The manifest also records `slot_grid_started_at_unix`, the wall-clock time of
+slot 0, so an offline reader can rebuild every slot's scheduled time as
+`anchor + scrape_seq × interval`. `srtctl-validate-power --slot-table folded|full`
+prints that grid: one column per host, each slot classified `ok` (row inside its
+slot), `late` (row spilled past the slot end), `missed:<cause>` (accounted for by
+a missed range) or `unaccounted` (no row and no range — the collector lost track
+of the slot). Manifests from older producers lack the anchor; the table then
+calibrates it from the median row residual and says so.
+
 Coverage validation derives its normal gap budget from the recorded sample
 interval plus twice the request timeout (the connect and read timeout phases).
 For long measurement windows it tolerates a bounded overrun up to 10 seconds
