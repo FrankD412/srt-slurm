@@ -1553,8 +1553,11 @@ function initPareto(root) {
   const baseSel = card.querySelector("select[data-baseline]");
   const normalize = !!baseSel;
   const runLegend = card.querySelector(".run-legend");
-  const W = 900, H = 520, padL = 64, padR = 20, padT = 14, padB = 44;
-  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const W = 900, H = 520, padR = 20, padT = 14, padB = 44;
+  // Left padding is set per redraw from the widest y tick label so the rotated
+  // axis title never sits under the numbers (e.g. 9-digit TPS/MW ticks).
+  let padL = 64, plotW = W - padL - padR;
+  const plotH = H - padT - padB;
 
   // Legend, frontier lines and hide/show all work on the point's group (GPU type x model).
   const runs = [...new Set(points.map(p => p.group))];
@@ -1700,15 +1703,20 @@ function initPareto(root) {
     if (normalize) { yMin = Math.min(yMin, 1); yMax = Math.max(yMax, 1); yMin -= (yMax - yMin) * 0.1 || 0.1; }
     else yMin = Math.min(0, yMin);
     xMax += (xMax - xMin) * 0.06 || 1; yMax += (yMax - yMin) * 0.08 || 1;
+    // Tick labels: SI suffix once values reach the thousands (unless normalized, where
+    // the ratios stay small), matching the time-series axes.
+    const yTicks = niceTicks(yMin, yMax, 6).map(([v, d]) => [v, normalize ? fmtNum(v, Math.max(d, 2)) : (Math.abs(yMax) >= 1e4 ? fmtAxis(v) : fmtNum(v, d))]);
+    const tickW = Math.max(0, ...yTicks.map(([, s]) => s.length)) * 6.6;   // ~11px axis-text; measured without a layout pass
+    padL = Math.round(Math.max(64, 30 + tickW + 8));   // 30 = rotated title + gap
+    plotW = W - padL - padR;
     xScale = v => padL + ((v - xMin) / (xMax - xMin)) * plotW;
     yScale = v => padT + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
 
-    niceTicks(yMin, yMax, 6).forEach(([v, d]) => {
-      if (normalize) d = Math.max(d, 2);
+    yTicks.forEach(([v, s]) => {
       const gy = yScale(v);
       gGrid.appendChild(svgEl("line", { class: "gridline", x1: padL, x2: W - padR, y1: gy, y2: gy }));
       const t = svgEl("text", { class: "axis-text", x: padL - 8, y: gy + 3, "text-anchor": "end" });
-      t.textContent = fmtNum(v, d);
+      t.textContent = s;
       gAxes.appendChild(t);
     });
     niceTicks(xMin, xMax, 6).forEach(([v, d]) => {
