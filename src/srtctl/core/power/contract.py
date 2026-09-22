@@ -108,7 +108,10 @@ CPU_SAMPLES_HEADER = (
 # Keep the configured cadence at or below three seconds. Coverage validation
 # derives its normal gap budget from the recorded cadence and request timeout;
 # this constant is only the configuration ceiling.
-MAX_SAMPLE_GAP_SECONDS = 3.0
+MAX_CONFIGURED_SAMPLE_INTERVAL_SECONDS = 3.0
+# The legacy energy-report path separately limits how far a boundary may be
+# from its nearest sample. Keep that policy distinct from collector cadence.
+MAX_POWER_REPORT_BOUNDARY_GAP_SECONDS = 3.0
 # A single gap may grow with the window, but never exceed 10 seconds or 0.5%
 # of the formal measurement duration. All gaps over the normal budget may
 # cover at most 5% of that duration for any device.

@@ -18,7 +18,6 @@ from srtctl.core.power.contract import (
     BENCHMARK_TYPE_SA_BENCH,
     CLOCK_SOURCE,
     CONTAINER_LOG_DIR,
-    MAX_SAMPLE_GAP_SECONDS,
     MEASUREMENT_WINDOW_DIR_ENV,
     SCHEMA_VERSION,
     WINDOWS_DIRNAME,
@@ -358,14 +357,14 @@ class TestCoverageValidation:
     def test_gap_exactly_at_the_threshold_passes(self, logs):
         start, end = self._completed(logs)
 
-        rows = _validate(logs, _samples(start, end, step=MAX_SAMPLE_GAP_SECONDS))
+        rows = _validate(logs, _samples(start, end, step=3.0))
 
         assert rows[0].power_coverage_valid is True
 
     def test_gap_above_the_threshold_fails(self, logs):
         start, end = self._completed(logs)
 
-        rows = _validate(logs, _samples(start, end, step=MAX_SAMPLE_GAP_SECONDS + 0.5))
+        rows = _validate(logs, _samples(start, end, step=3.5))
 
         assert rows[0].power_coverage_valid is False
         assert Reason.SAMPLE_GAP_EXCEEDED in rows[0].reason_codes

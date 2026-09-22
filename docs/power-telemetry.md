@@ -57,8 +57,10 @@ inconsistent values with actionable messages; in particular
 `collect_interval_ms` must not exceed three seconds. Each endpoint runs on an
 independent fixed schedule, so a slow node cannot delay healthy nodes and an
 endpoint never starts a second request while its previous request is in
-flight. Slots missed because of a failed request or schedule overrun are
-recorded in compact `missed_sample_ranges` manifest entries.
+flight. A due slot still fires late while it remains inside its interval; only
+fully elapsed slots are marked missed. Shutdown chooses one shared final slot
+for every endpoint, so an endpoint that was in flight cannot leave schedule
+holes or close on an earlier slot than its peers.
 
 Coverage validation derives its normal gap budget from the recorded sample
 interval plus twice the request timeout (the connect and read timeout phases).
@@ -93,6 +95,12 @@ topology mapping, the expected window list, the SHA-256 of the finalized
 `samples.csv` bytes, terminal status, per-window coverage validation, and
 reason codes. It also records `missed_sample_count` and compact ranges with the
 endpoint, exact scrape sequence range, scheduled timestamps, and cause.
+`scrape_count` is the elapsed slot high-water mark (the greatest scheduled
+`scrape_seq` plus one), so it includes both sampled and missed slots rather
+than counting HTTP requests. To bound manifest size during alternating
+success/failure patterns, at most 64 missed ranges are retained;
+`missed_sample_count` remains exact and `missed_sample_ranges_truncated=true`
+states when later range details were omitted.
 `status` is the lifecycle outcome;
 `publication_valid` is the separate publication gate. Reason codes are stable
 machine-readable strings enumerated in `srtctl/core/power/contract.py`.

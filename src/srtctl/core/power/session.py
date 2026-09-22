@@ -55,6 +55,8 @@ from srtctl.core.slurm import get_hostname_ip
 
 logger = logging.getLogger(__name__)
 
+_MAX_RECORDED_MISSED_SAMPLE_RANGES = 64
+
 
 @dataclass(frozen=True)
 class PowerEndpoint:
@@ -134,11 +136,15 @@ class PowerTelemetrySession:
         self._threads: list[threading.Thread] = []
         self._writer: SampleWriter | None = None
         self._exporters: list[ManagedProcess] = []
+        self._collector_grid: tuple[int, float, float] | None = None
+        self._shutdown_bracket: tuple[int, float] | None = None
 
         self._scrape_seq = 0
         self._scrape_count = 0
         self._max_scrape_duration: float | None = None
+        self._missed_sample_count = 0
         self._missed_sample_ranges: list[MissedSampleRange] = []
+        self._missed_sample_ranges_truncated = False
         self._missed_range_indices: dict[tuple[str, tuple[str, ...]], int] = {}
         self._readiness_keys_by_scrape_seq: dict[int, set[tuple[str, int]]] = {}
         self._readiness_tracking = True
@@ -254,6 +260,8 @@ class PowerTelemetrySession:
             initial_scrape_seq = self._scrape_seq
         started_monotonic = time.monotonic()
         started_unix = time.time()
+        with self._state_lock:
+            self._collector_grid = (initial_scrape_seq, started_monotonic, started_unix)
         self._threads = [
             threading.Thread(
                 target=self._run_endpoint,
@@ -289,7 +297,9 @@ class PowerTelemetrySession:
         return False
 
     def collect_once(self) -> int:
-        """Run one logical cycle: poll every endpoint concurrently, append rows."""
+        """Run one manual cycle before the background collector has started."""
+        if self._threads:
+            raise RuntimeError("collect_once() cannot run after the background collector has started")
         with self._writer_lock:
             if self._mutation_disabled:
                 return 0
@@ -394,6 +404,7 @@ class PowerTelemetrySession:
         key = (hostname, reasons)
         with self._state_lock:
             self._scrape_count = max(self._scrape_count, last_scrape_seq + 1)
+            self._missed_sample_count += last_scrape_seq - first_scrape_seq + 1
             self._reasons.extend(reasons)
             previous_index = self._missed_range_indices.get(key)
             if previous_index is not None:
@@ -408,6 +419,9 @@ class PowerTelemetrySession:
                         reason_codes=reasons,
                     )
                     return
+            if len(self._missed_sample_ranges) >= _MAX_RECORDED_MISSED_SAMPLE_RANGES:
+                self._missed_sample_ranges_truncated = True
+                return
             self._missed_range_indices[key] = len(self._missed_sample_ranges)
             self._missed_sample_ranges.append(
                 MissedSampleRange(
@@ -483,8 +497,11 @@ class PowerTelemetrySession:
                 next_cycle += interval
 
                 now = time.monotonic()
-                if not self._stop.is_set() and next_cycle <= now:
-                    missed_count = int((now - next_cycle) / interval) + 1
+                # Fire the next due slot late while it is still inside its
+                # interval. Only slots whose entire interval elapsed while the
+                # previous request was in flight are irrecoverably missed.
+                if not self._stop.is_set() and next_cycle + interval <= now:
+                    missed_count = int((now - next_cycle) / interval)
                     last_scrape_seq = scrape_seq + missed_count - 1
                     self._record_missed_sample_range(
                         hostname=endpoint.hostname,
@@ -499,12 +516,36 @@ class PowerTelemetrySession:
                     scrape_seq += missed_count
                     next_cycle += missed_count * interval
 
-            # Bracket a measurement window that ended just before shutdown.
-            result = self._poll(endpoint, scrape_seq)
+            # Every endpoint closes on the same grid slot. An endpoint that was
+            # still in flight when shutdown began accounts for the intervening
+            # slots before taking that common bracketing sample.
+            with self._state_lock:
+                shutdown_bracket = self._shutdown_bracket
+            if shutdown_bracket is None:
+                bracket_scrape_seq = scrape_seq
+                bracket_scheduled_at_unix = time.time()
+            else:
+                bracket_scrape_seq, bracket_scheduled_at_unix = shutdown_bracket
+                if scrape_seq < bracket_scrape_seq:
+                    self._record_missed_sample_range(
+                        hostname=endpoint.hostname,
+                        first_scrape_seq=scrape_seq,
+                        last_scrape_seq=bracket_scrape_seq - 1,
+                        first_scheduled_at_unix=(started_unix + (scrape_seq - initial_scrape_seq) * interval),
+                        last_scheduled_at_unix=(
+                            started_unix + (bracket_scrape_seq - 1 - initial_scrape_seq) * interval
+                        ),
+                        reason_codes=(Reason.SAMPLE_SCHEDULE_OVERRUN,),
+                    )
+                elif scrape_seq > bracket_scrape_seq:
+                    # This endpoint already persisted the common bracket slot.
+                    return
+
+            result = self._poll(endpoint, bracket_scrape_seq)
             self._persist_endpoint_result(
                 result,
-                scrape_seq=scrape_seq,
-                scheduled_at_unix=time.time(),
+                scrape_seq=bracket_scrape_seq,
+                scheduled_at_unix=bracket_scheduled_at_unix,
             )
         except Exception:
             logger.exception("Power collector stopped for endpoint %s", endpoint.hostname)
@@ -546,8 +587,20 @@ class PowerTelemetrySession:
         if self._outcome is not None:
             return self._outcome
 
-        deadline = time.monotonic() + self._settings.collector_join_timeout_seconds
+        stopped_monotonic = time.monotonic()
+        deadline = stopped_monotonic + self._settings.collector_join_timeout_seconds
         self._check_exporters()
+        with self._state_lock:
+            if self._collector_grid is not None and self._shutdown_bracket is None:
+                initial_scrape_seq, started_monotonic, started_unix = self._collector_grid
+                elapsed_slots = int(
+                    max(0.0, stopped_monotonic - started_monotonic) / self._settings.sample_interval_seconds
+                )
+                bracket_scrape_seq = initial_scrape_seq + elapsed_slots + 1
+                bracket_scheduled_at_unix = (
+                    started_unix + (bracket_scrape_seq - initial_scrape_seq) * self._settings.sample_interval_seconds
+                )
+                self._shutdown_bracket = (bracket_scrape_seq, bracket_scheduled_at_unix)
         self._stop.set()
 
         for thread in self._threads:
@@ -584,7 +637,9 @@ class PowerTelemetrySession:
             reasons = list(self._reasons)
             self._manifest.scrape_count = self._scrape_count
             self._manifest.max_scrape_duration_seconds = self._max_scrape_duration
+            self._manifest.missed_sample_count = self._missed_sample_count
             self._manifest.missed_sample_ranges = list(self._missed_sample_ranges)
+            self._manifest.missed_sample_ranges_truncated = self._missed_sample_ranges_truncated
         self._manifest.reason_codes = list(dedupe(reasons))
         self._manifest.mark_terminal(
             status=STATUS_INCOMPLETE,
@@ -615,7 +670,9 @@ class PowerTelemetrySession:
             reasons = [*self._reasons, *sample_reasons, *devices.reason_codes]
             self._manifest.scrape_count = self._scrape_count
             self._manifest.max_scrape_duration_seconds = self._max_scrape_duration
+            self._manifest.missed_sample_count = self._missed_sample_count
             self._manifest.missed_sample_ranges = list(self._missed_sample_ranges)
+            self._manifest.missed_sample_ranges_truncated = self._missed_sample_ranges_truncated
 
         if allow_window_mutation:
             convert_running_windows(self.windows_dir, reason="benchmark did not reach a formal end boundary")

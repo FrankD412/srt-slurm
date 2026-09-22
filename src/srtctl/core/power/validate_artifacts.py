@@ -27,7 +27,7 @@ from srtctl.core.power.contract import (
     CLOCK_SOURCE,
     FATAL_LIFECYCLE_REASONS,
     MANIFEST_FILENAME,
-    MAX_SAMPLE_GAP_SECONDS,
+    MAX_CONFIGURED_SAMPLE_INTERVAL_SECONDS,
     POWER_METRIC,
     POWER_SCOPE,
     POWER_UNIT,
@@ -269,10 +269,17 @@ def _check_missed_sample_ranges(manifest: dict[str, Any]) -> list[str]:
     failures: list[str] = []
     has_count = "missed_sample_count" in manifest
     has_ranges = "missed_sample_ranges" in manifest
+    has_truncated = "missed_sample_ranges_truncated" in manifest
     if not has_count and not has_ranges:
+        if has_truncated:
+            return ["missed sample evidence is only partially present"]
         return []
     if has_count != has_ranges:
         return ["missed sample evidence is only partially present"]
+
+    truncated = manifest.get("missed_sample_ranges_truncated", False)
+    if not isinstance(truncated, bool):
+        failures.append("missed_sample_ranges_truncated is not a boolean")
 
     stored_count = manifest.get("missed_sample_count")
     if not isinstance(stored_count, int) or isinstance(stored_count, bool) or stored_count < 0:
@@ -338,8 +345,15 @@ def _check_missed_sample_ranges(manifest: dict[str, Any]) -> list[str]:
         if any(current[0] <= previous[1] for previous, current in itertools.pairwise(ordered)):
             failures.append(f"missed_sample_ranges overlap for hostname {hostname!r}")
 
-    if isinstance(stored_count, int) and not isinstance(stored_count, bool) and stored_count != total:
-        failures.append(f"missed_sample_count is {stored_count}, ranges contain {total}")
+    if isinstance(stored_count, int) and not isinstance(stored_count, bool):
+        if truncated is True:
+            if stored_count <= total:
+                failures.append(
+                    "missed_sample_ranges_truncated is true but missed_sample_count "
+                    f"{stored_count} does not exceed the {total} represented slots"
+                )
+        elif stored_count != total:
+            failures.append(f"missed_sample_count is {stored_count}, ranges contain {total}")
     top_level_reasons = manifest.get("reason_codes")
     if isinstance(top_level_reasons, list) and all(isinstance(reason, str) for reason in top_level_reasons):
         missing_reasons = sorted(range_reasons - set(top_level_reasons))
@@ -396,8 +410,10 @@ def _check_wire_contract(manifest: dict[str, Any]) -> list[str]:
         if not (is_finite_number(value) and value > 0):
             failures.append(f"{key} is not finite and positive")
     sample_interval = manifest.get("sample_interval_seconds")
-    if is_finite_number(sample_interval) and sample_interval > MAX_SAMPLE_GAP_SECONDS:
-        failures.append(f"sample_interval_seconds exceeds the {MAX_SAMPLE_GAP_SECONDS}s coverage limit")
+    if is_finite_number(sample_interval) and sample_interval > MAX_CONFIGURED_SAMPLE_INTERVAL_SECONDS:
+        failures.append(
+            f"sample_interval_seconds exceeds the {MAX_CONFIGURED_SAMPLE_INTERVAL_SECONDS}s configured cadence limit"
+        )
 
     max_scrape_duration = manifest.get("max_scrape_duration_seconds")
     if max_scrape_duration is not None and not (is_finite_number(max_scrape_duration) and max_scrape_duration >= 0):

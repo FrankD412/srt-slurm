@@ -753,6 +753,7 @@ class TestManifest:
         assert payload["sample_row_count"] == 0
         assert payload["missed_sample_count"] == 0
         assert payload["missed_sample_ranges"] == []
+        assert payload["missed_sample_ranges_truncated"] is False
         assert payload["expected_windows"] == [{"benchmark_type": "sa-bench", "concurrency": 4}]
         assert payload["expected_devices"] == [
             {
