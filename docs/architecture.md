@@ -289,6 +289,16 @@ class BackendProtocol(Protocol):
     @property
     def type(self) -> str: ...
 
+    # Optional features every backend answers; None / {} when the engine has none.
+    @property
+    def mooncake_kv_store(self) -> MooncakeKVStoreConfig | VLLMMooncakeKVStoreConfig | None: ...
+    @property
+    def failover(self) -> VLLMFailoverConfig | None: ...
+    def get_mooncake_worker_env(self, infra_node_ip, local_hostname) -> dict[str, str]: ...
+    def get_failover_environment(self, process, job_id) -> dict[str, str]: ...
+    def should_set_cuda_visible_devices(self, process) -> bool: ...
+
+    def get_srun_config(self) -> SrunConfig: ...  # launch_per_endpoint, sequential_node_start, mpi
     def get_config_for_mode(self, mode: str) -> dict[str, Any]: ...
     def get_environment_for_mode(self, mode: str) -> dict[str, str]: ...
 
@@ -299,7 +309,10 @@ class BackendProtocol(Protocol):
         self, process, endpoint_processes, runtime,
         frontend_type, nsys_prefix, dump_config_path
     ) -> list[str]: ...
+    def get_process_environment(self, process) -> dict[str, str]: ...
 ```
+
+Consumers (stage mixins, schema validators, services, dry-run) call these members directly. There is no `getattr(backend, "x", default)` or `hasattr(backend, "f")` in `src/`: a backend that lacks a feature says so through the protocol, and logic that belongs to one engine narrows with `isinstance(backend, VLLMProtocol)` before reading typed fields.
 
 #### Authoring surface: `engine:` and `roles:`
 
@@ -690,19 +703,30 @@ wait_for_model(host, port, n_prefill, n_decode, frontend_type)
 
 ### Port Allocation Strategy
 
+Fixed ports are constants in `srtctl/ports.py`. Every port a worker process binds is
+a `PortKind` in the same module and is handed out by `NodePortAllocator.next(kind,
+node, size)` once, in `endpoints_to_processes`; the value rides on `Process` and no
+consumer derives one port from another.
+
 ```
-+------------------+------------+----------------------------------+
-| Port Type        | Range      | Description                      |
-+------------------+------------+----------------------------------+
-| HTTP ports       | 30000+     | Per-node, incremental            |
-| Bootstrap ports  | 31000+     | Per-node, prefill only           |
-| KV events ports  | 5550+      | Global, incremental              |
-| System ports     | 8081+      | Per-process, incremental         |
-| Frontend public  | 8000       | Public-facing (nginx or direct)  |
-| Frontend internal| 8080       | Behind nginx                     |
-| NATS             | 4222       | Message broker                   |
-| etcd             | 2379       | Key-value store                  |
-+------------------+------------+----------------------------------+
++-----------------------+--------+--------+----------+----------------------------------------+
+| PortKind              | Base   | Stride | Counter  | Bound by                               |
++-----------------------+--------+--------+----------+----------------------------------------+
+| sys                   | 7500   | 1      | global   | every process (DYN_SYSTEM_PORT)         |
+| http                  | 6100   | 32     | per node | endpoint leaders (a router connects)    |
+| bootstrap             | 7200   | 1      | per node | prefill endpoints                       |
+| kv_events             | 5200   | 1      | global   | every process (block per local DP size) |
+| nixl                  | 5400   | 1      | global   | every process (block per DP size)       |
+| dp_rpc                | 8400   | 1      | per node | vLLM DP endpoints                       |
+| kvbm_zmq              | 5600   | 2      | global   | KVBM leaders (pub, ack = pub + 1)       |
+| sidecar_grpc          | 50051  | 1      | global   | Dynamo sidecars (base: sidecar_port)    |
+| nccl                  | 17500  | 1      | global   | SGLang servers                          |
+| dist_init             | 8300   | 1      | per node | SGLang multi-node endpoints (leader)    |
+| vllm_scan             | 20000  | 50     | global   | vLLM get_open_port() scan range         |
+| trtllm_dist_init      | 29500  | 1      | global   | TRT-LLM endpoints (leader's MASTER_PORT)|
++-----------------------+--------+--------+----------+----------------------------------------+
+| Frontend public 8000, internal 8180 (behind nginx); etcd 2379, NATS 4222: fixed constants |
++-----------------------------------------------------------------------------------------+
 ```
 
 ### Process Relationships

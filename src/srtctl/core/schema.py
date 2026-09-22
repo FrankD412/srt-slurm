@@ -39,6 +39,7 @@ from srtctl.backends import (
     MockerProtocol,
     SGLangProtocol,
     TRTLLMProtocol,
+    VLLMMooncakeKVStoreConfig,
     VLLMProtocol,
 )
 from srtctl.core.formatting import (
@@ -49,6 +50,7 @@ from srtctl.core.formatting import (
 # Leaf module (stdlib-only imports), so this cannot cycle back into schema.
 from srtctl.core.power.contract import CONTAINER_LOG_DIR
 from srtctl.core.source import DynamoSourceConfig, is_commit_sha
+from srtctl.ports import DYNAMO_SIDECAR_GRPC_PORT
 from srtctl.services.config import ServiceConfig
 
 logger = logging.getLogger(__name__)
@@ -1928,7 +1930,7 @@ class DynamoConfig:
     request_plane: str = "tcp"
     event_plane: str | None = None
     sidecar: bool = False
-    sidecar_port: int = 50051
+    sidecar_port: int = DYNAMO_SIDECAR_GRPC_PORT
     sidecar_binary: str | None = None
     sidecar_startup_timeout: int = 3600
     sidecar_context_length: int | None = None
@@ -2442,7 +2444,7 @@ class SrtConfig:
         layouts are refused because their per-rank processes would each need a
         GMS session and a lock of their own, which is not modeled.
         """
-        failover = getattr(self.backend, "failover", None)
+        failover = self.backend.failover
         if failover is None:
             return
         assert isinstance(self.backend, VLLMProtocol)
@@ -2656,10 +2658,10 @@ class SrtConfig:
         ``MooncakeConnector``), the master we launch is unused and workers fall
         back to the default transport — almost never what the user intends.
         """
-        mooncake_cfg = getattr(self.backend, "mooncake_kv_store", None)
+        mooncake_cfg = self.backend.mooncake_kv_store
         if mooncake_cfg is None:
             return
-        if isinstance(self.backend, VLLMProtocol):
+        if isinstance(mooncake_cfg, VLLMMooncakeKVStoreConfig):
             try:
                 mooncake_cfg.validate_device_mapping(self.resources.gpus_per_node)
             except ValueError as exc:
@@ -2667,9 +2669,8 @@ class SrtConfig:
         if not self.resources.is_disaggregated:
             return
 
-        backend_type = self.backend.type
-        if backend_type == "sglang":
-            sglang_cfg = getattr(self.backend, "sglang_config", None)
+        if isinstance(self.backend, SGLangProtocol):
+            sglang_cfg = self.backend.sglang_config
 
             def _sglang_has_mooncake(mode_cfg: dict | None) -> bool:
                 if not mode_cfg:
@@ -2691,8 +2692,8 @@ class SrtConfig:
                     "Add it to both roles (and 'disaggregation-ib-device') so workers "
                     "actually use the mooncake master srtslurm launches for you."
                 )
-        elif backend_type == "vllm":
-            vllm_cfg = getattr(self.backend, "vllm_config", None)
+        elif isinstance(self.backend, VLLMProtocol):
+            vllm_cfg = self.backend.vllm_config
 
             def _vllm_has_mooncake(mode_cfg: dict | None) -> bool:
                 if not mode_cfg:
@@ -2878,9 +2879,9 @@ class SrtConfig:
         be overwritten or conflict with a different step window. Fail fast at
         recipe-read time instead.
         """
-        vllm_cfg = getattr(self.backend, "vllm_config", None)
-        if not vllm_cfg:
+        if not isinstance(self.backend, VLLMProtocol) or self.backend.vllm_config is None:
             return
+        vllm_cfg = self.backend.vllm_config
         for mode_name, cfg in (
             ("prefill", vllm_cfg.prefill),
             ("decode", vllm_cfg.decode),
