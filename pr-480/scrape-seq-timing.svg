@@ -1,0 +1,277 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1848" height="2611" viewBox="0 0 1848 2611">
+<defs><marker id="tick" markerWidth="3" markerHeight="12" refX="1.5" refY="6" orient="auto"><line x1="1.5" y1="0" x2="1.5" y2="12" stroke="var(--foreground)" stroke-width="2"/></marker></defs>
+<style>svg{--foreground:#e6e6e6;--muted-foreground:#a0a4ab;--accent:#4c8dff;--border:#3a3f47}
+ text{fill:var(--foreground);font-size:23px;font-family:-apple-system,"SF Pro Text","Helvetica Neue",Helvetica,Arial,sans-serif}
+ .title{font-size:28px;font-weight:600}
+ .sub,.note,.tick{fill:var(--muted-foreground);font-size:21px}
+ .host{font-size:23px;font-weight:600}
+ .seq{font-size:17px;fill:var(--foreground)}
+ .grid{stroke:var(--border);stroke-width:2}
+ .req{fill:var(--accent);fill-opacity:.85;stroke:var(--foreground);stroke-opacity:.35}
+ .req-fail{fill:none;stroke:#e5484d;stroke-width:2.5;stroke-dasharray:8 5}
+ .row{stroke:var(--foreground);stroke-width:4}
+ .missed-overrun{fill:#e5a100;fill-opacity:.18;stroke:#e5a100;stroke-width:2;stroke-dasharray:5 5}
+ .missed-timeout{fill:#e5484d;fill-opacity:.15;stroke:#e5484d;stroke-width:2;stroke-dasharray:5 5}
+ .miss-lbl{font-size:17px;fill:var(--muted-foreground)}
+ .gap{stroke:var(--foreground);stroke-width:2}
+ .gap-lbl{font-size:20px}
+ .stop{stroke:#ff6b6b;stroke-width:3;stroke-dasharray:10 6}
+ .stop-lbl{font-size:19px;fill:#ff6b6b;font-weight:600}
+ .bracket{stroke:#7ee787;stroke-width:3;stroke-opacity:1}
+</style>
+<rect width="100%" height="100%" fill="#0f1115"/>
+<text x="250" y="42" class="title">B1 · PR #480 as written — node-b answers in 1.2 s (20 % over the interval)</text>
+<text x="250" y="74" class="sub">Skip rule: after a poll, if next_cycle ≤ now → forfeit int(overrun/interval)+1 slots. A slot fires only exactly</text>
+<text x="250" y="102" class="sub">at its grid time.</text>
+<line x1="250" y1="131" x2="250" y2="307" class="grid"/>
+<text x="250" y="374" class="tick" text-anchor="middle">0s</text>
+<line x1="480" y1="131" x2="480" y2="307" class="grid"/>
+<text x="480" y="374" class="tick" text-anchor="middle">1s</text>
+<line x1="710" y1="131" x2="710" y2="307" class="grid"/>
+<text x="710" y="374" class="tick" text-anchor="middle">2s</text>
+<line x1="940" y1="131" x2="940" y2="307" class="grid"/>
+<text x="940" y="374" class="tick" text-anchor="middle">3s</text>
+<line x1="1170" y1="131" x2="1170" y2="307" class="grid"/>
+<text x="1170" y="374" class="tick" text-anchor="middle">4s</text>
+<line x1="1400" y1="131" x2="1400" y2="307" class="grid"/>
+<text x="1400" y="374" class="tick" text-anchor="middle">5s</text>
+<line x1="1630" y1="131" x2="1630" y2="307" class="grid"/>
+<text x="1630" y="374" class="tick" text-anchor="middle">6s</text>
+<text x="1768" y="402" class="tick" text-anchor="end">head-node clock (interval = 1 s)</text>
+<text x="236" y="181.0" class="host" text-anchor="end">node-a</text>
+<rect x="250.0" y="163" width="46.0" height="40" rx="4" class="req"/>
+<text x="250.0" y="155" class="seq">seq 0</text>
+<line x1="273.0" y1="158" x2="273.0" y2="208" class="row"/>
+<rect x="480.0" y="163" width="46.0" height="40" rx="4" class="req"/>
+<text x="480.0" y="155" class="seq">seq 1</text>
+<line x1="503.0" y1="158" x2="503.0" y2="208" class="row"/>
+<rect x="710.0" y="163" width="46.0" height="40" rx="4" class="req"/>
+<text x="710.0" y="155" class="seq">seq 2</text>
+<line x1="733.0" y1="158" x2="733.0" y2="208" class="row"/>
+<rect x="940.0" y="163" width="46.0" height="40" rx="4" class="req"/>
+<text x="940.0" y="155" class="seq">seq 3</text>
+<line x1="963.0" y1="158" x2="963.0" y2="208" class="row"/>
+<rect x="1170.0" y="163" width="46.0" height="40" rx="4" class="req"/>
+<text x="1170.0" y="155" class="seq">seq 4</text>
+<line x1="1193.0" y1="158" x2="1193.0" y2="208" class="row"/>
+<rect x="1400.0" y="163" width="46.0" height="40" rx="4" class="req"/>
+<text x="1400.0" y="155" class="seq">seq 5</text>
+<line x1="1423.0" y1="158" x2="1423.0" y2="208" class="row"/>
+<rect x="1630.0" y="163" width="46.0" height="40" rx="4" class="req"/>
+<text x="1630.0" y="155" class="seq">seq 6</text>
+<line x1="1653.0" y1="158" x2="1653.0" y2="208" class="row"/>
+<text x="236" y="269.0" class="host" text-anchor="end">node-b</text>
+<rect x="481" y="247" width="228" height="48" class="missed-overrun"/>
+<text x="595.0" y="276.0" class="miss-lbl" text-anchor="middle">seq 1 · missed</text>
+<rect x="941" y="247" width="228" height="48" class="missed-overrun"/>
+<text x="1055.0" y="276.0" class="miss-lbl" text-anchor="middle">seq 3 · missed</text>
+<rect x="1401" y="247" width="228" height="48" class="missed-overrun"/>
+<text x="1515.0" y="276.0" class="miss-lbl" text-anchor="middle">seq 5 · missed</text>
+<rect x="250.0" y="251" width="276.0" height="40" rx="4" class="req"/>
+<text x="250.0" y="243" class="seq">seq 0</text>
+<line x1="388.0" y1="246" x2="388.0" y2="296" class="row"/>
+<rect x="710.0" y="251" width="276.0" height="40" rx="4" class="req"/>
+<text x="710.0" y="243" class="seq">seq 2</text>
+<line x1="848.0" y1="246" x2="848.0" y2="296" class="row"/>
+<rect x="1170.0" y="251" width="276.0" height="40" rx="4" class="req"/>
+<text x="1170.0" y="243" class="seq">seq 4</text>
+<line x1="1308.0" y1="246" x2="1308.0" y2="296" class="row"/>
+<rect x="1630.0" y="251" width="138.0" height="40" rx="4" class="req"/>
+<text x="1630.0" y="243" class="seq">seq 6</text>
+<line x1="388.0" y1="326" x2="848.0" y2="326" class="gap" marker-start="url(#tick)" marker-end="url(#tick)"/>
+<text x="618.0" y="351" class="gap-lbl" text-anchor="middle">largest node-b row gap = 2.0 s (row timestamps = request midpoints)</text>
+<text x="250" y="443" class="note">node-b keeps 3 of node-a&#x27;s 7 slots (50 %). Largest node-b row gap 2.0 s.</text>
+<text x="250" y="472" class="note">missed_sample_ranges: node-b seq 1 (sample_schedule_overrun), node-b seq 3 (sample_schedule_overrun), node-b seq</text>
+<text x="250" y="501" class="note">5 (sample_schedule_overrun), node-b seq 7 (sample_schedule_overrun).</text><text x="250" y="586" class="title">B2 · Prototype (late-fire) — same 1.2 s node-b</text>
+<text x="250" y="618" class="sub">Skip rule: forfeit only if next_cycle + interval ≤ now → int(overrun/interval) slots. Slot N may start any time</text>
+<text x="250" y="646" class="sub">before slot N+1 is due.</text>
+<line x1="250" y1="675" x2="250" y2="851" class="grid"/>
+<text x="250" y="918" class="tick" text-anchor="middle">0s</text>
+<line x1="480" y1="675" x2="480" y2="851" class="grid"/>
+<text x="480" y="918" class="tick" text-anchor="middle">1s</text>
+<line x1="710" y1="675" x2="710" y2="851" class="grid"/>
+<text x="710" y="918" class="tick" text-anchor="middle">2s</text>
+<line x1="940" y1="675" x2="940" y2="851" class="grid"/>
+<text x="940" y="918" class="tick" text-anchor="middle">3s</text>
+<line x1="1170" y1="675" x2="1170" y2="851" class="grid"/>
+<text x="1170" y="918" class="tick" text-anchor="middle">4s</text>
+<line x1="1400" y1="675" x2="1400" y2="851" class="grid"/>
+<text x="1400" y="918" class="tick" text-anchor="middle">5s</text>
+<line x1="1630" y1="675" x2="1630" y2="851" class="grid"/>
+<text x="1630" y="918" class="tick" text-anchor="middle">6s</text>
+<text x="1768" y="946" class="tick" text-anchor="end">head-node clock (interval = 1 s)</text>
+<text x="236" y="725.0" class="host" text-anchor="end">node-a</text>
+<rect x="250.0" y="707" width="46.0" height="40" rx="4" class="req"/>
+<text x="250.0" y="699" class="seq">seq 0</text>
+<line x1="273.0" y1="702" x2="273.0" y2="752" class="row"/>
+<rect x="480.0" y="707" width="46.0" height="40" rx="4" class="req"/>
+<text x="480.0" y="699" class="seq">seq 1</text>
+<line x1="503.0" y1="702" x2="503.0" y2="752" class="row"/>
+<rect x="710.0" y="707" width="46.0" height="40" rx="4" class="req"/>
+<text x="710.0" y="699" class="seq">seq 2</text>
+<line x1="733.0" y1="702" x2="733.0" y2="752" class="row"/>
+<rect x="940.0" y="707" width="46.0" height="40" rx="4" class="req"/>
+<text x="940.0" y="699" class="seq">seq 3</text>
+<line x1="963.0" y1="702" x2="963.0" y2="752" class="row"/>
+<rect x="1170.0" y="707" width="46.0" height="40" rx="4" class="req"/>
+<text x="1170.0" y="699" class="seq">seq 4</text>
+<line x1="1193.0" y1="702" x2="1193.0" y2="752" class="row"/>
+<rect x="1400.0" y="707" width="46.0" height="40" rx="4" class="req"/>
+<text x="1400.0" y="699" class="seq">seq 5</text>
+<line x1="1423.0" y1="702" x2="1423.0" y2="752" class="row"/>
+<rect x="1630.0" y="707" width="46.0" height="40" rx="4" class="req"/>
+<text x="1630.0" y="699" class="seq">seq 6</text>
+<line x1="1653.0" y1="702" x2="1653.0" y2="752" class="row"/>
+<text x="236" y="813.0" class="host" text-anchor="end">node-b</text>
+<rect x="1401" y="791" width="228" height="48" class="missed-overrun"/>
+<text x="1515.0" y="820.0" class="miss-lbl" text-anchor="middle">seq 5 · missed</text>
+<rect x="250.0" y="795" width="276.0" height="40" rx="4" class="req"/>
+<text x="250.0" y="787" class="seq">seq 0</text>
+<line x1="388.0" y1="790" x2="388.0" y2="840" class="row"/>
+<rect x="526.0" y="795" width="276.0" height="40" rx="4" class="req"/>
+<text x="526.0" y="787" class="seq">seq 1</text>
+<line x1="664.0" y1="790" x2="664.0" y2="840" class="row"/>
+<rect x="802.0" y="795" width="276.0" height="40" rx="4" class="req"/>
+<text x="802.0" y="787" class="seq">seq 2</text>
+<line x1="940.0" y1="790" x2="940.0" y2="840" class="row"/>
+<rect x="1078.0" y="795" width="276.0" height="40" rx="4" class="req"/>
+<text x="1078.0" y="787" class="seq">seq 3</text>
+<line x1="1216.0" y1="790" x2="1216.0" y2="840" class="row"/>
+<rect x="1354.0" y="795" width="276.0" height="40" rx="4" class="req"/>
+<text x="1354.0" y="787" class="seq">seq 4</text>
+<line x1="1492.0" y1="790" x2="1492.0" y2="840" class="row"/>
+<rect x="1630.0" y="795" width="138.0" height="40" rx="4" class="req"/>
+<text x="1630.0" y="787" class="seq">seq 6</text>
+<line x1="1216.0" y1="870" x2="1492.0" y2="870" class="gap" marker-start="url(#tick)" marker-end="url(#tick)"/>
+<text x="1354.0" y="895" class="gap-lbl" text-anchor="middle">largest node-b row gap = 1.2 s (row timestamps = request midpoints)</text>
+<text x="250" y="987" class="note">node-b keeps 5 of 7 slots (physical ceiling 1/1.2 = 83 %). Largest row gap 1.2 s = the request latency.</text>
+<text x="250" y="1016" class="note">seq is still the slot index (start + seq·interval); node-b&#x27;s row for seq N is simply taken later inside slot N —</text>
+<text x="250" y="1045" class="note">bounded by &lt; 1 interval, re-synced on every skip (sawtooth, no drift).</text>
+<text x="250" y="1074" class="note">missed_sample_ranges: node-b seq 5 (sample_schedule_overrun).</text><text x="250" y="1159" class="title">C1 · PR #480 as written — node-b&#x27;s seq 1 hangs 4 s (2 × timeout); stop fires at 4.5 s mid-flight</text>
+<text x="250" y="1191" class="sub">Stop sets _stop; each thread leaves its loop and does one bracket poll at whatever seq it holds. The in-loop</text>
+<text x="250" y="1219" class="sub">skip block is guarded by `not _stop.is_set()`.</text>
+<line x1="250" y1="1283" x2="250" y2="1459" class="grid"/>
+<text x="250" y="1526" class="tick" text-anchor="middle">0s</text>
+<line x1="480" y1="1283" x2="480" y2="1459" class="grid"/>
+<text x="480" y="1526" class="tick" text-anchor="middle">1s</text>
+<line x1="710" y1="1283" x2="710" y2="1459" class="grid"/>
+<text x="710" y="1526" class="tick" text-anchor="middle">2s</text>
+<line x1="940" y1="1283" x2="940" y2="1459" class="grid"/>
+<text x="940" y="1526" class="tick" text-anchor="middle">3s</text>
+<line x1="1170" y1="1283" x2="1170" y2="1459" class="grid"/>
+<text x="1170" y="1526" class="tick" text-anchor="middle">4s</text>
+<line x1="1400" y1="1283" x2="1400" y2="1459" class="grid"/>
+<text x="1400" y="1526" class="tick" text-anchor="middle">5s</text>
+<line x1="1630" y1="1283" x2="1630" y2="1459" class="grid"/>
+<text x="1630" y="1526" class="tick" text-anchor="middle">6s</text>
+<text x="1768" y="1554" class="tick" text-anchor="end">head-node clock (interval = 1 s)</text>
+<line x1="1285.0" y1="1277" x2="1285.0" y2="1463" class="stop"/>
+<text x="1291.0" y="1273" class="stop-lbl">stop @ 4.5 s → bracket seq B = 5</text>
+<text x="236" y="1333.0" class="host" text-anchor="end">node-a</text>
+<rect x="250.0" y="1315" width="46.0" height="40" rx="4" class="req"/>
+<text x="250.0" y="1307" class="seq">seq 0</text>
+<line x1="273.0" y1="1310" x2="273.0" y2="1360" class="row"/>
+<rect x="480.0" y="1315" width="46.0" height="40" rx="4" class="req"/>
+<text x="480.0" y="1307" class="seq">seq 1</text>
+<line x1="503.0" y1="1310" x2="503.0" y2="1360" class="row"/>
+<rect x="710.0" y="1315" width="46.0" height="40" rx="4" class="req"/>
+<text x="710.0" y="1307" class="seq">seq 2</text>
+<line x1="733.0" y1="1310" x2="733.0" y2="1360" class="row"/>
+<rect x="940.0" y="1315" width="46.0" height="40" rx="4" class="req"/>
+<text x="940.0" y="1307" class="seq">seq 3</text>
+<line x1="963.0" y1="1310" x2="963.0" y2="1360" class="row"/>
+<rect x="1170.0" y="1315" width="46.0" height="40" rx="4" class="req"/>
+<text x="1170.0" y="1307" class="seq">seq 4</text>
+<line x1="1193.0" y1="1310" x2="1193.0" y2="1360" class="row"/>
+<rect x="1285.0" y="1315" width="46.0" height="40" rx="4" class="req bracket"/>
+<text x="1285.0" y="1307" class="seq">seq 5 (B)</text>
+<line x1="1308.0" y1="1310" x2="1308.0" y2="1360" class="row"/>
+<text x="236" y="1421.0" class="host" text-anchor="end">node-b</text>
+<rect x="481" y="1399" width="228" height="48" class="missed-timeout"/>
+<text x="595.0" y="1428.0" class="miss-lbl" text-anchor="middle">seq 1 · missed</text>
+<rect x="250.0" y="1403" width="46.0" height="40" rx="4" class="req"/>
+<text x="250.0" y="1395" class="seq">seq 0</text>
+<line x1="273.0" y1="1398" x2="273.0" y2="1448" class="row"/>
+<rect x="480.0" y="1403" width="920.0" height="40" rx="4" class="req-fail"/>
+<text x="480.0" y="1395" class="seq">seq 1</text>
+<rect x="1400.0" y="1403" width="46.0" height="40" rx="4" class="req bracket"/>
+<text x="1400.0" y="1395" class="seq">seq 2 (B)</text>
+<line x1="1423.0" y1="1398" x2="1423.0" y2="1448" class="row"/>
+<line x1="273.0" y1="1478" x2="1423.0" y2="1478" class="gap" marker-start="url(#tick)" marker-end="url(#tick)"/>
+<text x="848.0" y="1503" class="gap-lbl" text-anchor="middle">largest node-b row gap = 5.0 s (row timestamps = request midpoints)</text>
+<text x="250" y="1595" class="note">node-a was idle waiting for slot 5 → brackets at seq 5 (t ≈ 4.6). node-b&#x27;s hung request settles after stop →</text>
+<text x="250" y="1624" class="note">skip block suppressed → brackets at seq 2 at t ≈ 5.1: 3 slots behind, same wall-clock.</text>
+<text x="250" y="1653" class="note">Slots 2–4 on node-b are never recorded: missed_sample_ranges = node-b seq 1 (endpoint_timeout). The undercount</text>
+<text x="250" y="1682" class="note">is silent — the validator only checks per-host consistency.</text><text x="250" y="1767" class="title">C2 · Prototype — same hang, bracket seq derived from the clock: B = floor(t_stop / interval) + 1 = 5</text>
+<text x="250" y="1799" class="sub">Computed once in stop_and_finalize. Each thread: if B &gt; its counter → record counter…B−1 as</text>
+<text x="250" y="1827" class="sub">sample_schedule_overrun; then poll seq B with scheduled_at = grid time of B.</text>
+<line x1="250" y1="1891" x2="250" y2="2067" class="grid"/>
+<text x="250" y="2134" class="tick" text-anchor="middle">0s</text>
+<line x1="480" y1="1891" x2="480" y2="2067" class="grid"/>
+<text x="480" y="2134" class="tick" text-anchor="middle">1s</text>
+<line x1="710" y1="1891" x2="710" y2="2067" class="grid"/>
+<text x="710" y="2134" class="tick" text-anchor="middle">2s</text>
+<line x1="940" y1="1891" x2="940" y2="2067" class="grid"/>
+<text x="940" y="2134" class="tick" text-anchor="middle">3s</text>
+<line x1="1170" y1="1891" x2="1170" y2="2067" class="grid"/>
+<text x="1170" y="2134" class="tick" text-anchor="middle">4s</text>
+<line x1="1400" y1="1891" x2="1400" y2="2067" class="grid"/>
+<text x="1400" y="2134" class="tick" text-anchor="middle">5s</text>
+<line x1="1630" y1="1891" x2="1630" y2="2067" class="grid"/>
+<text x="1630" y="2134" class="tick" text-anchor="middle">6s</text>
+<text x="1768" y="2162" class="tick" text-anchor="end">head-node clock (interval = 1 s)</text>
+<line x1="1285.0" y1="1885" x2="1285.0" y2="2071" class="stop"/>
+<text x="1291.0" y="1881" class="stop-lbl">stop @ 4.5 s → bracket seq B = 5</text>
+<text x="236" y="1941.0" class="host" text-anchor="end">node-a</text>
+<rect x="250.0" y="1923" width="46.0" height="40" rx="4" class="req"/>
+<text x="250.0" y="1915" class="seq">seq 0</text>
+<line x1="273.0" y1="1918" x2="273.0" y2="1968" class="row"/>
+<rect x="480.0" y="1923" width="46.0" height="40" rx="4" class="req"/>
+<text x="480.0" y="1915" class="seq">seq 1</text>
+<line x1="503.0" y1="1918" x2="503.0" y2="1968" class="row"/>
+<rect x="710.0" y="1923" width="46.0" height="40" rx="4" class="req"/>
+<text x="710.0" y="1915" class="seq">seq 2</text>
+<line x1="733.0" y1="1918" x2="733.0" y2="1968" class="row"/>
+<rect x="940.0" y="1923" width="46.0" height="40" rx="4" class="req"/>
+<text x="940.0" y="1915" class="seq">seq 3</text>
+<line x1="963.0" y1="1918" x2="963.0" y2="1968" class="row"/>
+<rect x="1170.0" y="1923" width="46.0" height="40" rx="4" class="req"/>
+<text x="1170.0" y="1915" class="seq">seq 4</text>
+<line x1="1193.0" y1="1918" x2="1193.0" y2="1968" class="row"/>
+<rect x="1285.0" y="1923" width="46.0" height="40" rx="4" class="req bracket"/>
+<text x="1285.0" y="1915" class="seq">seq 5 (B)</text>
+<line x1="1308.0" y1="1918" x2="1308.0" y2="1968" class="row"/>
+<text x="236" y="2029.0" class="host" text-anchor="end">node-b</text>
+<rect x="481" y="2007" width="228" height="48" class="missed-timeout"/>
+<text x="595.0" y="2036.0" class="miss-lbl" text-anchor="middle">seq 1 · missed</text>
+<rect x="711" y="2007" width="228" height="48" class="missed-overrun"/>
+<text x="825.0" y="2036.0" class="miss-lbl" text-anchor="middle">seq 2 · missed</text>
+<rect x="941" y="2007" width="228" height="48" class="missed-overrun"/>
+<text x="1055.0" y="2036.0" class="miss-lbl" text-anchor="middle">seq 3 · missed</text>
+<rect x="1171" y="2007" width="228" height="48" class="missed-overrun"/>
+<text x="1285.0" y="2036.0" class="miss-lbl" text-anchor="middle">seq 4 · missed</text>
+<rect x="250.0" y="2011" width="46.0" height="40" rx="4" class="req"/>
+<text x="250.0" y="2003" class="seq">seq 0</text>
+<line x1="273.0" y1="2006" x2="273.0" y2="2056" class="row"/>
+<rect x="480.0" y="2011" width="920.0" height="40" rx="4" class="req-fail"/>
+<text x="480.0" y="2003" class="seq">seq 1</text>
+<rect x="1400.0" y="2011" width="46.0" height="40" rx="4" class="req bracket"/>
+<text x="1400.0" y="2003" class="seq">seq 5 (B)</text>
+<line x1="1423.0" y1="2006" x2="1423.0" y2="2056" class="row"/>
+<line x1="273.0" y1="2086" x2="1423.0" y2="2086" class="gap" marker-start="url(#tick)" marker-end="url(#tick)"/>
+<text x="848.0" y="2111" class="gap-lbl" text-anchor="middle">largest node-b row gap = 5.0 s (row timestamps = request midpoints)</text>
+<text x="250" y="2203" class="note">Both hosts bracket at seq 5. node-b fills the gap as one coalesced range: node-b seq 1 (endpoint_timeout),</text>
+<text x="250" y="2232" class="note">node-b seq 2–4 (sample_schedule_overrun).</text>
+<text x="250" y="2261" class="note">Every thread&#x27;s counter is ≤ S+1 at stop (it cannot have polled a slot that has not started) and an idle thread</text>
+<text x="250" y="2290" class="note">holds exactly S+1 — so B never collides with an existing row and never goes backwards.</text>
+<text x="250" y="2319" class="note">Bracket row timestamps: node-a ≈ 4.6 (fires at stop), node-b ≈ 5.1 (fires when its hung request settles). Same</text>
+<text x="250" y="2348" class="note">seq, skew bounded by one request latency; the validator only needs a row with t ≥ window end.</text>
+
+<g transform="translate(250,2401)">
+  <rect x="0" y="0" width="74" height="24" rx="5" class="req"/><text x="88" y="20" class="note">request in flight; row timestamp = midpoint (┃)</text>
+  <rect x="0" y="40" width="74" height="24" rx="5" class="req-fail"/><text x="88" y="60" class="note">request failed / timed out — no row (endpoint_timeout)</text>
+  <rect x="0" y="80" width="74" height="24" class="missed-overrun"/><text x="88" y="100" class="note">slot forfeited — sample_schedule_overrun</text>
+  <rect x="0" y="120" width="74" height="24" rx="5" class="req bracket"/><text x="88" y="140" class="note">bracket poll after stop (seq marked "(B)")</text>
+  <line x1="0" y1="172" x2="74" y2="172" class="stop"/><text x="88" y="180" class="note">stop_and_finalize sets _stop</text>
+</g>
+</svg>
