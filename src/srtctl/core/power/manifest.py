@@ -148,6 +148,9 @@ class PowerManifest:
     publication_valid: bool | None = None
     observed_devices: list[ObservedDevice] = field(default_factory=list)
     max_scrape_duration_seconds: float | None = None
+    # Wall-clock anchor of slot 0 on the collector's slot grid; ``None`` until
+    # the endpoint threads start. Slot N is scheduled at anchor + N * interval.
+    slot_grid_started_at_unix: float | None = None
     scrape_count: int = 0
     sample_row_count: int = 0
     missed_sample_count: int = 0
@@ -192,6 +195,7 @@ class PowerManifest:
             "max_scrape_duration_seconds": self.max_scrape_duration_seconds,
             "required": self.required,
             "started_at_unix": self.started_at_unix,
+            "slot_grid_started_at_unix": self.slot_grid_started_at_unix,
             "stopped_at_unix": self.stopped_at_unix,
             "status": self.status,
             "publication_valid": self.publication_valid,

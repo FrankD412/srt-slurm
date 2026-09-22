@@ -41,6 +41,7 @@ from srtctl.core.power.contract import (
 )
 from srtctl.core.power.manifest import STATUS_COMPLETE, ArtifactError, ExpectedWindow, WindowValidation
 from srtctl.core.power.samples import ObservedDevice, SampleRow, derive_observed_devices, read_samples
+from srtctl.core.power.slot_alignment import SlotAlignment, compute_slot_alignment
 from srtctl.core.power.topology import (
     WORKER_ROLES,
     DeviceAssignment,
@@ -118,6 +119,7 @@ class ArtifactReport:
     failures: tuple[str, ...]
     publication_valid: bool | None = None
     summary: dict[str, Any] = field(default_factory=dict)
+    slot_alignment: SlotAlignment | None = None
 
     def render(self) -> str:
         lines = [f"validation_ok: {self.ok}", f"publication_valid: {self.publication_valid}"]
@@ -212,6 +214,7 @@ def validate_power_artifacts(
     )
 
     gaps = [gap for validation in validations for gap in validation.per_device_max_sample_gap_seconds.values()]
+    alignment = compute_slot_alignment(rows, manifest)
     summary = {
         "producer_git_commit": manifest.get("producer_git_commit"),
         "job_id": manifest.get("job_id"),
@@ -220,6 +223,8 @@ def validate_power_artifacts(
         "stable_uuids": sum(1 for device in observed if len(device.gpu_uuids) == 1),
         "sample_rows": len(rows),
         "missed_samples": manifest.get("missed_sample_count"),
+        "late_slots": sum(host.late for host in alignment.per_host) if alignment else None,
+        "unaccounted_slots": sum(host.unaccounted for host in alignment.per_host) if alignment else None,
         "windows": len(validations),
         "max_sample_gap_seconds": max(gaps) if gaps else None,
     }
@@ -228,6 +233,7 @@ def validate_power_artifacts(
         failures=tuple(failures),
         publication_valid=stored_publication_valid,
         summary=summary,
+        slot_alignment=alignment,
     )
 
 
