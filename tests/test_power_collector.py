@@ -1479,6 +1479,65 @@ class TestShutdown:
         }
         assert slots_by_host["node-b"] | missed_slow_slots == set(range(final_slot + 1))
 
+    def test_collector_crash_still_pins_every_survivor_to_one_bracket_slot(self, tmp_path, exporters):
+        """An endpoint-thread crash sets ``_stop`` without ``stop_and_finalize``; survivors must still
+        close on the shared clock-derived slot and account for every slot they were in flight across.
+
+        Otherwise a survivor that was mid-hang brackets at its own stale counter with
+        ``scheduled_at_unix=time.time()``, files no missed range for the slots that
+        elapsed during the hang, and the run's forensics under-report the outage.
+        """
+        a = exporters(_body("a"))
+        b = exporters(_body("b"))
+        session = _session(
+            tmp_path,
+            _endpoints(("node-a", a.url), ("node-b", b.url)),
+            sample_interval_seconds=0.05,
+            request_timeout_seconds=0.5,
+        )
+        session.initialize()
+        real_poll = session._poll
+        b_hung = threading.Event()
+        release_b = threading.Event()
+
+        def poll(endpoint, scrape_seq):
+            if endpoint.hostname == "node-b" and scrape_seq == 2:
+                b_hung.set()
+                release_b.wait(3.0)
+            if endpoint.hostname == "node-a" and scrape_seq == 6:
+                raise RuntimeError("simulated collector crash on node-a")
+            return real_poll(endpoint, scrape_seq)
+
+        session.__dict__["_poll"] = poll
+        assert session.start_and_wait_for_readiness() is True
+        assert b_hung.wait(1.0)
+        time.sleep(0.4)
+        assert session._stop.is_set(), "node-a's crash should have stopped the session"
+        with session._state_lock:
+            armed = session._shutdown_bracket
+        assert armed is not None, "a crash-initiated stop must arm the shared bracket"
+        crash_bracket = armed[0]
+        # node-b's hang settles while _stop is set but before stop_and_finalize has run.
+        release_b.set()
+        time.sleep(0.3)
+        session.stop_and_finalize()
+
+        manifest = _manifest(session)
+        assert Reason.COLLECTOR_EXCEPTION in manifest["reason_codes"]
+        rows, _ = read_samples(session.samples_path)
+        b_slots = {r.scrape_seq for r in rows if r.hostname == "node-b"}
+        b_missed = {
+            s
+            for i in manifest["missed_sample_ranges"]
+            if i["hostname"] == "node-b"
+            for s in range(i["first_scrape_seq"], i["last_scrape_seq"] + 1)
+        }
+        # node-b closes on the bracket armed at the crash, not on its stale counter (3, the slot
+        # after the one it hung on) and not on a bracket recomputed later by stop_and_finalize.
+        assert max(b_slots) == crash_bracket, (sorted(b_slots), crash_bracket)
+        # And every slot node-b was in flight across is accounted for as a miss.
+        assert b_slots | b_missed == set(range(crash_bracket + 1)), (sorted(b_slots), sorted(b_missed))
+
     def test_manifest_records_disk_derived_counts(self, tmp_path, exporters):
         a = exporters(_body("a"))
         b = exporters(_body("b"))
