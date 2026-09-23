@@ -31,7 +31,7 @@ def sim_old(lat, t_end):
     return ev, []
 
 
-def sim_new(lat_fn, t_end, *, late_fire=False, t_stop=None, clock_bracket=False):
+def sim_new(lat_fn, t_end, *, late_fire=False, t_stop=None, clock_bracket=False, crashed=()):
     """Per-endpoint slot grid.
 
     late_fire=False: PR #480 -- any overrun skips int(overrun/interval)+1 slots (slot fires only at its grid time).
@@ -39,6 +39,8 @@ def sim_new(lat_fn, t_end, *, late_fire=False, t_stop=None, clock_bracket=False)
     t_stop         : if set, stop fires at this instant and every thread ends with one bracket poll.
     clock_bracket  : False -- PR #480: bracket at whatever seq the thread holds (in-loop skip suppressed once _stop is set).
                      True  -- prototype: bracket at B = floor(t_stop/interval)+1, filling counter..B-1 as a missed range.
+    crashed        : hosts whose thread raised at t_stop -- they set _stop but take no bracket poll themselves.
+                     Their last event is marked crash=True.
     """
     ev = {}
     missed = []
@@ -73,6 +75,10 @@ def sim_new(lat_fn, t_end, *, late_fire=False, t_stop=None, clock_bracket=False)
                 missed.append((h, seq, seq + n - 1, "sample_schedule_overrun"))
                 seq += n
                 nxt += n * INTERVAL
+        if h in crashed:
+            if ev[h]:
+                ev[h][-1]["crash"] = True
+            continue
         if t_stop is not None:
             b = bracket_seq if bracket_seq is not None else seq
             if b > seq:
@@ -87,6 +93,18 @@ def coalesce(m):
     return ", ".join(f"{h} seq {a}" + (f"–{b}" if b != a else "") + f" ({r})" for h, a, b, r in m)
 
 
+def _host_ranges(missed, host):
+    """Merge one host's missed entries into contiguous (first, last, reason) spans for drawing."""
+    spans = sorted((a, b, r) for h, a, b, r in missed if h == host)
+    out = []
+    for a, b, r in spans:
+        if out and out[-1][2] == r and out[-1][1] + 1 == a:
+            out[-1] = (out[-1][0], b, r)
+        else:
+            out.append((a, b, r))
+    return out
+
+
 def rows_in(ev, host):
     return sum(e["row"] and e["end"] <= T_END for e in ev[host])
 
@@ -98,7 +116,7 @@ def wrap(lines, width=WRAP):
     return out
 
 
-def panel(title, subtitle, ev, missed, y0, notes, hosts=("node-a", "node-b"), t_stop=None):
+def panel(title, subtitle, ev, missed, y0, notes, hosts=("node-a", "node-b"), t_stop=None, stop_label=None):
     k = LANE_H / 66  # vertical scale relative to the original 66 px lane
     lh = round(21 * k)  # line height for sub/note text
     out = [f'<text x="{X0}" y="{y0 + round(24 * k)}" class="title">{html.escape(title)}</text>']
@@ -120,39 +138,50 @@ def panel(title, subtitle, ev, missed, y0, notes, hosts=("node-a", "node-b"), t_
     )
     if t_stop is not None:
         xs = X0 + t_stop * PX
+        label = stop_label or f"stop @ {t_stop:g} s → bracket seq B = {int(t_stop / INTERVAL) + 1}"
         out.append(f'<line x1="{xs:.1f}" y1="{gy - 6}" x2="{xs:.1f}" y2="{gy + H + 4}" class="stop"/>')
-        out.append(f'<text x="{xs + 6:.1f}" y="{gy - 10}" class="stop-lbl">stop @ {t_stop:g} s → bracket seq B = {int(t_stop / INTERVAL) + 1}</text>')
-    mset = {(h, s): r for h, a, b, r in missed for s in range(a, b + 1)}
+        out.append(f'<text x="{xs + 6:.1f}" y="{gy - 10}" class="stop-lbl">{html.escape(label)}</text>')
     for i, h in enumerate(hosts):
         ly = gy + i * lane_h
         out.append(f'<text x="{X0 - 14}" y="{ly + lane_h / 2 + 6}" class="host" text-anchor="end">{h}</text>')
-        for (hh, s), r in mset.items():
-            if hh != h:
-                continue
-            x = X0 + s * PX
-            if x >= X0 + T_END * PX:
-                continue
-            cls = "missed-overrun" if r == "sample_schedule_overrun" else "missed-timeout"
-            out.append(f'<rect x="{x + 1}" y="{ly + round(21 * k)}" width="{PX - 2}" height="{lane_h - round(30 * k)}" class="{cls}"/>')
-            out.append(
-                f'<text x="{x + PX / 2}" y="{ly + lane_h / 2 + round(10 * k)}" class="miss-lbl" text-anchor="middle">'
-                f"seq {s} · missed</text>"
-            )
         for e in ev[h]:
             x1 = X0 + e["start"] * PX
             x2 = X0 + min(e["end"], T_END) * PX
             cls = "req" if e["row"] else "req-fail"
             if e.get("bracket"):
                 cls += " bracket"
+            if e.get("crash"):
+                cls += " crash"
             out.append(
                 f'<rect x="{x1:.1f}" y="{ly + round(24 * k)}" width="{max(3, x2 - x1):.1f}" height="{lane_h - round(36 * k)}" rx="4" class="{cls}"/>'
             )
-            label = f"seq {e['seq']}" + (" (B)" if e.get("bracket") else "")
+            label = f"seq {e['seq']}" + (" (B)" if e.get("bracket") else "") + (" ✗ raised" if e.get("crash") else "")
             out.append(f'<text x="{x1:.1f}" y="{ly + round(18 * k)}" class="seq">{label}</text>')
-            if e["row"] and e["end"] <= T_END:
+            if e["row"] and e["end"] <= T_END and not e.get("crash"):
                 mid = X0 + (e["start"] + e["end"]) / 2 * PX
                 out.append(f'<line x1="{mid:.1f}" y1="{ly + round(20 * k)}" x2="{mid:.1f}" y2="{ly + lane_h - round(8 * k)}" class="row"/>')
-    rows = sorted((e["start"] + e["end"]) / 2 for e in ev[hosts[-1]] if e["row"] and e["end"] <= T_END)
+        # Missed-slot boxes are drawn after the bars so a long in-flight request cannot hide them.
+        # Contiguous same-cause slots get one box and one label; per-slot labels only when the slot is wide enough.
+        for a, b, r in _host_ranges(missed, h):
+            xa = X0 + a * PX
+            xb = X0 + min(b + 1, T_END) * PX
+            if xa >= X0 + T_END * PX:
+                continue
+            cls = "missed-overrun" if r == "sample_schedule_overrun" else "missed-timeout"
+            out.append(f'<rect x="{xa + 1}" y="{ly + round(21 * k)}" width="{xb - xa - 2:.1f}" height="{lane_h - round(30 * k)}" class="{cls}"/>')
+            if PX >= 150:
+                for s in range(a, b + 1):
+                    out.append(
+                        f'<text x="{X0 + s * PX + PX / 2}" y="{ly + lane_h / 2 + round(10 * k)}" class="miss-lbl" text-anchor="middle">'
+                        f"seq {s} · missed</text>"
+                    )
+            else:
+                span = f"seq {a}" if a == b else f"seq {a}–{b}"
+                out.append(
+                    f'<text x="{(xa + xb) / 2:.1f}" y="{ly + lane_h / 2 + round(10 * k)}" class="miss-lbl" text-anchor="middle">'
+                    f"{span} · missed</text>"
+                )
+    rows = sorted((e["start"] + e["end"]) / 2 for e in ev[hosts[-1]] if e["row"] and e["end"] <= T_END and not e.get("crash"))
     if len(rows) > 1:
         g, a, b = max((b - a, a, b) for a, b in zip(rows, rows[1:]))
         out.append(
@@ -182,12 +211,13 @@ STYLE = """
  .row{stroke:var(--foreground);stroke-width:4}
  .missed-overrun{fill:#e5a100;fill-opacity:.18;stroke:#e5a100;stroke-width:2;stroke-dasharray:5 5}
  .missed-timeout{fill:#e5484d;fill-opacity:.15;stroke:#e5484d;stroke-width:2;stroke-dasharray:5 5}
- .miss-lbl{font-size:17px;fill:var(--muted-foreground)}
+ .miss-lbl{font-size:17px;fill:#f0f0f0;paint-order:stroke;stroke:#0f1115;stroke-width:4px;stroke-linejoin:round}
  .gap{stroke:var(--foreground);stroke-width:2}
  .gap-lbl{font-size:20px}
  .stop{stroke:#ff6b6b;stroke-width:3;stroke-dasharray:10 6}
  .stop-lbl{font-size:19px;fill:#ff6b6b;font-weight:600}
  .bracket{stroke:#7ee787;stroke-width:3;stroke-opacity:1}
+ .crash{fill:#ff6b6b;fill-opacity:.55;stroke:#ff6b6b;stroke-width:3;stroke-opacity:1}
 """
 
 
@@ -261,16 +291,28 @@ def build():
         t_stop=T_STOP,
     )
     body.append(p)
-    legend = f"""
-<g transform="translate({X0},{y})">
-  <rect x="0" y="0" width="74" height="24" rx="5" class="req"/><text x="88" y="20" class="note">request in flight; row timestamp = midpoint (┃)</text>
-  <rect x="0" y="40" width="74" height="24" rx="5" class="req-fail"/><text x="88" y="60" class="note">request failed / timed out — no row (endpoint_timeout)</text>
-  <rect x="0" y="80" width="74" height="24" class="missed-overrun"/><text x="88" y="100" class="note">slot forfeited — sample_schedule_overrun</text>
-  <rect x="0" y="120" width="74" height="24" rx="5" class="req bracket"/><text x="88" y="140" class="note">bracket poll after stop (seq marked "(B)")</text>
-  <line x1="0" y1="172" x2="74" y2="172" class="stop"/><text x="88" y="180" class="note">stop_and_finalize sets _stop</text>
-</g>"""
-    h_total = y + 210
-    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{h_total}" viewBox="0 0 {W} {h_total}">
+    return _wrap_svg(body, y, bracket_legend=True)
+
+
+def _wrap_svg(body, y, *, bracket_legend: bool, crash_legend: bool = False) -> str:
+    rows = [
+        ('<rect x="0" y="{y}" width="74" height="24" rx="5" class="req"/>', "request in flight; row timestamp = midpoint (┃)"),
+        ('<rect x="0" y="{y}" width="74" height="24" rx="5" class="req-fail"/>', "request failed / timed out — no row (endpoint_timeout)"),
+        ('<rect x="0" y="{y}" width="74" height="24" class="missed-overrun"/>', "slot forfeited — sample_schedule_overrun"),
+    ]
+    if bracket_legend:
+        rows.append(('<rect x="0" y="{y}" width="74" height="24" rx="5" class="req bracket"/>', 'bracket poll after stop (seq marked "(B)")'))
+    if crash_legend:
+        rows.append(('<rect x="0" y="{y}" width="74" height="24" rx="5" class="req crash"/>', "request whose thread raised — sets _stop, no bracket poll"))
+    rows.append(('<line x1="0" y1="{yl}" x2="74" y2="{yl}" class="stop"/>', "_stop set"))
+    parts = []
+    for i, (shape, text) in enumerate(rows):
+        yy = i * 40
+        parts.append(shape.format(y=yy, yl=yy + 12) + f'<text x="88" y="{yy + 20}" class="note">{text}</text>')
+    legend = f'<g transform="translate({X0},{y})">' + "".join(parts) + "</g>"
+    h_total = y + 40 * len(rows) + 30
+    width = X0 + int(T_END * PX) + 80
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{h_total}" viewBox="0 0 {width} {h_total}">
 <defs><marker id="tick" markerWidth="3" markerHeight="12" refX="1.5" refY="6" orient="auto"><line x1="1.5" y1="0" x2="1.5" y2="12" stroke="var(--foreground)" stroke-width="2"/></marker></defs>
 <style>svg{{--foreground:#e6e6e6;--muted-foreground:#a0a4ab;--accent:#4c8dff;--border:#3a3f47}}{STYLE}</style>
 <rect width="100%" height="100%" fill="#0f1115"/>
@@ -279,11 +321,65 @@ def build():
 </svg>"""
 
 
+def build_crash():
+    """Endpoint-thread crash while a sibling is mid-hang: 104f4bcd vs _request_stop."""
+    fast = lambda s: (0.2, True)  # noqa: E731
+    # node-b hangs on slot 2 for 8 intervals (settles at 10.2); node-a raises on slot 6.
+    hang2 = lambda s: (8.2, True) if s == 2 else (0.2, True)  # noqa: E731
+    crash6 = lambda s: (0.2, True)  # noqa: E731
+    T_CRASH = 6.1  # node-a's slot-6 request raises 0.1 s in
+    B = int(T_CRASH / INTERVAL) + 1
+
+    global T_END, PX
+    saved = (T_END, PX)
+    T_END = 12.6
+    PX = int(saved[1] * saved[0] / T_END)  # keep the figure the same overall width as the main diagram
+    try:
+        ev_v3, m_v3 = sim_new({"node-a": crash6, "node-b": hang2}, T_END, late_fire=True, t_stop=T_CRASH, crashed={"node-a"})
+        ev_fx, m_fx = sim_new(
+            {"node-a": crash6, "node-b": hang2}, T_END, late_fire=True, t_stop=T_CRASH, clock_bracket=True, crashed={"node-a"}
+        )
+        b_v3 = next(e for e in ev_v3["node-b"] if e.get("bracket"))
+        b_fx = next(e for e in ev_fx["node-b"] if e.get("bracket"))
+        body = []
+        y = 10
+        p, y = panel(
+            "D1 · 104f4bcd — node-a's slot-6 request raises while node-b is mid-hang on slot 2",
+            "The endpoint except block calls _stop.set() directly (L553). stop_and_finalize has not run, so _shutdown_bracket is still None when node-b's hang settles.",
+            ev_v3, m_v3, y,
+            [
+                "node-a's thread is gone after the raise: no bracket poll from it, its last slot is 5 — correct, and COLLECTOR_EXCEPTION says why.",
+                f"node-b leaves its loop, reads _shutdown_bracket → None → takes the fallback (L524-526): brackets at its own counter, seq {b_v3['seq']}, at t ≈ {(b_v3['start'] + b_v3['end']) / 2:.1f} s.",
+                f"Slots 3–{B - 1} on node-b have no row and no missed range: missed_sample_ranges = {coalesce(m_v3) or '(empty)'}. The manifest reads as if node-b was fine until it stopped at slot {b_v3['seq']}.",
+            ],
+            t_stop=T_CRASH,
+            stop_label=f"node-a raises @ {T_CRASH:g} s → _stop set, bracket NOT armed",
+        )
+        body.append(p)
+        p, y = panel(
+            f"D2 · with _request_stop — same crash, every _stop path arms the bracket first: B = floor({T_CRASH:g}/1)+1 = {B}",
+            "The except block calls _request_stop(now) instead of _stop.set(); it computes the shared bracket under the state lock, then sets _stop. The None fallback becomes unreachable and raises.",
+            ev_fx, m_fx, y,
+            [
+                f"node-b now sees B = {B} on exit: files 3–{B - 1} as one sample_schedule_overrun range, then polls seq {B} at t ≈ {(b_fx['start'] + b_fx['end']) / 2:.1f} s.",
+                f"missed_sample_ranges = {coalesce(m_fx)}. Every node-b slot up to B is a row or a range; the only unexplained gap is node-a's, and COLLECTOR_EXCEPTION is on the manifest.",
+                "publication_valid is False in both panels (COLLECTOR_EXCEPTION is fatal). The difference is whether the manifest describes the outage or hides it.",
+            ],
+            t_stop=T_CRASH,
+            stop_label=f"node-a raises @ {T_CRASH:g} s → _request_stop → B = {B}",
+        )
+        body.append(p)
+        return _wrap_svg(body, y, bracket_legend=True, crash_legend=True)
+    finally:
+        T_END, PX = saved
+
+
 if __name__ == "__main__":
     import re
 
     out = sys.argv[1]
-    svg = build()
+    scenario = sys.argv[2] if len(sys.argv) > 2 else "main"
+    svg = {"main": build, "crash": build_crash}[scenario]()
     m = re.search(r'width="(\d+)" height="(\d+)"', svg)
     # Inline-preview variant: the SVG scales to the frame width and stays vector-crisp.
     fluid = svg.replace(f'width="{m.group(1)}" height="{m.group(2)}"', 'width="100%"', 1)
