@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from srtctl.backends.vllm import VLLMMooncakeKVStoreConfig
 from srtctl.ports import ETCD_CLIENT_PORT, NATS_PORT
 from srtctl.services.config import ServiceConfig, ServicePlacementConfig
 
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
 ETCD_SERVICE_NAME = "etcd"
 NATS_SERVICE_NAME = "nats"
 MOONCAKE_MASTER_SERVICE_NAME = "mooncake-master"
+GMS_SERVICE_NAME = "gms"
 DCGM_EXPORTER_SERVICE_NAME = "dcgm-exporter"
 NODE_EXPORTER_SERVICE_NAME = "node-exporter"
 PROCESS_EXPORTER_SERVICE_NAME = "process-exporter"
@@ -41,7 +43,8 @@ class EffectiveService:
     reason: str = ""
 
 
-def _infra_placement(config: SrtConfig) -> ServicePlacementConfig:
+def infra_placement(config: SrtConfig) -> ServicePlacementConfig:
+    """Where the discovery plane and other infra services run: the infra node, or a dedicated one."""
     return ServicePlacementConfig(node="dedicated" if config.infra.etcd_nats_dedicated_node else "infra")
 
 
@@ -81,37 +84,28 @@ def implied_services(config: SrtConfig) -> list[EffectiveService]:
     """Services the rest of the recipe asks for without naming them."""
     implied: list[EffectiveService] = []
 
-    if config.frontend.type == "dynamo":
-        placement = _infra_placement(config)
-        implied.append(
-            EffectiveService(
-                ServiceConfig(name=ETCD_SERVICE_NAME, type="etcd", placement=placement),
-                implicit=True,
-                reason="frontend.type dynamo",
-            )
-        )
-        # NATS is only a dependency when a plane actually rides on it. The default
-        # request plane is tcp and KV events go over direct ZMQ, so a plain Dynamo
-        # job runs etcd alone; declare a `nats` service to force one anyway.
-        nats_reasons = nats_implied_reasons(config)
-        if nats_reasons:
-            nats_options = {}
-            if config.infra.nats_max_payload_mb is not None:
-                nats_options["max_payload_mb"] = config.infra.nats_max_payload_mb
-            implied.append(
-                EffectiveService(
-                    ServiceConfig(name=NATS_SERVICE_NAME, type="nats", placement=placement, options=nats_options),
-                    implicit=True,
-                    reason=", ".join(nats_reasons),
-                )
-            )
+    # The frontend brings its own discovery plane (Dynamo: etcd, and NATS when a
+    # plane rides on it); a services-only job has no frontend. Imported lazily:
+    # the frontend implementations import this module.
+    from srtctl.frontends import FRONTEND_NONE, get_frontend
 
-    mooncake_cfg = getattr(config.backend, "mooncake_kv_store", None)
+    if config.frontend.type != FRONTEND_NONE:
+        implied.extend(get_frontend(config.frontend.type).implied_services(config))
+
+    if config.backend.failover is not None:
+        # The kind's defaults are the placement: every worker node, one instance per worker.
+        implied.append(
+            EffectiveService(ServiceConfig(name=GMS_SERVICE_NAME, type="gms"), implicit=True, reason="engine.failover")
+        )
+
+    mooncake_cfg = config.backend.mooncake_kv_store
     if mooncake_cfg is not None:
         options = {}
-        store_config = getattr(mooncake_cfg, "store_config", None)
-        if store_config:
-            options["store_config"] = dict(store_config)
+        if isinstance(mooncake_cfg, VLLMMooncakeKVStoreConfig):
+            if mooncake_cfg.store_config:
+                options["store_config"] = dict(mooncake_cfg.store_config)
+            if mooncake_cfg.device_names_by_gpu:
+                options["device_names_by_gpu"] = list(mooncake_cfg.device_names_by_gpu)
         implied.append(
             EffectiveService(
                 ServiceConfig(
@@ -119,7 +113,7 @@ def implied_services(config: SrtConfig) -> list[EffectiveService]:
                     type="mooncake-master",
                     container=mooncake_cfg.container,
                     args=list(mooncake_cfg.master_extra_args or []),
-                    placement=_infra_placement(config),
+                    placement=infra_placement(config),
                     options=options,
                 ),
                 implicit=True,
@@ -129,8 +123,10 @@ def implied_services(config: SrtConfig) -> list[EffectiveService]:
 
     tachometer = config.observability.tachometer
     if config.observability.tachometer_enabled:
-        # The power-telemetry path launches and owns its own DCGM exporter.
-        dcgm = None if config.telemetry.enabled else tachometer.resolved_dcgm_exporter
+        # When power telemetry brings its own DCGM exporter it launches and owns it, and the
+        # telemetry stage scrapes that one; CPU-only power telemetry leaves tachometer's.
+        power_owns_dcgm = config.telemetry.enabled and config.telemetry.dcgm_exporter is not None
+        dcgm = None if power_owns_dcgm else tachometer.resolved_dcgm_exporter
         if dcgm is not None:
             implied.append(
                 EffectiveService(
@@ -232,11 +228,11 @@ def discovery_env(config: SrtConfig, runtime: RuntimeContext) -> dict[str, str]:
     """
     env = {
         "ETCD_ENDPOINTS": _declared_external(config, ETCD_SERVICE_NAME)
-        or f"http://{runtime.nodes.infra}:{ETCD_CLIENT_PORT}"
+        or f"http://{runtime.infra_node_ip}:{ETCD_CLIENT_PORT}"
     }
     if runs_nats(config):
         env["NATS_SERVER"] = (
-            _declared_external(config, NATS_SERVICE_NAME) or f"nats://{runtime.nodes.infra}:{NATS_PORT}"
+            _declared_external(config, NATS_SERVICE_NAME) or f"nats://{runtime.infra_node_ip}:{NATS_PORT}"
         )
     return env
 

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -50,6 +50,7 @@ from srtctl.core.topology import Endpoint, NodePortAllocator, Process, allocate_
 from srtctl.logging_utils import setup_logging
 from srtctl.ports import (
     FRONTEND_PUBLIC_PORT,
+    SIDECAR_GRPC_PORTS,
 )
 from srtctl.services.implicit import uses_discovery_plane
 
@@ -102,6 +103,7 @@ class SweepOrchestrator(
                 gpus_per_decode=r.gpus_per_decode,
                 decode_nodes=self.runtime.nodes.decode_group,
                 gpus_per_node=r.gpus_per_node,
+                pack_multinode_workers=self.backend.type == "trtllm",
             )
         return self.backend.allocate_endpoints(
             num_prefill=r.num_prefill,
@@ -122,7 +124,7 @@ class SweepOrchestrator(
         Port defaults come from ``srtctl.ports`` and are allocated
         deterministically within a job.
         """
-        allocator = NodePortAllocator()
+        allocator = NodePortAllocator(bases={SIDECAR_GRPC_PORTS.name: self.config.dynamo.sidecar_port})
         return self.backend.endpoints_to_processes(
             self.endpoints,
             port_allocator=allocator,
@@ -153,6 +155,20 @@ class SweepOrchestrator(
         store_cfg_path = self.runtime.log_dir / MOONCAKE_STORE_CONFIG_FILENAME
         store_cfg_path.write_text(json.dumps(store_cfg, indent=2))
         logger.info("Wrote mooncake_store_config to %s: %s", store_cfg_path, store_cfg)
+        if not backend.mooncake_kv_store.device_names_by_gpu:
+            return
+        # Render only GPU subsets actually launched, rather than all 2**N subsets.
+        written: set[str] = set()
+        for process in self.backend_processes:
+            local_config = backend.build_mooncake_process_config(
+                process, self.runtime.infra_node_ip, self.runtime.gpus_per_node
+            )
+            if local_config is not None:
+                filename, payload = local_config
+                if filename not in written:
+                    (self.runtime.log_dir / filename).write_text(json.dumps(payload, indent=2))
+                    logger.info("Wrote process-local Mooncake config %s: %s", filename, payload)
+                    written.add(filename)
 
     def _print_connection_info(self) -> None:
         """Print srun commands for connecting to nodes."""

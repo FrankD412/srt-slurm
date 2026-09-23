@@ -67,6 +67,7 @@ def _benchmark_harness(tmp_path, *, enabled=True):
     harness.runtime = MagicMock()
     harness.runtime.log_dir = tmp_path
     harness.runtime.container_mounts = {tmp_path: Path("/logs")}
+    harness.runtime.container_log_dir = Path("/logs")
     return harness
 
 
@@ -598,7 +599,26 @@ class TestArtifactErrors:
                 decode=ProfilingPhaseConfig(start_step=1, stop_step=2),
             ),
         )
-        processes = [SimpleNamespace(is_leader=True, endpoint_mode="decode", node="node-d", http_port=1234, sys_port=0)]
+        processes = [
+            SimpleNamespace(
+                is_leader=True,
+                endpoint_mode="prefill",
+                endpoint_index=0,
+                node_rank=0,
+                node="node-p",
+                http_port=1233,
+                sys_port=0,
+            ),
+            SimpleNamespace(
+                is_leader=True,
+                endpoint_mode="decode",
+                endpoint_index=0,
+                node_rank=0,
+                node="node-d",
+                http_port=1234,
+                sys_port=0,
+            ),
+        ]
         harness.runtime.environment = {}
         harness.runtime.network_interface = "eth0"
         runner = SimpleNamespace(name="SA-Bench")

@@ -1,9 +1,9 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import builtins
 import uuid
 from collections.abc import Sequence
-from dataclasses import field
+from dataclasses import field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -12,7 +12,7 @@ from marshmallow import Schema
 from marshmallow_dataclass import dataclass
 
 from srtctl.backends.sidecar import build_sidecar_launch_command, get_dynamo_sidecar_config, sidecar_grpc_port
-from srtctl.ports import DYN_SYSTEM_PORT_BASE
+from srtctl.ports import DYN_SYSTEM_PORT_BASE, TRTLLM_DIST_INIT_PORTS
 
 if TYPE_CHECKING:
     from srtctl.backends.base import SrunConfig
@@ -129,9 +129,9 @@ class TRTLLMProtocol:
     sequential_node_start: int = 0
 
     # Whether to prefix the trtllm worker command with `numactl -m 0,1`.
-    # None (default) preserves the existing auto-detected behavior (enabled
-    # only for gb200/gb300). True/False forces numactl on/off regardless of
-    # gpu_type.
+    # None (default) enables it only for gb200/gb300/vrnvl72 prefill and decode
+    # workers (case-sensitive GPU type). True/False forces numactl on/off
+    # regardless of gpu_type or mode.
     numa_memory_bind: bool | None = None
 
     # Optional stricter NUMA CPU affinity for the worker process, in addition
@@ -178,7 +178,27 @@ class TRTLLMProtocol:
             oversubscribe=True,
             launch_per_endpoint=True,
             cpu_bind="verbose,none",
+            sequential_node_start=self.sequential_node_start,
         )
+
+    @property
+    def mooncake_kv_store(self) -> None:
+        """TRT-LLM has no Mooncake KV store block."""
+        return None
+
+    @property
+    def failover(self) -> None:
+        """TRT-LLM has no shadow engine recovery."""
+        return None
+
+    def get_mooncake_worker_env(self, infra_node_ip: str, local_hostname: str) -> dict[str, str]:
+        return {}
+
+    def get_failover_environment(self, process: "Process", job_id: str) -> dict[str, str]:
+        return {}
+
+    def should_set_visible_devices(self) -> bool:
+        return True
 
     def get_config_for_mode(self, mode: WorkerMode) -> dict[str, Any]:
         if not self.trtllm_config:
@@ -253,6 +273,7 @@ class TRTLLMProtocol:
             gpus_per_node=gpus_per_node,
             available_nodes=available_nodes,
             spread_workers=spread_workers,
+            pack_multinode_workers=True,
         )
 
     def endpoints_to_processes(
@@ -263,10 +284,14 @@ class TRTLLMProtocol:
         frontend_type: str = "dynamo",
         dynamo_sidecar: bool = False,
     ) -> list["Process"]:
-        """Convert endpoints to processes."""
-        from srtctl.core.topology import endpoints_to_processes
+        """Convert endpoints to processes, each with its torch.distributed bootstrap port."""
+        from srtctl.core.topology import endpoints_to_processes, port_allocator_for
 
-        return endpoints_to_processes(endpoints, base_sys_port=base_sys_port, port_allocator=port_allocator)
+        allocator = port_allocator_for(port_allocator, base_sys_port)
+        processes = endpoints_to_processes(endpoints, port_allocator=allocator, sidecar_grpc=dynamo_sidecar)
+        # MASTER_PORT for the endpoint is the leader's; every process gets one so
+        # the allocation is uniform and any rank could lead.
+        return [replace(p, trtllm_dist_init_port=allocator.next(TRTLLM_DIST_INIT_PORTS)) for p in processes]
 
     def _wrap_with_numa_cpu_bind(self, cmd: list[str]) -> list[str]:
         """Wrap ``cmd`` in configs/numa_cpu_bind.sh, which taskset-binds per task.
@@ -295,12 +320,16 @@ class TRTLLMProtocol:
     ) -> list[str]:
         """Build the command to start a TRTLLM worker process."""
 
+        from srtctl.frontends import get_frontend
+
         mode = process.endpoint_mode
         config = self.get_config_for_mode(mode)
+        # The frontend owns the worker shape; nothing below compares frontend names.
+        frontend = get_frontend(frontend_type)
 
         sidecar_config = get_dynamo_sidecar_config(runtime)
         if sidecar_config is not None:
-            if frontend_type != "dynamo":
+            if frontend.worker_launch != "dynamo":
                 raise ValueError("TensorRT-LLM sidecar mode requires frontend.type: dynamo")
             if mode != "agg":
                 raise ValueError("TensorRT-LLM sidecar mode supports aggregated workers only")
@@ -319,7 +348,7 @@ class TRTLLMProtocol:
         model_arg = runtime.worker_model_arg
 
         if self.numa_memory_bind is None:
-            use_numactl = runtime.gpu_type in ("gb200", "gb300") and mode in ("prefill", "decode")
+            use_numactl = runtime.gpu_type in ("gb200", "gb300", "vrnvl72") and mode in ("prefill", "decode")
         else:
             use_numactl = self.numa_memory_bind
         numactl_prefix = ["numactl", "-m", "0,1"] if use_numactl else []
@@ -341,8 +370,8 @@ class TRTLLMProtocol:
         # worker is also the public frontend, so it binds runtime.frontend_port.
         # There is no Dynamo request plane and no --disaggregation-mode: a disagg
         # worker is prefill or decode purely by which list it appears in in ser.yaml.
-        if frontend_type == "trtllm_serve":
-            http_port = runtime.frontend_port if mode == "agg" else process.http_port
+        if frontend.worker_launch == "direct":
+            http_port = runtime.frontend_port if frontend.worker_api_port(mode) == "public" else process.http_port
             cmd = base_prefix + [
                 "trtllm-serve",
                 model_arg,
@@ -365,6 +394,8 @@ class TRTLLMProtocol:
             # ai-dynamo tensorrtllm-runtime 1.3.0-dev.1 container, which accept --config;
             # some trtllm-serve builds spell this --extra_llm_api_options.
             cmd.extend(["--config", str(container_config_path)])
+            if self.served_model_name:
+                cmd.extend(["--served_model_name", self.served_model_name])
             cmd.extend(self.get_extra_args_for_mode(mode))
             return self._wrap_with_numa_cpu_bind(cmd)
 
@@ -408,7 +439,7 @@ class TRTLLMProtocol:
         sidecar_config: "DynamoConfig",
     ) -> list[str]:
         """Build a lifecycle-coupled TensorRT-LLM native-gRPC and sidecar launch."""
-        grpc_port = sidecar_grpc_port(sidecar_config.sidecar_port, process)
+        grpc_port = sidecar_grpc_port(process)
         engine = self._wrap_with_numa_cpu_bind(
             base_prefix
             + [

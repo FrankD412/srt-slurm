@@ -7,7 +7,7 @@ Small, runnable starting points, one per frontend and topology. Every example se
 | Backend | Dynamo frontend | Native router | Router-free direct |
 | --- | --- | --- | --- |
 | SGLang | `sglang/dynamo-agg.yaml`, `sglang/dynamo-disagg.yaml` | `sglang/sglang-router-agg.yaml`, `sglang/sglang-router-disagg.yaml` | `sglang/sglang-direct-agg.yaml` |
-| vLLM | `vllm/dynamo-agg.yaml`, `vllm/dynamo-disagg.yaml` | `vllm/vllm-router-agg.yaml`, `vllm/vllm-router-disagg.yaml` | `vllm/vllm-direct-agg.yaml` |
+| vLLM | `vllm/dynamo-agg.yaml`, `vllm/dynamo-disagg.yaml` | `vllm/vllm-router-agg.yaml`, `vllm/vllm-router-disagg.yaml`, `vllm/vllm-router-moriio-disagg.yaml` (ROCm, MoRI-IO discovery) | `vllm/vllm-direct-agg.yaml` |
 | TRT-LLM | `trtllm/dynamo-agg.yaml`, `trtllm/dynamo-disagg.yaml` | `trtllm/trtllm-serve-disagg.yaml` | `trtllm/trtllm-serve-agg.yaml` |
 | Mocker | `mocker/dynamo-agg.yaml` | | |
 
@@ -31,6 +31,7 @@ Every example is written in the 2.0 layout: `engine:` names the engine (a string
 | `features/mlperf-client.yaml` | `benchmark.type: custom` driving the MLPerf inference-endpoint client in its own image; placeholder paths, a reference rather than a runnable example |
 | `features/infra-services.yaml` | etcd and NATS as declared services on a dedicated node with a NATS payload limit; the implied exporters overridden or switched off |
 | `features/dynamo-source.yaml` | `dynamo.source:` building Dynamo from a git tag (or a PR head via `--set dynamo.source.rev=refs/pull/<n>/head`), pinned to a commit at submit |
+| `features/vllm-failover.yaml` | `engine.failover:` shadow engine recovery: a GPU Memory Service sidecar and a parked standby engine per vLLM worker, relaunched in place after a crash. Needs a container that ships `gpu_memory_service` (the `dynamo-vllm` alias, an `nvcr.io/nvidia/ai-dynamo/vllm-runtime` image). See [../docs/shadow-engine-recovery.md](../docs/shadow-engine-recovery.md) |
 
 ## Cluster aliases
 
@@ -44,6 +45,7 @@ containers:
   sglang: /path/to/sglang.sqsh              # SGLang image; Dynamo examples pip-install ai-dynamo into it
   vllm: /path/to/vllm.sqsh                  # vLLM image with the vllm-router executable
   trtllm: /path/to/tensorrtllm-runtime.sqsh # Dynamo TRT-LLM runtime image (ships ai-dynamo and trtllm-serve)
+  dynamo-vllm: /path/to/vllm-runtime.sqsh   # Dynamo vLLM runtime image (ships ai-dynamo and gpu_memory_service), for features/vllm-failover.yaml
 ```
 
 `resources.gpu_type` and `gpus_per_node` are set to `h100` and `8`; change them to match the partition you submit to.
@@ -60,3 +62,9 @@ for p in sorted(Path('examples').rglob('*.yaml')):
     print(validate_config_file(p) or f'ok {p}')
 "
 ```
+
+### ATOM and AToMesh
+
+[`atom/atomesh-disagg.yaml`](atom/atomesh-disagg.yaml) launches native ATOM prefill
+and decode workers with the AToMesh router. Each logical worker fits on one node;
+the cluster configuration selects ROCm device visibility.

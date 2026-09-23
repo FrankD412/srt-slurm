@@ -51,7 +51,7 @@ class MooncakeMasterService(ServiceKind):
     default_readiness_ports = (MOONCAKE_MASTER_PORT, MOONCAKE_HTTP_METADATA_PORT, MOONCAKE_METRICS_PORT)
     supports_dedicated = True
     supports_external = True
-    option_keys = ("store_config",)  # vLLM: rendered into MOONCAKE_CONFIG_PATH for the workers
+    option_keys = ("store_config", "device_names_by_gpu")  # vLLM: worker-side Mooncake JSON configuration
 
     def build_command(self, service: ServiceConfig, ctx: ServiceLaunchContext) -> list[str]:
         if service.command is not None:
@@ -59,5 +59,5 @@ class MooncakeMasterService(ServiceKind):
         return mooncake_master_command(service.args)
 
     def container_fallback(self, config: SrtConfig) -> str | None:
-        mooncake_cfg = getattr(config.backend, "mooncake_kv_store", None)
-        return getattr(mooncake_cfg, "container", None)
+        mooncake_cfg = config.backend.mooncake_kv_store
+        return mooncake_cfg.container if mooncake_cfg is not None else None

@@ -8,16 +8,20 @@ This module provides the single source of truth for all runtime values,
 replacing scattered bash variables and Jinja templating with typed Python.
 """
 
+import logging
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from srtctl.core.power.contract import CONTAINER_LOG_DIR
 from srtctl.ports import FRONTEND_PUBLIC_PORT
 
 from .config import get_srtslurm_setting
 from .slurm import get_hostname_ip, get_slurm_het_nodelists, get_slurm_nodelist
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from srtctl.core.schema import DynamoConfig, SrtConfig
@@ -191,6 +195,54 @@ class Nodes:
         return cls(head=head, bench=bench, infra=infra, worker=worker, pools=carved)
 
     @staticmethod
+    def planned_role_indices(
+        total_nodes: int,
+        *,
+        frontend_dedicated_node: bool = False,
+        client_dedicated_node: bool = False,
+        etcd_nats_dedicated_node: bool = False,
+        colocate_dedicated_nodes: bool = True,
+    ) -> tuple[int, int]:
+        """Where ``from_slurm`` will put the head (frontend) and the benchmark client.
+
+        Positions in the allocation's nodelist, before the job exists: the same carving
+        rules as :meth:`from_slurm`, applied to indices instead of hostnames, so a
+        launcher that submits a rendered script can tell its own client where the
+        endpoint is. Pools are not modelled (the head is the first engine node either
+        way). Returns ``(head_index, client_index)``.
+        """
+        dedicated_roles = [
+            role
+            for role, wanted in (
+                ("infra", etcd_nats_dedicated_node),
+                ("frontend", frontend_dedicated_node),
+                ("client", client_dedicated_node),
+            )
+            if wanted
+        ]
+        if not dedicated_roles:
+            return 0, 0
+        num_reserved = 1 if colocate_dedicated_nodes else len(dedicated_roles)
+        if total_nodes <= num_reserved:
+            raise ValueError(
+                f"dedicated node(s) for {'+'.join(dedicated_roles)} require at least {num_reserved + 1} nodes"
+            )
+        last = total_nodes - 1
+        has_client = "client" in dedicated_roles
+        if colocate_dedicated_nodes:
+            shared = last if has_client else 0
+            reserved = {role: shared for role in dedicated_roles}
+            first_worker = 0 if has_client else 1
+        else:
+            front_roles = [role for role in dedicated_roles if role != "client"]
+            reserved = dict(zip(front_roles, range(len(front_roles)), strict=False))
+            if has_client:
+                reserved["client"] = last
+            first_worker = len(front_roles)
+        head = reserved.get("frontend", first_worker)
+        return head, reserved.get("client", head)
+
+    @staticmethod
     def _carve_pools(
         remaining: tuple[str, ...], engine_nodes: int | None, pools: Sequence[tuple[str, int]]
     ) -> tuple[tuple[str, ...], dict[str, tuple[str, ...]]]:
@@ -291,6 +343,7 @@ class RuntimeContext:
     # HuggingFace model support - True if model.path was "hf:model/name"
     is_hf_model: bool = False
     gpu_type: str | None = None
+    visible_devices_env: str = "CUDA_VISIBLE_DEVICES"
 
     # Container mounts: host_path -> container_path
     container_mounts: dict[Path, Path] = field(default_factory=dict)
@@ -311,6 +364,19 @@ class RuntimeContext:
     request_plane: str = "tcp"
     # Full Dynamo configuration for native sidecar launch settings.
     dynamo: "DynamoConfig | None" = None
+
+    @property
+    def container_log_dir(self) -> Path:
+        """``log_dir`` as processes inside the container see it.
+
+        ``from_config`` mounts the run's log directory at ``CONTAINER_LOG_DIR``;
+        this follows that mount so a remapped log mount needs no other change.
+        Every path handed to a containerized process (config dumps, profiler
+        output, fingerprints, benchmark artifacts) is built from this, never
+        from the host ``log_dir``, which is not visible in the container on
+        every cluster.
+        """
+        return self.container_mounts.get(self.log_dir, Path(CONTAINER_LOG_DIR))
 
     @classmethod
     def from_config(
@@ -342,9 +408,12 @@ class RuntimeContext:
         # Compute run_name
         run_name = f"{config.name}_{job_id}"
 
-        # Resolve node IPs
-        head_node_ip = get_hostname_ip(nodes.head)
-        infra_node_ip = get_hostname_ip(nodes.infra)
+        # Resolve node IPs on the cluster-selected fabric. Some systems expose
+        # a public default route and a separate private control/data plane; the
+        # latter is what containers on peer Slurm nodes can reliably reach.
+        network_interface = get_srtslurm_setting("network_interface", "eth0")
+        head_node_ip = get_hostname_ip(nodes.head, network_interface)
+        infra_node_ip = get_hostname_ip(nodes.infra, network_interface)
 
         # Compute log directory using FormattablePath or default logic
         # Check for SRTCTL_OUTPUT_DIR from sbatch script first (ensures consistency)
@@ -395,7 +464,7 @@ class RuntimeContext:
 
         # Build container mounts
         container_mounts: dict[Path, Path] = {
-            log_dir: Path("/logs"),
+            log_dir: Path(CONTAINER_LOG_DIR),
         }
         # Only mount local model paths - HF models are downloaded at runtime
         if not is_hf_model:
@@ -420,6 +489,13 @@ class RuntimeContext:
             if configs_dir.exists():
                 container_mounts[configs_dir.resolve()] = Path("/configs")
 
+            # Repo-root benchmarks/: launchers and clients that are not core (RL frameworks
+            # under benchmarks/rl/). Recipes run them as custom benchmark commands by their
+            # container path, /benchmarks/<folder>/launch.sh.
+            benchmarks_dir = Path(source_dir) / "benchmarks"
+            if benchmarks_dir.exists():
+                container_mounts[benchmarks_dir.resolve()] = Path("/benchmarks")
+
             wheelhouse_dir = Path(source_dir) / "wheelhouse" / "dynamo"
             if wheelhouse_dir.exists():
                 container_mounts[wheelhouse_dir.resolve()] = Path("/srtctl-wheels")
@@ -441,12 +517,24 @@ class RuntimeContext:
                 expanded_host = os.path.expandvars(host_path)
                 container_mounts[Path(expanded_host).resolve()] = Path(container_path)
 
-        # Add extra mounts from config
+        # Add extra mounts from config. Sources are resolved, so two entries can collapse
+        # into one (on clusters where e.g. /lustre is a symlink onto /scratch) and a later
+        # entry silently replaces an earlier one's container path. Say so instead.
         if config.extra_mount:
             for mount_spec in config.extra_mount:
                 host_path, container_path = mount_spec.split(":", 1)
                 expanded_host = os.path.expandvars(host_path)
-                container_mounts[Path(expanded_host).expanduser().resolve()] = Path(container_path)
+                resolved_host = Path(expanded_host).expanduser().resolve()
+                previous = container_mounts.get(resolved_host)
+                if previous is not None and previous != Path(container_path):
+                    logger.warning(
+                        "extra_mount %r resolves to %s, already mounted at %s; the container will see it at %s only",
+                        mount_spec,
+                        resolved_host,
+                        previous,
+                        container_path,
+                    )
+                container_mounts[resolved_host] = Path(container_path)
 
         # Mount InferenceX workspace if available (for lm-eval support).
         # Skip exists() check: the orchestrator runs on the SLURM head node
@@ -462,6 +550,7 @@ class RuntimeContext:
         environment = config.dynamo.get_wheel_environment()
         environment.update(config.environment)
 
+        visible_devices_env = get_srtslurm_setting("visible_devices_env", "CUDA_VISIBLE_DEVICES")
         temp_context = cls(
             job_id=job_id,
             run_name=run_name,
@@ -473,7 +562,8 @@ class RuntimeContext:
             container_image=container_image,
             gpus_per_node=config.resources.gpus_per_node,
             gpu_type=config.resources.gpu_type,
-            network_interface=get_srtslurm_setting("network_interface", "eth0"),
+            network_interface=network_interface,
+            visible_devices_env=visible_devices_env,
             container_mounts={},
             srun_options=dict(config.srun_options),
             environment=environment,
@@ -499,7 +589,8 @@ class RuntimeContext:
             container_image=container_image,
             gpus_per_node=config.resources.gpus_per_node,
             gpu_type=config.resources.gpu_type,
-            network_interface=get_srtslurm_setting("network_interface", "eth0"),
+            network_interface=network_interface,
+            visible_devices_env=visible_devices_env,
             container_mounts=container_mounts,
             srun_options=dict(config.srun_options),
             environment=environment,
