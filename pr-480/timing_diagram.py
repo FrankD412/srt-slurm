@@ -450,14 +450,14 @@ def build_loss():
         )
         body.append(p)
         p, y = panel(
-            "E2 · What the slot grid reads — the same events bucketed onto one global grid, tallied per host",
-            "One anchor and one interval for the session (the collector's shared _collector_grid). Slot k starts at the same instant on every host; each host is then classified per slot: ok / late / missed / unaccounted.",
+            "E2 · What a slot-count check reads — the same events counted against the cadence, per host, inside the window",
+            "expected = floor(window / interval), the same for every host; rows = this host's samples inside the window. Loss = (expected − rows) / expected. No grid anchor needed — only the window length.",
             ev, missed, y,
             [
                 f"Inside the window every host is expected on all {expected} slots. node-a: {tally['node-a'][0]}/{expected} ok. node-c: {tally['node-c'][0]}/{expected} ok — its late start is outside the window and doesn't count against it.",
                 f"node-b: {tally['node-b'][0]} rows + {tally['node-b'][1]} missed (sample_schedule_overrun) = {expected}. Loss = {tally['node-b'][1]}/{expected} = {tally['node-b'][1] / expected:.0%} in this window (1 slot in 6 at exactly 1.2×; the live probe on 68fe74ec measured 23 % with real HTTP overhead), with every individual gap still ≤ {b_gap:.1f} s. This is the number the timestamp checks cannot see.",
-                f"Grey = unaccounted: slots with no row and no missed range (node-c slots 0–{c_unacc_all - 1}: the collector never got a successful poll, so nothing was recorded). Over the whole session that would read as loss; bounded to the window it doesn't.",
-                "A cumulative check is (expected − rows) / expected per host over the window, against the same 5 % — cadence-relative by construction, and independent of which gaps happen to straddle the budget.",
+                f"Grey = unaccounted: slots with no row and no missed range (node-c slots 0–{c_unacc_all - 1}: the exporter wasn't up yet). Over the whole session that would read as loss; bounded to the window it doesn't — which is why expected must come from the window, not the session.",
+                "The check is (expected − rows) / expected per device over the window, against the same 5 % — cadence-relative by construction, and independent of which gaps happen to straddle the budget.",
             ],
             hosts=hosts,
             window=(W0, W1),

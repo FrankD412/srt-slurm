@@ -179,9 +179,9 @@
 <text x="250" y="624" class="note">node-c&#x27;s exporter came up at slot 3. Its first row is at 3.1 s; the boundary check only needs one row before the</text>
 <text x="250" y="653" class="note">window start, so it passes too.</text>
 <text x="250" y="682" class="note">Both hosts pass with room to spare. The validator has no number that says how many samples node-b should have</text>
-<text x="250" y="711" class="note">produced.</text><text x="250" y="796" class="title">E2 · What the slot grid reads — the same events bucketed onto one global grid, tallied per host</text>
-<text x="250" y="828" class="sub">One anchor and one interval for the session (the collector&#x27;s shared _collector_grid). Slot k starts at the same</text>
-<text x="250" y="856" class="sub">instant on every host; each host is then classified per slot: ok / late / missed / unaccounted.</text>
+<text x="250" y="711" class="note">produced.</text><text x="250" y="796" class="title">E2 · What a slot-count check reads — the same events counted against the cadence, per host, inside the window</text>
+<text x="250" y="828" class="sub">expected = floor(window / interval), the same for every host; rows = this host&#x27;s samples inside the window. Loss</text>
+<text x="250" y="856" class="sub">= (expected − rows) / expected. No grid anchor needed — only the window length.</text>
 <rect x="694.0" y="916" width="888.0" height="272" class="window"/>
 <text x="700.0" y="910" class="window-lbl">measurement window [4 s, 12 s) → 8 expected slots per host</text>
 <line x1="250" y1="920" x2="250" y2="1184" class="grid"/>
@@ -346,10 +346,10 @@
 <text x="250" y="1378" class="note">node-b: 7 rows + 1 missed (sample_schedule_overrun) = 8. Loss = 1/8 = 12% in this window (1 slot in 6 at exactly</text>
 <text x="250" y="1407" class="note">1.2×; the live probe on 68fe74ec measured 23 % with real HTTP overhead), with every individual gap still ≤ 1.2</text>
 <text x="250" y="1436" class="note">s. This is the number the timestamp checks cannot see.</text>
-<text x="250" y="1465" class="note">Grey = unaccounted: slots with no row and no missed range (node-c slots 0–2: the collector never got a</text>
-<text x="250" y="1494" class="note">successful poll, so nothing was recorded). Over the whole session that would read as loss; bounded to the window</text>
-<text x="250" y="1523" class="note">it doesn&#x27;t.</text>
-<text x="250" y="1552" class="note">A cumulative check is (expected − rows) / expected per host over the window, against the same 5 % — cadence-</text>
-<text x="250" y="1581" class="note">relative by construction, and independent of which gaps happen to straddle the budget.</text>
+<text x="250" y="1465" class="note">Grey = unaccounted: slots with no row and no missed range (node-c slots 0–2: the exporter wasn&#x27;t up yet). Over</text>
+<text x="250" y="1494" class="note">the whole session that would read as loss; bounded to the window it doesn&#x27;t — which is why expected must come</text>
+<text x="250" y="1523" class="note">from the window, not the session.</text>
+<text x="250" y="1552" class="note">The check is (expected − rows) / expected per device over the window, against the same 5 % — cadence-relative by</text>
+<text x="250" y="1581" class="note">construction, and independent of which gaps happen to straddle the budget.</text>
 <g transform="translate(250,1634)"><rect x="0" y="0" width="74" height="24" rx="5" class="req"/><text x="88" y="20" class="note">request in flight; row timestamp = midpoint (┃)</text><rect x="0" y="40" width="74" height="24" rx="5" class="req-fail"/><text x="88" y="60" class="note">request failed / timed out — no row (endpoint_timeout)</text><rect x="0" y="80" width="74" height="24" class="missed-overrun"/><text x="88" y="100" class="note">slot forfeited — sample_schedule_overrun</text><rect x="0" y="120" width="74" height="24" class="unacc"/><text x="88" y="140" class="note">unaccounted — no row and no missed range for this (host, slot)</text><rect x="0" y="160" width="74" height="24" class="window"/><text x="88" y="180" class="note">measurement window — the only slots a verdict should count</text></g>
 </svg>
