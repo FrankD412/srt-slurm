@@ -67,7 +67,12 @@ interval plus twice the request timeout (the connect and read timeout phases).
 For long measurement windows it tolerates a bounded overrun up to 10 seconds
 when one gap covers at most 0.5% and all gaps over that configured budget cover
 at most 5% of the window. Missing brackets, larger gaps, and sustained data
-loss still fail `sample_gap_exceeded`. Telemetry stays disabled by default and
+loss still fail `sample_gap_exceeded`. Independently of gap shape, every device
+must also deliver at least 95% of the samples its cadence schedules inside the
+window (`floor(duration / interval)`), or the window fails
+`sample_loss_exceeded`; this catches an endpoint that is steadily a little
+slower than its cadence, whose gaps all sit under the normal budget. Telemetry
+stays disabled by default and
 existing `provider: scraper` recipes are unchanged.
 The collector join timeout must exceed two complete request-cycle budgets
 (`2 * (2 * request_timeout_seconds + 1 second)`), covering a scrape already in

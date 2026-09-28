@@ -118,6 +118,11 @@ MAX_POWER_REPORT_BOUNDARY_GAP_SECONDS = 3.0
 MAX_TOLERATED_SAMPLE_GAP_SECONDS = 10.0
 MAX_TOLERATED_SAMPLE_GAP_WINDOW_FRACTION = 0.005
 MAX_LONG_SAMPLE_GAP_WINDOW_FRACTION = 0.05
+# Independently of gap shape, every device must deliver at least 95% of the
+# samples the configured cadence schedules inside the window. Gaps at or
+# below the normal budget never enter the gap checks, so a steadily slow
+# endpoint could otherwise lose a large share of its slots unnoticed.
+MAX_SAMPLE_LOSS_WINDOW_FRACTION = 0.05
 COLLECT_CYCLE_TIMEOUT_GRACE_SECONDS = 1.0
 
 BENCHMARK_TYPE_SA_BENCH = "sa-bench"
@@ -170,6 +175,7 @@ class Reason:
     MEASUREMENT_WINDOW_CLOCK_MISMATCH = "measurement_window_clock_mismatch"
     MEASUREMENT_WINDOW_NOT_BRACKETED = "measurement_window_not_bracketed"
     SAMPLE_GAP_EXCEEDED = "sample_gap_exceeded"
+    SAMPLE_LOSS_EXCEEDED = "sample_loss_exceeded"
 
 
 ALL_REASON_CODES: frozenset[str] = frozenset(

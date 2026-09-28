@@ -13,6 +13,7 @@ from __future__ import annotations
 import itertools
 import json
 import logging
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,7 @@ from pathlib import Path
 from srtctl.core.power.contract import (
     CLOCK_SOURCE,
     MAX_LONG_SAMPLE_GAP_WINDOW_FRACTION,
+    MAX_SAMPLE_LOSS_WINDOW_FRACTION,
     MAX_TOLERATED_SAMPLE_GAP_SECONDS,
     MAX_TOLERATED_SAMPLE_GAP_WINDOW_FRACTION,
     SCHEMA_VERSION,
@@ -361,7 +363,7 @@ def _check_coverage(
     sample_interval_seconds: float,
     request_timeout_seconds: float,
 ) -> tuple[dict[str, float], list[str]]:
-    """Every expected device must bracket the window with small enough gaps."""
+    """Every expected device must bracket the window, keep gaps bounded, and deliver its cadence."""
     by_key = {device.key: device for device in observed_devices}
     gaps: dict[str, float] = {}
     reasons: list[str] = []
@@ -390,8 +392,42 @@ def _check_coverage(
             request_timeout_seconds=request_timeout_seconds,
         ):
             reasons.append(Reason.SAMPLE_GAP_EXCEEDED)
+        if not _sample_loss_within_policy(
+            sequence,
+            start=start,
+            end=end,
+            sample_interval_seconds=sample_interval_seconds,
+        ):
+            reasons.append(Reason.SAMPLE_LOSS_EXCEEDED)
 
     return gaps, reasons
+
+
+def _sample_loss_within_policy(
+    sequence: Sequence[float],
+    *,
+    start: float,
+    end: float,
+    sample_interval_seconds: float,
+) -> bool:
+    """The device must deliver most of the samples its cadence schedules inside the window.
+
+    The gap checks only see gaps above the normal budget, so an endpoint that
+    is steadily a little slower than its cadence (every gap under budget) can
+    lose a large share of its slots without either of them firing. Counting
+    in-window samples against ``floor(duration / interval)`` catches that
+    regardless of gap shape and needs no knowledge of where slot zero sits.
+    """
+    if sample_interval_seconds <= 0:
+        return True
+    expected = math.floor((end - start) / sample_interval_seconds)
+    if expected <= 0:
+        return True
+    delivered = sum(1 for moment in sequence if start <= moment < end)
+    # One sample of slack absorbs the window's phase against the cadence; the
+    # fraction governs once the window holds more than 1/fraction slots.
+    allowed_missing = max(1, math.floor(expected * MAX_SAMPLE_LOSS_WINDOW_FRACTION))
+    return expected - delivered <= allowed_missing
 
 
 def _sample_gaps_within_policy(

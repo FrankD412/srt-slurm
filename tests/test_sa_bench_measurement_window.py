@@ -355,9 +355,10 @@ class TestCoverageValidation:
         assert Reason.MEASUREMENT_WINDOW_NOT_BRACKETED in rows[0].reason_codes
 
     def test_gap_exactly_at_the_threshold_passes(self, logs):
-        start, end = self._completed(logs)
+        # A 1 s stream with one 3 s hole: exactly the normal budget (interval + 2 * timeout).
+        start, end = self._completed(logs, end=1100.0, duration=100.0)
 
-        rows = _validate(logs, _samples(start, end, step=3.0))
+        rows = _validate(logs, _samples_with_omissions(start, end, lambda timestamp: 1050 <= timestamp <= 1051))
 
         assert rows[0].power_coverage_valid is True
 
@@ -370,8 +371,9 @@ class TestCoverageValidation:
         assert Reason.SAMPLE_GAP_EXCEEDED in rows[0].reason_codes
 
     def test_gap_budget_uses_the_recorded_cadence_and_timeout(self, logs):
-        start, end = self._completed(logs)
-        observed = _samples(start, end, step=4.0)
+        # A 1 s stream with one 4 s hole: over budget at a 1 s timeout (3 s), at budget at 1.5 s (4 s).
+        start, end = self._completed(logs, end=1100.0, duration=100.0)
+        observed = _samples_with_omissions(start, end, lambda timestamp: 1050 <= timestamp <= 1052)
 
         strict = _validate(
             logs,

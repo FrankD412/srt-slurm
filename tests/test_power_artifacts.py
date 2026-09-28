@@ -1037,6 +1037,7 @@ class TestMeasurementWindowArtifacts:
         assert row.power_coverage_valid is False
         assert row.reason_codes == (
             Reason.SAMPLE_GAP_EXCEEDED,
+            Reason.SAMPLE_LOSS_EXCEEDED,  # no sample inside the 4 s window at all
             Reason.MEASUREMENT_WINDOW_NOT_BRACKETED,
         )
         assert row.per_device_max_sample_gap_seconds == {"node-a/GPU-a": 6.0}
@@ -1063,6 +1064,93 @@ class TestMeasurementWindowArtifacts:
         assert row.power_coverage_valid is True
         assert row.reason_codes == ()
         assert row.per_device_max_sample_gap_seconds == {"node-a/GPU-a": 2.0}
+
+    @staticmethod
+    def _device_sampling_every(step, *, start, end, margin=2.0):
+        """One device sampled at a fixed cadence that brackets the window on both sides."""
+        times = []
+        t = start - margin
+        while t <= end + margin:
+            times.append(round(t, 6))
+            t += step
+        return [
+            ObservedDevice(
+                hostname="node-a",
+                gpu_index=0,
+                gpu_uuids=("GPU-a",),
+                first_sample_time_unix=times[0],
+                last_sample_time_unix=times[-1],
+                sample_times=tuple(times),
+            )
+        ]
+
+    def test_steady_sub_budget_slot_loss_fails_coverage(self, tmp_path):
+        """A host that is steadily a little slow must not read as 100% coverage.
+
+        At 1.2x the interval every gap is 1.2 s: under the 3 s normal budget
+        (interval + 2 * timeout), so neither gap check sees anything -- yet the
+        device delivered only 5 of every 6 configured slots (17% loss). The
+        slot-count check compares rows in the window against the configured
+        cadence and fails it.
+        """
+        self._write_completed_window(tmp_path, start=1000.0, end=1600.0, duration=600.0)
+        observed = self._device_sampling_every(1.2, start=1000.0, end=1600.0)
+
+        row, _ = self._validate(tmp_path, expected_device_keys={("node-a", 0)}, observed_devices=observed)
+
+        assert row.power_coverage_valid is False
+        assert row.reason_codes == (Reason.SAMPLE_LOSS_EXCEEDED,)
+        # The gap checks were right not to fire: the largest gap is under budget.
+        assert row.per_device_max_sample_gap_seconds == {"node-a/GPU-a": pytest.approx(1.2)}
+
+    def test_loss_within_the_slot_budget_passes_coverage(self, tmp_path):
+        """The InferenceX motivating runs lost 2-3.5% of slots; those must stay valid.
+
+        A device that drops one sample in 40 (2.5% loss) with every remaining
+        gap at 2 s -- under the normal budget -- passes both the gap checks and
+        the slot-count check.
+        """
+        self._write_completed_window(tmp_path, start=1000.0, end=1600.0, duration=600.0)
+        device = self._device_sampling_every(1.0, start=1000.0, end=1600.0)[0]
+        kept = tuple(t for i, t in enumerate(device.sample_times) if i % 40 != 20)
+        observed = [
+            ObservedDevice(
+                hostname=device.hostname,
+                gpu_index=device.gpu_index,
+                gpu_uuids=device.gpu_uuids,
+                first_sample_time_unix=kept[0],
+                last_sample_time_unix=kept[-1],
+                sample_times=kept,
+            )
+        ]
+
+        row, _ = self._validate(tmp_path, expected_device_keys={("node-a", 0)}, observed_devices=observed)
+
+        assert row.power_coverage_valid is True
+        assert row.reason_codes == ()
+
+    def test_slot_loss_is_measured_per_device(self, tmp_path):
+        """One steadily slow device fails the window; its healthy peer does not mask it."""
+        self._write_completed_window(tmp_path, start=1000.0, end=1600.0, duration=600.0)
+        healthy = self._device_sampling_every(1.0, start=1000.0, end=1600.0)[0]
+        slow = self._device_sampling_every(1.3, start=1000.0, end=1600.0)[0]
+        slow = ObservedDevice(
+            hostname="node-b",
+            gpu_index=0,
+            gpu_uuids=("GPU-b",),
+            first_sample_time_unix=slow.first_sample_time_unix,
+            last_sample_time_unix=slow.last_sample_time_unix,
+            sample_times=slow.sample_times,
+        )
+
+        row, _ = self._validate(
+            tmp_path,
+            expected_device_keys={("node-a", 0), ("node-b", 0)},
+            observed_devices=[healthy, slow],
+        )
+
+        assert row.power_coverage_valid is False
+        assert row.reason_codes == (Reason.SAMPLE_LOSS_EXCEEDED,)
 
     def test_three_duplicate_windows_are_each_recorded_once(self, tmp_path):
         windows_dir = tmp_path / WINDOWS_DIRNAME
