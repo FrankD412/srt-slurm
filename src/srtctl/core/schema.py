@@ -1606,6 +1606,13 @@ class TelemetryConfig:
     collect_interval_ms: int = 1000
     storage_subdir: str = "power"
     required: bool = False
+    # Before any server starts, verify every allocation node reports an
+    # NTP-synchronised system clock. Sample timestamps (orchestrator host) and
+    # window boundaries (benchmark client host) are compared directly, so an
+    # unsynchronised node silently misaligns the measurement. Fails the job
+    # when ``required`` is true, warns otherwise. Set false on clusters where
+    # timedatectl/chronyc/ntpq are unavailable to unprivileged users.
+    clock_sync_check: bool = True
     startup_timeout_seconds: float = 30.0
     request_timeout_seconds: float = 2.0
     # None derives a safe shutdown budget from request_timeout_seconds.
