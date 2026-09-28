@@ -31,7 +31,7 @@ def sim_old(lat, t_end):
     return ev, []
 
 
-def sim_new(lat_fn, t_end, *, late_fire=False, t_stop=None, clock_bracket=False, crashed=()):
+def sim_new(lat_fn, t_end, *, late_fire=False, t_stop=None, clock_bracket=False, crashed=(), first_slot=None):
     """Per-endpoint slot grid.
 
     late_fire=False: PR #480 -- any overrun skips int(overrun/interval)+1 slots (slot fires only at its grid time).
@@ -41,13 +41,16 @@ def sim_new(lat_fn, t_end, *, late_fire=False, t_stop=None, clock_bracket=False,
                      True  -- prototype: bracket at B = floor(t_stop/interval)+1, filling counter..B-1 as a missed range.
     crashed        : hosts whose thread raised at t_stop -- they set _stop but take no bracket poll themselves.
                      Their last event is marked crash=True.
+    first_slot     : {host: seq} -- the host's exporter only answers from this slot on; earlier slots produce
+                     no row and no missed range (the collector never saw a poll succeed), i.e. `unaccounted`.
     """
     ev = {}
     missed = []
+    first_slot = first_slot or {}
     bracket_seq = int(t_stop / INTERVAL) + 1 if (t_stop is not None and clock_bracket) else None
     for h, fn in lat_fn.items():
-        seq = 0
-        nxt = 0.0
+        seq = first_slot.get(h, 0)
+        nxt = seq * INTERVAL
         ev[h] = []
         busy_until = 0.0
         while nxt < t_end:
@@ -116,18 +119,26 @@ def wrap(lines, width=WRAP):
     return out
 
 
-def panel(title, subtitle, ev, missed, y0, notes, hosts=("node-a", "node-b"), t_stop=None, stop_label=None):
+def panel(
+    title, subtitle, ev, missed, y0, notes, hosts=("node-a", "node-b"), t_stop=None, stop_label=None,
+    window=None, lane_sub=None, show_unaccounted=False, gap_host=None,
+):
     k = LANE_H / 66  # vertical scale relative to the original 66 px lane
     lh = round(21 * k)  # line height for sub/note text
     out = [f'<text x="{X0}" y="{y0 + round(24 * k)}" class="title">{html.escape(title)}</text>']
     sub = wrap([subtitle])
     for i, s in enumerate(sub):
         out.append(f'<text x="{X0}" y="{y0 + round(48 * k) + i * lh}" class="sub">{html.escape(s)}</text>')
-    gy = y0 + round(70 * k) + lh * (len(sub) - 1) + (round(26 * k) if t_stop is not None else 0)
+    gy = y0 + round(70 * k) + lh * (len(sub) - 1) + (round(26 * k) if (t_stop is not None or window) else 0)
     lane_h = LANE_H
     H = lane_h * len(hosts)
     gap_y = gy + H + round(14 * k)
     tick_y = gy + H + round(50 * k)
+    if window:
+        w0, w1 = window
+        xw0, xw1 = X0 + w0 * PX, X0 + min(w1, T_END) * PX
+        out.append(f'<rect x="{xw0:.1f}" y="{gy - 4}" width="{xw1 - xw0:.1f}" height="{H + 8}" class="window"/>')
+        out.append(f'<text x="{xw0 + 6:.1f}" y="{gy - 10}" class="window-lbl">measurement window [{w0:g} s, {w1:g} s) → {int(w1 - w0)} expected slots per host</text>')
     for kk in range(int(T_END) + 1):
         x = X0 + kk * PX
         out.append(f'<line x1="{x}" y1="{gy}" x2="{x}" y2="{gy + H}" class="grid"/>')
@@ -143,7 +154,18 @@ def panel(title, subtitle, ev, missed, y0, notes, hosts=("node-a", "node-b"), t_
         out.append(f'<text x="{xs + 6:.1f}" y="{gy - 10}" class="stop-lbl">{html.escape(label)}</text>')
     for i, h in enumerate(hosts):
         ly = gy + i * lane_h
-        out.append(f'<text x="{X0 - 14}" y="{ly + lane_h / 2 + 6}" class="host" text-anchor="end">{h}</text>')
+        host_y = ly + lane_h / 2 + 6 - (round(9 * k) if lane_sub and h in lane_sub else 0)
+        out.append(f'<text x="{X0 - 14}" y="{host_y}" class="host" text-anchor="end">{h}</text>')
+        if lane_sub and h in lane_sub:
+            out.append(f'<text x="{X0 - 14}" y="{host_y + round(22 * k)}" class="host-sub" text-anchor="end">{html.escape(lane_sub[h])}</text>')
+        if show_unaccounted:
+            have = {e["seq"] for e in ev[h]} | {s for hh, a, b, r in missed if hh == h for s in range(a, b + 1)}
+            for s in range(int(T_END) + 1):
+                if s in have or X0 + s * PX >= X0 + T_END * PX:
+                    continue
+                xs_ = X0 + s * PX
+                out.append(f'<rect x="{xs_ + 1}" y="{ly + round(21 * k)}" width="{PX - 2}" height="{lane_h - round(30 * k)}" class="unacc"/>')
+                out.append(f'<text x="{xs_ + PX / 2}" y="{ly + lane_h / 2 + round(10 * k)}" class="miss-lbl" text-anchor="middle">unaccounted</text>')
         for e in ev[h]:
             x1 = X0 + e["start"] * PX
             x2 = X0 + min(e["end"], T_END) * PX
@@ -181,7 +203,8 @@ def panel(title, subtitle, ev, missed, y0, notes, hosts=("node-a", "node-b"), t_
                     f'<text x="{(xa + xb) / 2:.1f}" y="{ly + lane_h / 2 + round(10 * k)}" class="miss-lbl" text-anchor="middle">'
                     f"{span} · missed</text>"
                 )
-    rows = sorted((e["start"] + e["end"]) / 2 for e in ev[hosts[-1]] if e["row"] and e["end"] <= T_END and not e.get("crash"))
+    gh_ = gap_host or hosts[-1]
+    rows = sorted((e["start"] + e["end"]) / 2 for e in ev[gh_] if e["row"] and e["end"] <= T_END and not e.get("crash"))
     if len(rows) > 1:
         g, a, b = max((b - a, a, b) for a, b in zip(rows, rows[1:]))
         out.append(
@@ -190,7 +213,7 @@ def panel(title, subtitle, ev, missed, y0, notes, hosts=("node-a", "node-b"), t_
         )
         out.append(
             f'<text x="{X0 + (a + b) / 2 * PX:.1f}" y="{gap_y + round(19 * k)}" class="gap-lbl" text-anchor="middle">'
-            f"largest {hosts[-1]} row gap = {g:.1f} s (row timestamps = request midpoints)</text>"
+            f"largest {gh_} row gap = {g:.1f} s (row timestamps = request midpoints)</text>"
         )
     ny = tick_y + round(52 * k)
     for n in wrap(notes):
@@ -218,6 +241,10 @@ STYLE = """
  .stop-lbl{font-size:19px;fill:#ff6b6b;font-weight:600}
  .bracket{stroke:#7ee787;stroke-width:3;stroke-opacity:1}
  .crash{fill:#ff6b6b;fill-opacity:.55;stroke:#ff6b6b;stroke-width:3;stroke-opacity:1}
+ .window{fill:#7ee787;fill-opacity:.07;stroke:#7ee787;stroke-width:2;stroke-dasharray:12 6}
+ .window-lbl{font-size:19px;fill:#7ee787;font-weight:600}
+ .unacc{fill:#8b949e;fill-opacity:.12;stroke:#8b949e;stroke-width:2;stroke-dasharray:3 4}
+ .host-sub{font-size:17px;fill:var(--muted-foreground)}
 """
 
 
@@ -294,17 +321,21 @@ def build():
     return _wrap_svg(body, y, bracket_legend=True)
 
 
-def _wrap_svg(body, y, *, bracket_legend: bool, crash_legend: bool = False) -> str:
+def _wrap_svg(body, y, *, bracket_legend: bool, crash_legend: bool = False, window_legend: bool = False) -> str:
     rows = [
         ('<rect x="0" y="{y}" width="74" height="24" rx="5" class="req"/>', "request in flight; row timestamp = midpoint (┃)"),
         ('<rect x="0" y="{y}" width="74" height="24" rx="5" class="req-fail"/>', "request failed / timed out — no row (endpoint_timeout)"),
         ('<rect x="0" y="{y}" width="74" height="24" class="missed-overrun"/>', "slot forfeited — sample_schedule_overrun"),
     ]
+    if window_legend:
+        rows.append(('<rect x="0" y="{y}" width="74" height="24" class="unacc"/>', "unaccounted — no row and no missed range for this (host, slot)"))
+        rows.append(('<rect x="0" y="{y}" width="74" height="24" class="window"/>', "measurement window — the only slots a verdict should count"))
     if bracket_legend:
         rows.append(('<rect x="0" y="{y}" width="74" height="24" rx="5" class="req bracket"/>', 'bracket poll after stop (seq marked "(B)")'))
     if crash_legend:
         rows.append(('<rect x="0" y="{y}" width="74" height="24" rx="5" class="req crash"/>', "request whose thread raised — sets _stop, no bracket poll"))
-    rows.append(('<line x1="0" y1="{yl}" x2="74" y2="{yl}" class="stop"/>', "_stop set"))
+    if bracket_legend or crash_legend:
+        rows.append(('<line x1="0" y1="{yl}" x2="74" y2="{yl}" class="stop"/>', "_stop set"))
     parts = []
     for i, (shape, text) in enumerate(rows):
         yy = i * 40
@@ -374,12 +405,78 @@ def build_crash():
         T_END, PX = saved
 
 
+def build_loss():
+    """Same events, two readers: the timestamp-gap validator vs the slot grid. Steady 1.2x host + late-start host."""
+    fast = lambda s: (0.2, True)  # noqa: E731
+    slow = lambda s: (1.2, True)  # noqa: E731
+    hosts = ("node-a", "node-b", "node-c")
+    W0, W1 = 4.0, 12.0  # measurement window; 8 expected slots per host
+    BUDGET = INTERVAL + 2 * 2.0  # normal_gap_budget at defaults: interval + 2*timeout = 5 s
+
+    global T_END, PX
+    saved = (T_END, PX)
+    T_END = 13.6
+    PX = int(saved[1] * saved[0] / T_END)
+    try:
+        ev, missed = sim_new(
+            {"node-a": fast, "node-b": slow, "node-c": fast}, T_END, late_fire=True, first_slot={"node-c": 3}
+        )
+
+        def in_window(h):
+            rows = [e for e in ev[h] if e["row"] and W0 <= e["start"] < W1]
+            miss = [s for hh, a, b, r in missed if hh == h for s in range(a, b + 1) if W0 <= s * INTERVAL < W1]
+            return len(rows), len(miss)
+
+        expected = int(W1 - W0)
+        tally = {h: in_window(h) for h in hosts}
+        b_rows = sorted((e["start"] + e["end"]) / 2 for e in ev["node-b"] if e["row"])
+        b_gap = max(y - x for x, y in zip(b_rows, b_rows[1:]))
+        c_unacc_all = 3  # slots 0-2 before node-c's first row, all outside the window
+
+        body = []
+        y = 10
+        p, y = panel(
+            "E1 · What the validator reads — row timestamps only",
+            f"Two checks: largest gap ≤ allowed (normal budget = interval + 2·timeout = {BUDGET:g} s); and gaps above the budget sum to ≤ 5 % of the window. Neither sees slots.",
+            ev, [], y,  # no missed boxes: the validator doesn't read missed_sample_ranges
+            [
+                f"node-b answers every request in 1.2 s. Its rows are {b_gap:.1f} s apart at worst — under the {BUDGET:g} s budget, so it never enters either sum. Verdict: coverage OK.",
+                "node-c's exporter came up at slot 3. Its first row is at 3.1 s; the boundary check only needs one row before the window start, so it passes too.",
+                "Both hosts pass with room to spare. The validator has no number that says how many samples node-b should have produced.",
+            ],
+            hosts=hosts,
+            window=(W0, W1),
+            gap_host="node-b",
+        )
+        body.append(p)
+        p, y = panel(
+            "E2 · What the slot grid reads — the same events bucketed onto one global grid, tallied per host",
+            "One anchor and one interval for the session (the collector's shared _collector_grid). Slot k starts at the same instant on every host; each host is then classified per slot: ok / late / missed / unaccounted.",
+            ev, missed, y,
+            [
+                f"Inside the window every host is expected on all {expected} slots. node-a: {tally['node-a'][0]}/{expected} ok. node-c: {tally['node-c'][0]}/{expected} ok — its late start is outside the window and doesn't count against it.",
+                f"node-b: {tally['node-b'][0]} rows + {tally['node-b'][1]} missed (sample_schedule_overrun) = {expected}. Loss = {tally['node-b'][1]}/{expected} = {tally['node-b'][1] / expected:.0%} in this window (1 slot in 6 at exactly 1.2×; the live probe on 68fe74ec measured 23 % with real HTTP overhead), with every individual gap still ≤ {b_gap:.1f} s. This is the number the timestamp checks cannot see.",
+                f"Grey = unaccounted: slots with no row and no missed range (node-c slots 0–{c_unacc_all - 1}: the collector never got a successful poll, so nothing was recorded). Over the whole session that would read as loss; bounded to the window it doesn't.",
+                "A cumulative check is (expected − rows) / expected per host over the window, against the same 5 % — cadence-relative by construction, and independent of which gaps happen to straddle the budget.",
+            ],
+            hosts=hosts,
+            window=(W0, W1),
+            lane_sub={h: f"{tally[h][0]}/{expected} ok · {tally[h][1]} missed" for h in hosts},
+            show_unaccounted=True,
+            gap_host="node-b",
+        )
+        body.append(p)
+        return _wrap_svg(body, y, bracket_legend=False, window_legend=True)
+    finally:
+        T_END, PX = saved
+
+
 if __name__ == "__main__":
     import re
 
     out = sys.argv[1]
     scenario = sys.argv[2] if len(sys.argv) > 2 else "main"
-    svg = {"main": build, "crash": build_crash}[scenario]()
+    svg = {"main": build, "crash": build_crash, "loss": build_loss}[scenario]()
     m = re.search(r'width="(\d+)" height="(\d+)"', svg)
     # Inline-preview variant: the SVG scales to the frame width and stays vector-crisp.
     fluid = svg.replace(f'width="{m.group(1)}" height="{m.group(2)}"', 'width="100%"', 1)

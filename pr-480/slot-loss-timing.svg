@@ -1,0 +1,355 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1839" height="1864" viewBox="0 0 1839 1864">
+<defs><marker id="tick" markerWidth="3" markerHeight="12" refX="1.5" refY="6" orient="auto"><line x1="1.5" y1="0" x2="1.5" y2="12" stroke="var(--foreground)" stroke-width="2"/></marker></defs>
+<style>svg{--foreground:#e6e6e6;--muted-foreground:#a0a4ab;--accent:#4c8dff;--border:#3a3f47}
+ text{fill:var(--foreground);font-size:23px;font-family:-apple-system,"SF Pro Text","Helvetica Neue",Helvetica,Arial,sans-serif}
+ .title{font-size:28px;font-weight:600}
+ .sub,.note,.tick{fill:var(--muted-foreground);font-size:21px}
+ .host{font-size:23px;font-weight:600}
+ .seq{font-size:17px;fill:var(--foreground)}
+ .grid{stroke:var(--border);stroke-width:2}
+ .req{fill:var(--accent);fill-opacity:.85;stroke:var(--foreground);stroke-opacity:.35}
+ .req-fail{fill:none;stroke:#e5484d;stroke-width:2.5;stroke-dasharray:8 5}
+ .row{stroke:var(--foreground);stroke-width:4}
+ .missed-overrun{fill:#e5a100;fill-opacity:.18;stroke:#e5a100;stroke-width:2;stroke-dasharray:5 5}
+ .missed-timeout{fill:#e5484d;fill-opacity:.15;stroke:#e5484d;stroke-width:2;stroke-dasharray:5 5}
+ .miss-lbl{font-size:17px;fill:#f0f0f0;paint-order:stroke;stroke:#0f1115;stroke-width:4px;stroke-linejoin:round}
+ .gap{stroke:var(--foreground);stroke-width:2}
+ .gap-lbl{font-size:20px}
+ .stop{stroke:#ff6b6b;stroke-width:3;stroke-dasharray:10 6}
+ .stop-lbl{font-size:19px;fill:#ff6b6b;font-weight:600}
+ .bracket{stroke:#7ee787;stroke-width:3;stroke-opacity:1}
+ .crash{fill:#ff6b6b;fill-opacity:.55;stroke:#ff6b6b;stroke-width:3;stroke-opacity:1}
+ .window{fill:#7ee787;fill-opacity:.07;stroke:#7ee787;stroke-width:2;stroke-dasharray:12 6}
+ .window-lbl{font-size:19px;fill:#7ee787;font-weight:600}
+ .unacc{fill:#8b949e;fill-opacity:.12;stroke:#8b949e;stroke-width:2;stroke-dasharray:3 4}
+ .host-sub{font-size:17px;fill:var(--muted-foreground)}
+</style>
+<rect width="100%" height="100%" fill="#0f1115"/>
+<text x="250" y="42" class="title">E1 · What the validator reads — row timestamps only</text>
+<text x="250" y="74" class="sub">Two checks: largest gap ≤ allowed (normal budget = interval + 2·timeout = 5 s); and gaps above the budget sum to</text>
+<text x="250" y="102" class="sub">≤ 5 % of the window. Neither sees slots.</text>
+<rect x="694.0" y="162" width="888.0" height="272" class="window"/>
+<text x="700.0" y="156" class="window-lbl">measurement window [4 s, 12 s) → 8 expected slots per host</text>
+<line x1="250" y1="166" x2="250" y2="430" class="grid"/>
+<text x="250" y="497" class="tick" text-anchor="middle">0s</text>
+<line x1="361" y1="166" x2="361" y2="430" class="grid"/>
+<text x="361" y="497" class="tick" text-anchor="middle">1s</text>
+<line x1="472" y1="166" x2="472" y2="430" class="grid"/>
+<text x="472" y="497" class="tick" text-anchor="middle">2s</text>
+<line x1="583" y1="166" x2="583" y2="430" class="grid"/>
+<text x="583" y="497" class="tick" text-anchor="middle">3s</text>
+<line x1="694" y1="166" x2="694" y2="430" class="grid"/>
+<text x="694" y="497" class="tick" text-anchor="middle">4s</text>
+<line x1="805" y1="166" x2="805" y2="430" class="grid"/>
+<text x="805" y="497" class="tick" text-anchor="middle">5s</text>
+<line x1="916" y1="166" x2="916" y2="430" class="grid"/>
+<text x="916" y="497" class="tick" text-anchor="middle">6s</text>
+<line x1="1027" y1="166" x2="1027" y2="430" class="grid"/>
+<text x="1027" y="497" class="tick" text-anchor="middle">7s</text>
+<line x1="1138" y1="166" x2="1138" y2="430" class="grid"/>
+<text x="1138" y="497" class="tick" text-anchor="middle">8s</text>
+<line x1="1249" y1="166" x2="1249" y2="430" class="grid"/>
+<text x="1249" y="497" class="tick" text-anchor="middle">9s</text>
+<line x1="1360" y1="166" x2="1360" y2="430" class="grid"/>
+<text x="1360" y="497" class="tick" text-anchor="middle">10s</text>
+<line x1="1471" y1="166" x2="1471" y2="430" class="grid"/>
+<text x="1471" y="497" class="tick" text-anchor="middle">11s</text>
+<line x1="1582" y1="166" x2="1582" y2="430" class="grid"/>
+<text x="1582" y="497" class="tick" text-anchor="middle">12s</text>
+<line x1="1693" y1="166" x2="1693" y2="430" class="grid"/>
+<text x="1693" y="497" class="tick" text-anchor="middle">13s</text>
+<text x="1759" y="525" class="tick" text-anchor="end">head-node clock (interval = 1 s)</text>
+<text x="236" y="216.0" class="host" text-anchor="end">node-a</text>
+<rect x="250.0" y="198" width="22.2" height="40" rx="4" class="req"/>
+<text x="250.0" y="190" class="seq">seq 0</text>
+<line x1="261.1" y1="193" x2="261.1" y2="243" class="row"/>
+<rect x="361.0" y="198" width="22.2" height="40" rx="4" class="req"/>
+<text x="361.0" y="190" class="seq">seq 1</text>
+<line x1="372.1" y1="193" x2="372.1" y2="243" class="row"/>
+<rect x="472.0" y="198" width="22.2" height="40" rx="4" class="req"/>
+<text x="472.0" y="190" class="seq">seq 2</text>
+<line x1="483.1" y1="193" x2="483.1" y2="243" class="row"/>
+<rect x="583.0" y="198" width="22.2" height="40" rx="4" class="req"/>
+<text x="583.0" y="190" class="seq">seq 3</text>
+<line x1="594.1" y1="193" x2="594.1" y2="243" class="row"/>
+<rect x="694.0" y="198" width="22.2" height="40" rx="4" class="req"/>
+<text x="694.0" y="190" class="seq">seq 4</text>
+<line x1="705.1" y1="193" x2="705.1" y2="243" class="row"/>
+<rect x="805.0" y="198" width="22.2" height="40" rx="4" class="req"/>
+<text x="805.0" y="190" class="seq">seq 5</text>
+<line x1="816.1" y1="193" x2="816.1" y2="243" class="row"/>
+<rect x="916.0" y="198" width="22.2" height="40" rx="4" class="req"/>
+<text x="916.0" y="190" class="seq">seq 6</text>
+<line x1="927.1" y1="193" x2="927.1" y2="243" class="row"/>
+<rect x="1027.0" y="198" width="22.2" height="40" rx="4" class="req"/>
+<text x="1027.0" y="190" class="seq">seq 7</text>
+<line x1="1038.1" y1="193" x2="1038.1" y2="243" class="row"/>
+<rect x="1138.0" y="198" width="22.2" height="40" rx="4" class="req"/>
+<text x="1138.0" y="190" class="seq">seq 8</text>
+<line x1="1149.1" y1="193" x2="1149.1" y2="243" class="row"/>
+<rect x="1249.0" y="198" width="22.2" height="40" rx="4" class="req"/>
+<text x="1249.0" y="190" class="seq">seq 9</text>
+<line x1="1260.1" y1="193" x2="1260.1" y2="243" class="row"/>
+<rect x="1360.0" y="198" width="22.2" height="40" rx="4" class="req"/>
+<text x="1360.0" y="190" class="seq">seq 10</text>
+<line x1="1371.1" y1="193" x2="1371.1" y2="243" class="row"/>
+<rect x="1471.0" y="198" width="22.2" height="40" rx="4" class="req"/>
+<text x="1471.0" y="190" class="seq">seq 11</text>
+<line x1="1482.1" y1="193" x2="1482.1" y2="243" class="row"/>
+<rect x="1582.0" y="198" width="22.2" height="40" rx="4" class="req"/>
+<text x="1582.0" y="190" class="seq">seq 12</text>
+<line x1="1593.1" y1="193" x2="1593.1" y2="243" class="row"/>
+<rect x="1693.0" y="198" width="22.2" height="40" rx="4" class="req"/>
+<text x="1693.0" y="190" class="seq">seq 13</text>
+<line x1="1704.1" y1="193" x2="1704.1" y2="243" class="row"/>
+<text x="236" y="304.0" class="host" text-anchor="end">node-b</text>
+<rect x="250.0" y="286" width="133.2" height="40" rx="4" class="req"/>
+<text x="250.0" y="278" class="seq">seq 0</text>
+<line x1="316.6" y1="281" x2="316.6" y2="331" class="row"/>
+<rect x="383.2" y="286" width="133.2" height="40" rx="4" class="req"/>
+<text x="383.2" y="278" class="seq">seq 1</text>
+<line x1="449.8" y1="281" x2="449.8" y2="331" class="row"/>
+<rect x="516.4" y="286" width="133.2" height="40" rx="4" class="req"/>
+<text x="516.4" y="278" class="seq">seq 2</text>
+<line x1="583.0" y1="281" x2="583.0" y2="331" class="row"/>
+<rect x="649.6" y="286" width="133.2" height="40" rx="4" class="req"/>
+<text x="649.6" y="278" class="seq">seq 3</text>
+<line x1="716.2" y1="281" x2="716.2" y2="331" class="row"/>
+<rect x="782.8" y="286" width="133.2" height="40" rx="4" class="req"/>
+<text x="782.8" y="278" class="seq">seq 4</text>
+<line x1="849.4" y1="281" x2="849.4" y2="331" class="row"/>
+<rect x="916.0" y="286" width="133.2" height="40" rx="4" class="req"/>
+<text x="916.0" y="278" class="seq">seq 6</text>
+<line x1="982.6" y1="281" x2="982.6" y2="331" class="row"/>
+<rect x="1049.2" y="286" width="133.2" height="40" rx="4" class="req"/>
+<text x="1049.2" y="278" class="seq">seq 7</text>
+<line x1="1115.8" y1="281" x2="1115.8" y2="331" class="row"/>
+<rect x="1182.4" y="286" width="133.2" height="40" rx="4" class="req"/>
+<text x="1182.4" y="278" class="seq">seq 8</text>
+<line x1="1249.0" y1="281" x2="1249.0" y2="331" class="row"/>
+<rect x="1315.6" y="286" width="133.2" height="40" rx="4" class="req"/>
+<text x="1315.6" y="278" class="seq">seq 9</text>
+<line x1="1382.2" y1="281" x2="1382.2" y2="331" class="row"/>
+<rect x="1448.8" y="286" width="133.2" height="40" rx="4" class="req"/>
+<text x="1448.8" y="278" class="seq">seq 10</text>
+<line x1="1515.4" y1="281" x2="1515.4" y2="331" class="row"/>
+<rect x="1582.0" y="286" width="133.2" height="40" rx="4" class="req"/>
+<text x="1582.0" y="278" class="seq">seq 11</text>
+<line x1="1648.6" y1="281" x2="1648.6" y2="331" class="row"/>
+<rect x="1715.2" y="286" width="44.4" height="40" rx="4" class="req"/>
+<text x="1715.2" y="278" class="seq">seq 13</text>
+<text x="236" y="392.0" class="host" text-anchor="end">node-c</text>
+<rect x="583.0" y="374" width="22.2" height="40" rx="4" class="req"/>
+<text x="583.0" y="366" class="seq">seq 3</text>
+<line x1="594.1" y1="369" x2="594.1" y2="419" class="row"/>
+<rect x="694.0" y="374" width="22.2" height="40" rx="4" class="req"/>
+<text x="694.0" y="366" class="seq">seq 4</text>
+<line x1="705.1" y1="369" x2="705.1" y2="419" class="row"/>
+<rect x="805.0" y="374" width="22.2" height="40" rx="4" class="req"/>
+<text x="805.0" y="366" class="seq">seq 5</text>
+<line x1="816.1" y1="369" x2="816.1" y2="419" class="row"/>
+<rect x="916.0" y="374" width="22.2" height="40" rx="4" class="req"/>
+<text x="916.0" y="366" class="seq">seq 6</text>
+<line x1="927.1" y1="369" x2="927.1" y2="419" class="row"/>
+<rect x="1027.0" y="374" width="22.2" height="40" rx="4" class="req"/>
+<text x="1027.0" y="366" class="seq">seq 7</text>
+<line x1="1038.1" y1="369" x2="1038.1" y2="419" class="row"/>
+<rect x="1138.0" y="374" width="22.2" height="40" rx="4" class="req"/>
+<text x="1138.0" y="366" class="seq">seq 8</text>
+<line x1="1149.1" y1="369" x2="1149.1" y2="419" class="row"/>
+<rect x="1249.0" y="374" width="22.2" height="40" rx="4" class="req"/>
+<text x="1249.0" y="366" class="seq">seq 9</text>
+<line x1="1260.1" y1="369" x2="1260.1" y2="419" class="row"/>
+<rect x="1360.0" y="374" width="22.2" height="40" rx="4" class="req"/>
+<text x="1360.0" y="366" class="seq">seq 10</text>
+<line x1="1371.1" y1="369" x2="1371.1" y2="419" class="row"/>
+<rect x="1471.0" y="374" width="22.2" height="40" rx="4" class="req"/>
+<text x="1471.0" y="366" class="seq">seq 11</text>
+<line x1="1482.1" y1="369" x2="1482.1" y2="419" class="row"/>
+<rect x="1582.0" y="374" width="22.2" height="40" rx="4" class="req"/>
+<text x="1582.0" y="366" class="seq">seq 12</text>
+<line x1="1593.1" y1="369" x2="1593.1" y2="419" class="row"/>
+<rect x="1693.0" y="374" width="22.2" height="40" rx="4" class="req"/>
+<text x="1693.0" y="366" class="seq">seq 13</text>
+<line x1="1704.1" y1="369" x2="1704.1" y2="419" class="row"/>
+<line x1="982.6" y1="449" x2="1115.8" y2="449" class="gap" marker-start="url(#tick)" marker-end="url(#tick)"/>
+<text x="1049.2" y="474" class="gap-lbl" text-anchor="middle">largest node-b row gap = 1.2 s (row timestamps = request midpoints)</text>
+<text x="250" y="566" class="note">node-b answers every request in 1.2 s. Its rows are 1.2 s apart at worst — under the 5 s budget, so it never</text>
+<text x="250" y="595" class="note">enters either sum. Verdict: coverage OK.</text>
+<text x="250" y="624" class="note">node-c&#x27;s exporter came up at slot 3. Its first row is at 3.1 s; the boundary check only needs one row before the</text>
+<text x="250" y="653" class="note">window start, so it passes too.</text>
+<text x="250" y="682" class="note">Both hosts pass with room to spare. The validator has no number that says how many samples node-b should have</text>
+<text x="250" y="711" class="note">produced.</text><text x="250" y="796" class="title">E2 · What the slot grid reads — the same events bucketed onto one global grid, tallied per host</text>
+<text x="250" y="828" class="sub">One anchor and one interval for the session (the collector&#x27;s shared _collector_grid). Slot k starts at the same</text>
+<text x="250" y="856" class="sub">instant on every host; each host is then classified per slot: ok / late / missed / unaccounted.</text>
+<rect x="694.0" y="916" width="888.0" height="272" class="window"/>
+<text x="700.0" y="910" class="window-lbl">measurement window [4 s, 12 s) → 8 expected slots per host</text>
+<line x1="250" y1="920" x2="250" y2="1184" class="grid"/>
+<text x="250" y="1251" class="tick" text-anchor="middle">0s</text>
+<line x1="361" y1="920" x2="361" y2="1184" class="grid"/>
+<text x="361" y="1251" class="tick" text-anchor="middle">1s</text>
+<line x1="472" y1="920" x2="472" y2="1184" class="grid"/>
+<text x="472" y="1251" class="tick" text-anchor="middle">2s</text>
+<line x1="583" y1="920" x2="583" y2="1184" class="grid"/>
+<text x="583" y="1251" class="tick" text-anchor="middle">3s</text>
+<line x1="694" y1="920" x2="694" y2="1184" class="grid"/>
+<text x="694" y="1251" class="tick" text-anchor="middle">4s</text>
+<line x1="805" y1="920" x2="805" y2="1184" class="grid"/>
+<text x="805" y="1251" class="tick" text-anchor="middle">5s</text>
+<line x1="916" y1="920" x2="916" y2="1184" class="grid"/>
+<text x="916" y="1251" class="tick" text-anchor="middle">6s</text>
+<line x1="1027" y1="920" x2="1027" y2="1184" class="grid"/>
+<text x="1027" y="1251" class="tick" text-anchor="middle">7s</text>
+<line x1="1138" y1="920" x2="1138" y2="1184" class="grid"/>
+<text x="1138" y="1251" class="tick" text-anchor="middle">8s</text>
+<line x1="1249" y1="920" x2="1249" y2="1184" class="grid"/>
+<text x="1249" y="1251" class="tick" text-anchor="middle">9s</text>
+<line x1="1360" y1="920" x2="1360" y2="1184" class="grid"/>
+<text x="1360" y="1251" class="tick" text-anchor="middle">10s</text>
+<line x1="1471" y1="920" x2="1471" y2="1184" class="grid"/>
+<text x="1471" y="1251" class="tick" text-anchor="middle">11s</text>
+<line x1="1582" y1="920" x2="1582" y2="1184" class="grid"/>
+<text x="1582" y="1251" class="tick" text-anchor="middle">12s</text>
+<line x1="1693" y1="920" x2="1693" y2="1184" class="grid"/>
+<text x="1693" y="1251" class="tick" text-anchor="middle">13s</text>
+<text x="1759" y="1279" class="tick" text-anchor="end">head-node clock (interval = 1 s)</text>
+<text x="236" y="958.0" class="host" text-anchor="end">node-a</text>
+<text x="236" y="987.0" class="host-sub" text-anchor="end">8/8 ok · 0 missed</text>
+<rect x="250.0" y="952" width="22.2" height="40" rx="4" class="req"/>
+<text x="250.0" y="944" class="seq">seq 0</text>
+<line x1="261.1" y1="947" x2="261.1" y2="997" class="row"/>
+<rect x="361.0" y="952" width="22.2" height="40" rx="4" class="req"/>
+<text x="361.0" y="944" class="seq">seq 1</text>
+<line x1="372.1" y1="947" x2="372.1" y2="997" class="row"/>
+<rect x="472.0" y="952" width="22.2" height="40" rx="4" class="req"/>
+<text x="472.0" y="944" class="seq">seq 2</text>
+<line x1="483.1" y1="947" x2="483.1" y2="997" class="row"/>
+<rect x="583.0" y="952" width="22.2" height="40" rx="4" class="req"/>
+<text x="583.0" y="944" class="seq">seq 3</text>
+<line x1="594.1" y1="947" x2="594.1" y2="997" class="row"/>
+<rect x="694.0" y="952" width="22.2" height="40" rx="4" class="req"/>
+<text x="694.0" y="944" class="seq">seq 4</text>
+<line x1="705.1" y1="947" x2="705.1" y2="997" class="row"/>
+<rect x="805.0" y="952" width="22.2" height="40" rx="4" class="req"/>
+<text x="805.0" y="944" class="seq">seq 5</text>
+<line x1="816.1" y1="947" x2="816.1" y2="997" class="row"/>
+<rect x="916.0" y="952" width="22.2" height="40" rx="4" class="req"/>
+<text x="916.0" y="944" class="seq">seq 6</text>
+<line x1="927.1" y1="947" x2="927.1" y2="997" class="row"/>
+<rect x="1027.0" y="952" width="22.2" height="40" rx="4" class="req"/>
+<text x="1027.0" y="944" class="seq">seq 7</text>
+<line x1="1038.1" y1="947" x2="1038.1" y2="997" class="row"/>
+<rect x="1138.0" y="952" width="22.2" height="40" rx="4" class="req"/>
+<text x="1138.0" y="944" class="seq">seq 8</text>
+<line x1="1149.1" y1="947" x2="1149.1" y2="997" class="row"/>
+<rect x="1249.0" y="952" width="22.2" height="40" rx="4" class="req"/>
+<text x="1249.0" y="944" class="seq">seq 9</text>
+<line x1="1260.1" y1="947" x2="1260.1" y2="997" class="row"/>
+<rect x="1360.0" y="952" width="22.2" height="40" rx="4" class="req"/>
+<text x="1360.0" y="944" class="seq">seq 10</text>
+<line x1="1371.1" y1="947" x2="1371.1" y2="997" class="row"/>
+<rect x="1471.0" y="952" width="22.2" height="40" rx="4" class="req"/>
+<text x="1471.0" y="944" class="seq">seq 11</text>
+<line x1="1482.1" y1="947" x2="1482.1" y2="997" class="row"/>
+<rect x="1582.0" y="952" width="22.2" height="40" rx="4" class="req"/>
+<text x="1582.0" y="944" class="seq">seq 12</text>
+<line x1="1593.1" y1="947" x2="1593.1" y2="997" class="row"/>
+<rect x="1693.0" y="952" width="22.2" height="40" rx="4" class="req"/>
+<text x="1693.0" y="944" class="seq">seq 13</text>
+<line x1="1704.1" y1="947" x2="1704.1" y2="997" class="row"/>
+<text x="236" y="1046.0" class="host" text-anchor="end">node-b</text>
+<text x="236" y="1075.0" class="host-sub" text-anchor="end">7/8 ok · 1 missed</text>
+<rect x="250.0" y="1040" width="133.2" height="40" rx="4" class="req"/>
+<text x="250.0" y="1032" class="seq">seq 0</text>
+<line x1="316.6" y1="1035" x2="316.6" y2="1085" class="row"/>
+<rect x="383.2" y="1040" width="133.2" height="40" rx="4" class="req"/>
+<text x="383.2" y="1032" class="seq">seq 1</text>
+<line x1="449.8" y1="1035" x2="449.8" y2="1085" class="row"/>
+<rect x="516.4" y="1040" width="133.2" height="40" rx="4" class="req"/>
+<text x="516.4" y="1032" class="seq">seq 2</text>
+<line x1="583.0" y1="1035" x2="583.0" y2="1085" class="row"/>
+<rect x="649.6" y="1040" width="133.2" height="40" rx="4" class="req"/>
+<text x="649.6" y="1032" class="seq">seq 3</text>
+<line x1="716.2" y1="1035" x2="716.2" y2="1085" class="row"/>
+<rect x="782.8" y="1040" width="133.2" height="40" rx="4" class="req"/>
+<text x="782.8" y="1032" class="seq">seq 4</text>
+<line x1="849.4" y1="1035" x2="849.4" y2="1085" class="row"/>
+<rect x="916.0" y="1040" width="133.2" height="40" rx="4" class="req"/>
+<text x="916.0" y="1032" class="seq">seq 6</text>
+<line x1="982.6" y1="1035" x2="982.6" y2="1085" class="row"/>
+<rect x="1049.2" y="1040" width="133.2" height="40" rx="4" class="req"/>
+<text x="1049.2" y="1032" class="seq">seq 7</text>
+<line x1="1115.8" y1="1035" x2="1115.8" y2="1085" class="row"/>
+<rect x="1182.4" y="1040" width="133.2" height="40" rx="4" class="req"/>
+<text x="1182.4" y="1032" class="seq">seq 8</text>
+<line x1="1249.0" y1="1035" x2="1249.0" y2="1085" class="row"/>
+<rect x="1315.6" y="1040" width="133.2" height="40" rx="4" class="req"/>
+<text x="1315.6" y="1032" class="seq">seq 9</text>
+<line x1="1382.2" y1="1035" x2="1382.2" y2="1085" class="row"/>
+<rect x="1448.8" y="1040" width="133.2" height="40" rx="4" class="req"/>
+<text x="1448.8" y="1032" class="seq">seq 10</text>
+<line x1="1515.4" y1="1035" x2="1515.4" y2="1085" class="row"/>
+<rect x="1582.0" y="1040" width="133.2" height="40" rx="4" class="req"/>
+<text x="1582.0" y="1032" class="seq">seq 11</text>
+<line x1="1648.6" y1="1035" x2="1648.6" y2="1085" class="row"/>
+<rect x="1715.2" y="1040" width="44.4" height="40" rx="4" class="req"/>
+<text x="1715.2" y="1032" class="seq">seq 13</text>
+<rect x="806" y="1036" width="109.0" height="48" class="missed-overrun"/>
+<text x="860.5" y="1065.0" class="miss-lbl" text-anchor="middle">seq 5 · missed</text>
+<rect x="1583" y="1036" width="109.0" height="48" class="missed-overrun"/>
+<text x="1637.5" y="1065.0" class="miss-lbl" text-anchor="middle">seq 12 · missed</text>
+<text x="236" y="1134.0" class="host" text-anchor="end">node-c</text>
+<text x="236" y="1163.0" class="host-sub" text-anchor="end">8/8 ok · 0 missed</text>
+<rect x="251" y="1124" width="109" height="48" class="unacc"/>
+<text x="305.5" y="1153.0" class="miss-lbl" text-anchor="middle">unaccounted</text>
+<rect x="362" y="1124" width="109" height="48" class="unacc"/>
+<text x="416.5" y="1153.0" class="miss-lbl" text-anchor="middle">unaccounted</text>
+<rect x="473" y="1124" width="109" height="48" class="unacc"/>
+<text x="527.5" y="1153.0" class="miss-lbl" text-anchor="middle">unaccounted</text>
+<rect x="583.0" y="1128" width="22.2" height="40" rx="4" class="req"/>
+<text x="583.0" y="1120" class="seq">seq 3</text>
+<line x1="594.1" y1="1123" x2="594.1" y2="1173" class="row"/>
+<rect x="694.0" y="1128" width="22.2" height="40" rx="4" class="req"/>
+<text x="694.0" y="1120" class="seq">seq 4</text>
+<line x1="705.1" y1="1123" x2="705.1" y2="1173" class="row"/>
+<rect x="805.0" y="1128" width="22.2" height="40" rx="4" class="req"/>
+<text x="805.0" y="1120" class="seq">seq 5</text>
+<line x1="816.1" y1="1123" x2="816.1" y2="1173" class="row"/>
+<rect x="916.0" y="1128" width="22.2" height="40" rx="4" class="req"/>
+<text x="916.0" y="1120" class="seq">seq 6</text>
+<line x1="927.1" y1="1123" x2="927.1" y2="1173" class="row"/>
+<rect x="1027.0" y="1128" width="22.2" height="40" rx="4" class="req"/>
+<text x="1027.0" y="1120" class="seq">seq 7</text>
+<line x1="1038.1" y1="1123" x2="1038.1" y2="1173" class="row"/>
+<rect x="1138.0" y="1128" width="22.2" height="40" rx="4" class="req"/>
+<text x="1138.0" y="1120" class="seq">seq 8</text>
+<line x1="1149.1" y1="1123" x2="1149.1" y2="1173" class="row"/>
+<rect x="1249.0" y="1128" width="22.2" height="40" rx="4" class="req"/>
+<text x="1249.0" y="1120" class="seq">seq 9</text>
+<line x1="1260.1" y1="1123" x2="1260.1" y2="1173" class="row"/>
+<rect x="1360.0" y="1128" width="22.2" height="40" rx="4" class="req"/>
+<text x="1360.0" y="1120" class="seq">seq 10</text>
+<line x1="1371.1" y1="1123" x2="1371.1" y2="1173" class="row"/>
+<rect x="1471.0" y="1128" width="22.2" height="40" rx="4" class="req"/>
+<text x="1471.0" y="1120" class="seq">seq 11</text>
+<line x1="1482.1" y1="1123" x2="1482.1" y2="1173" class="row"/>
+<rect x="1582.0" y="1128" width="22.2" height="40" rx="4" class="req"/>
+<text x="1582.0" y="1120" class="seq">seq 12</text>
+<line x1="1593.1" y1="1123" x2="1593.1" y2="1173" class="row"/>
+<rect x="1693.0" y="1128" width="22.2" height="40" rx="4" class="req"/>
+<text x="1693.0" y="1120" class="seq">seq 13</text>
+<line x1="1704.1" y1="1123" x2="1704.1" y2="1173" class="row"/>
+<line x1="982.6" y1="1203" x2="1115.8" y2="1203" class="gap" marker-start="url(#tick)" marker-end="url(#tick)"/>
+<text x="1049.2" y="1228" class="gap-lbl" text-anchor="middle">largest node-b row gap = 1.2 s (row timestamps = request midpoints)</text>
+<text x="250" y="1320" class="note">Inside the window every host is expected on all 8 slots. node-a: 8/8 ok. node-c: 8/8 ok — its late start is</text>
+<text x="250" y="1349" class="note">outside the window and doesn&#x27;t count against it.</text>
+<text x="250" y="1378" class="note">node-b: 7 rows + 1 missed (sample_schedule_overrun) = 8. Loss = 1/8 = 12% in this window (1 slot in 6 at exactly</text>
+<text x="250" y="1407" class="note">1.2×; the live probe on 68fe74ec measured 23 % with real HTTP overhead), with every individual gap still ≤ 1.2</text>
+<text x="250" y="1436" class="note">s. This is the number the timestamp checks cannot see.</text>
+<text x="250" y="1465" class="note">Grey = unaccounted: slots with no row and no missed range (node-c slots 0–2: the collector never got a</text>
+<text x="250" y="1494" class="note">successful poll, so nothing was recorded). Over the whole session that would read as loss; bounded to the window</text>
+<text x="250" y="1523" class="note">it doesn&#x27;t.</text>
+<text x="250" y="1552" class="note">A cumulative check is (expected − rows) / expected per host over the window, against the same 5 % — cadence-</text>
+<text x="250" y="1581" class="note">relative by construction, and independent of which gaps happen to straddle the budget.</text>
+<g transform="translate(250,1634)"><rect x="0" y="0" width="74" height="24" rx="5" class="req"/><text x="88" y="20" class="note">request in flight; row timestamp = midpoint (┃)</text><rect x="0" y="40" width="74" height="24" rx="5" class="req-fail"/><text x="88" y="60" class="note">request failed / timed out — no row (endpoint_timeout)</text><rect x="0" y="80" width="74" height="24" class="missed-overrun"/><text x="88" y="100" class="note">slot forfeited — sample_schedule_overrun</text><rect x="0" y="120" width="74" height="24" class="unacc"/><text x="88" y="140" class="note">unaccounted — no row and no missed range for this (host, slot)</text><rect x="0" y="160" width="74" height="24" class="window"/><text x="88" y="180" class="note">measurement window — the only slots a verdict should count</text></g>
+</svg>
