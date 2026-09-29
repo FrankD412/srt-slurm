@@ -293,6 +293,8 @@ td.cg-start, th.cg-start { border-left: 1px solid var(--border); }
 .chart-group-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin: 0 0 8px; }
 .chart-group-tools { display: inline-flex; align-items: center; gap: 12px; }
 .granularity-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; font-size: 11px; }
+.norm-row { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; }
+.norm-label { font-size: 11px; color: var(--ink-muted); }
 .gran-btn { background: transparent; color: var(--ink-muted); border: 0; padding: 2px 9px; cursor: pointer; font: inherit; font-size: 11px; }
 .gran-btn + .gran-btn { border-left: 1px solid var(--line); }
 .gran-btn.on { background: var(--surface-2, rgba(127,127,127,0.18)); color: var(--ink); font-weight: 600; }
@@ -1119,6 +1121,10 @@ function cpuEstimatePerGpu(point) {
 // Category visibility for the by-type chart, shared across points (a legend
 // click persists like the granularity toggle).
 const TYPE_POWER_HIDDEN = new Set();
+// Node-bar normalisation shared by the by-type and per-node cards: "node" = the
+// whole node's draw; "gpu" = every segment / that node's GPU count, so a bar reads
+// as watts attributable to one GPU (GPU watts per GPU + CPU watts per GPU + ...).
+let NODE_BAR_NORM = "node";
 const TYPE_ROLE_ORDER = ["prefill", "decode"];
 function roleKeyOf(n) {
   const r = (n.roles || []).filter(Boolean).sort();
@@ -1131,6 +1137,12 @@ function roleHeading(key) {
   return key.charAt(0).toUpperCase() + key.slice(1) + " nodes";
 }
 
+document.addEventListener("click", ev => {
+  const btn = ev.target.closest(".norm-btn");
+  if (!btn) return;
+  NODE_BAR_NORM = btn.dataset.norm;
+  rerenderBreakdownCards();
+});
 function rerenderBreakdownCards() {
   document.querySelectorAll(".type-power-card, .node-power-card").forEach(c => {
     if (c.__point) (c.classList.contains("type-power-card") ? renderTypePower : renderNodePower)(c, c.__point);
@@ -1313,9 +1325,14 @@ function renderNodePower(card, point) {
     } else if (cpuEstimatePerGpu(point) > 0 && (n.socket_count == null || n.socket_count === 0) && n.gpu_count)
       segs.push(["cpu_est", cpuEstimatePerGpu(point) * n.gpu_count]);
     if (overheadPerGpu(point) > 0 && n.gpu_count) segs.push(["overhead", overheadPerGpu(point) * n.gpu_count]);
-    return { host: n.hostname, group: byType ? roleHeading(roleKeyOf(n)) : null, segs, total: segs.reduce((a, [, v]) => a + v, 0) };
-  });
+    const perGpu = NODE_BAR_NORM === "gpu" && n.gpu_count > 0;
+    if (perGpu) segs.forEach(sg => { sg[1] = sg[1] / n.gpu_count; });
+    const host = perGpu ? n.hostname + " \u00f7 " + fmtNum(n.gpu_count, 0) + " GPU" : n.hostname;
+    return { host, group: byType ? roleHeading(roleKeyOf(n)) : null, segs, total: segs.reduce((a, [, v]) => a + v, 0), noGpu: NODE_BAR_NORM === "gpu" && !(n.gpu_count > 0) };
+  }).filter(r => !r.noGpu);
   const groupCount = byType ? new Set(rows.map(r => r.group)).size : 0;
+  // Normalisation toggle state (buttons live in the card head).
+  card.querySelectorAll(".norm-btn").forEach(b => b.classList.toggle("on", b.dataset.norm === NODE_BAR_NORM));
   const used = new Set(rows.flatMap(r => r.segs.map(([k]) => k)));
   NODE_POWER_SEGMENTS.filter(sg => used.has(sg.key)).forEach(sg => {
     const key = document.createElement("span"); key.className = "legend-key" + (TYPE_POWER_HIDDEN.has(sg.key) ? " off" : "");
@@ -1331,7 +1348,8 @@ function renderNodePower(card, point) {
   rows.forEach(r => { r.segs = r.segs.filter(([k]) => !TYPE_POWER_HIDDEN.has(k)); r.total = r.segs.reduce((a, [, v]) => a + v, 0); });
 
   const W = Math.max(400, Math.round(svg.getBoundingClientRect().width || 900));
-  const rowH = 22, groupGap = 16, padL = card.classList.contains("type-node-card") ? 180 : 110, padR = 60, padT = 8, padB = 28;
+  const rowH = 22, groupGap = 16, padR = 60, padT = 8, padB = 28;
+  const padL = (card.classList.contains("type-node-card") ? 180 : 110) + (NODE_BAR_NORM === "gpu" ? 52 : 0);
   const H = padT + rows.length * rowH + groupCount * groupGap + padB;
   svg.setAttribute("viewBox", "0 0 " + W + " " + H); svg.style.height = H + "px";
   const maxW = Math.max(0, ...rows.map(r => r.total)) * 1.05 || 1;
@@ -1344,7 +1362,7 @@ function renderNodePower(card, point) {
     t.textContent = fmtNum(v / div, unit === "kW" ? 1 : 0); svg.appendChild(t);
   }
   const xt = svgEl("text", { class: "axis-title", x: padL + (W - padL - padR) / 2, y: H - 4, "text-anchor": "middle" });
-  xt.textContent = "Window-average power (" + unit + ")"; svg.appendChild(xt);
+  xt.textContent = (NODE_BAR_NORM === "gpu" ? "Window-average power per GPU (" : "Window-average power (") + unit + ")"; svg.appendChild(xt);
 
   let yCursor = padT, lastGroup = null;
   rows.forEach(r => {
@@ -1365,7 +1383,7 @@ function renderNodePower(card, point) {
         tip.innerHTML = "<div class='t-title'>" + r.host + "</div>";
         r.segs.forEach(([kk, vv]) => { const s2 = NODE_POWER_SEGMENTS.find(sg => sg.key === kk);
           tip.innerHTML += "<div class='t-row'><span><span class='t-key' style='display:inline-block;width:10px;height:10px;margin-right:6px;background:" + s2.color + "'></span>" + s2.label + "</span><span class='t-val'>" + fmtNum(vv, 0) + " W</span></div>"; });
-        tip.innerHTML += "<div class='t-row'><span>Total</span><span class='t-val'>" + fmtNum(r.total, 0) + " W</span></div>";
+        tip.innerHTML += "<div class='t-row'><span>Total" + (NODE_BAR_NORM === "gpu" ? " per GPU" : "") + "</span><span class='t-val'>" + fmtNum(r.total, 0) + " W</span></div>";
         tip.style.opacity = 1;
         const rc = card.querySelector(".node-power-root").getBoundingClientRect();
         tip.style.left = (ev.clientX - rc.left + 12) + "px"; tip.style.top = (ev.clientY - rc.top + 12) + "px";
@@ -1393,7 +1411,9 @@ const PARETO_AXES = {
   gpu_w:           { label: "Total GPU watts",           key: "gpu_w",           better: "min" },
   gpu_w_per_gpu:   { label: "Watts per GPU",             key: "gpu_w_per_gpu",   better: "min" },
   cpu_w:           { label: "Total CPU watts",           key: "cpu_w",           better: "min" },
+  cpu_w_per_gpu:   { label: "CPU watts per GPU",         key: "cpu_w_per_gpu",   better: "min" },
   total_w:         { label: "Total watts (GPU+CPU)",     key: "total_w",         better: "min" },
+  total_w_per_gpu: { label: "Watts per GPU (GPU+CPU)",   key: "total_w_per_gpu", better: "min" },
   concurrency:     { label: "Concurrency",               key: "concurrency",     better: "max" },
   // Basis-split axes: one series (own frontier, own line style) per power basis.
   // The metric key is suffixed with the variant key ("total_tps_per_mw__static").
@@ -1402,6 +1422,12 @@ const PARETO_AXES = {
   output_tps_per_mw: { label: "Output TPS / MW", key: "output_tps_per_mw", better: "max", split: true },
   node_w_per_gpu:    { label: "Watts per GPU",   key: "node_w_per_gpu",    better: "min", split: true },
 };
+
+// Run-total axis -> its per-GPU counterpart, for the scatter "Normalise: per GPU"
+// toggle. Axes with no entry (tok/s, TPOT, concurrency, ratios) are left alone.
+const PER_GPU_AXIS = { gpu_w: "gpu_w_per_gpu", cpu_w: "cpu_w_per_gpu", total_w: "total_w_per_gpu", output_tps: "tps_per_gpu", total_tps: "total_tps_per_gpu" };
+const PER_RUN_AXIS = Object.fromEntries(Object.entries(PER_GPU_AXIS).map(([k, v]) => [v, k]));
+let SCATTER_NORM = "run";
 
 // Power bases for the split axes (mirrors _POWER_VARIANTS in Python). Each has its
 // own frontier line style and point rendering so the series read apart even when
@@ -1675,8 +1701,15 @@ function initPareto(root) {
     return out.reverse();
   }
 
+  const normBtns = card.querySelectorAll(".scatter-norm-btn");
+  const normAxis = key => {
+    if (!normBtns.length) return key;
+    if (SCATTER_NORM === "gpu") return PER_GPU_AXIS[key] || key;
+    return PER_RUN_AXIS[key] || key;
+  };
   function draw() {
-    xAxis = PARETO_AXES[xSel.value]; yAxis = PARETO_AXES[ySel.value];
+    xAxis = PARETO_AXES[normAxis(xSel.value)]; yAxis = PARETO_AXES[normAxis(ySel.value)];
+    normBtns.forEach(b => b.classList.toggle("on", b.dataset.norm === SCATTER_NORM));
     renderBasisLegend();
     items = [];
     points.forEach((p, i) => {
@@ -1869,6 +1902,12 @@ function initPareto(root) {
   // Budget editor hook: recompute is done on the shared point objects; this just redraws.
   PARETO_VIEWS.push({ points, refresh: () => { draw(); if (plotted.length) select(selected); } });
   if (modelSel) modelSel.addEventListener("change", () => { draw(); if (plotted.length) select(selected); });
+  normBtns.forEach(b => b.addEventListener("click", () => {
+    SCATTER_NORM = b.dataset.norm;
+    document.querySelectorAll(".pareto-root").forEach(r => { if (r.__draw && r !== root) r.__draw(); });
+    draw();
+  }));
+  root.__draw = draw;
   if (xSel.addEventListener) xSel.addEventListener("change", draw);
   if (frontierOnlyBox) frontierOnlyBox.addEventListener("change", draw);
   if (ySel.addEventListener) ySel.addEventListener("change", draw);
@@ -2361,7 +2400,9 @@ def _pareto_points(
                     "gpu_w": ppw["gpu_avg_power_w"],
                     "gpu_w_per_gpu": _per_gpu(ppw["gpu_avg_power_w"], num_gpus),
                     "cpu_w": ppw["cpu_avg_power_w"],
+                    "cpu_w_per_gpu": _per_gpu(ppw["cpu_avg_power_w"], num_gpus),
                     "total_w": combined_w,
+                    "total_w_per_gpu": _per_gpu(combined_w, num_gpus),
                     "concurrency": r["concurrency"],
                     **_power_variant_metrics(
                         output_tps=output_tps, total_tps=total_tps, num_gpus=num_gpus, watts=variant_w
@@ -2531,6 +2572,12 @@ def _node_power_card_html(point: dict | None = None, *, by_type: bool = False) -
   <div class="chart-group-head">
     <h3>{heading}</h3>
     <span class="node-power-sub pareto-subtitle" style="margin:0"></span>
+  </div>
+  <div class="norm-row">
+    <span class="norm-label">Normalise:</span>
+    <span class="granularity-toggle norm-toggle" title="Whole-node draw, or every segment divided by the node's GPU count (GPU watts per GPU, CPU watts per GPU, ...)">
+      <button type="button" class="gran-btn norm-btn on" data-norm="node">per node</button><button type="button" class="gran-btn norm-btn" data-norm="gpu">per GPU</button>
+    </span>
   </div>
   <p class="pareto-subtitle">{blurb}</p>
   <div class="chart-notices node-power-notices" hidden></div>
@@ -2724,10 +2771,16 @@ def _power_scatter_html(points: list[dict]) -> str:
 <div class="pareto-card">
   <h3>Total CPU vs total GPU power</h3>
   <p class="pareto-subtitle">Run totals, averaged over each point's measured window: all CPU sockets summed against all GPUs summed.
-  Divide by the point's socket / GPU count for per-device figures (the inspect panel shows per-GPU). Over each
-  point's measured window. Hover for the headline numbers; click to inspect.</p>
+  Switch <b>Normalise</b> to <b>per GPU</b> to divide both axes by each point's GPU count (CPU watts per GPU
+  vs GPU watts per GPU). Hover for the headline numbers; click to inspect.</p>
   <div class="pareto-layout">
     <div>
+      <div class="norm-row">
+        <span class="norm-label">Normalise:</span>
+        <span class="granularity-toggle" title="Plot run totals (all GPUs / all sockets summed) or divide the power and throughput axes by the point's GPU count">
+          <button type="button" class="gran-btn scatter-norm-btn on" data-norm="run">per run</button><button type="button" class="gran-btn scatter-norm-btn" data-norm="gpu">per GPU</button>
+        </span>
+      </div>
       <div class="run-legend"></div>
       <div class="pareto-root" data-points="{points_json}" data-x="cpu_w" data-y="gpu_w" data-frontier="off"
            data-drives-charts="off">
@@ -2772,6 +2825,13 @@ def _baseline_view_html(points: list[dict]) -> str:
         <label>X {_axis_select_html("x", _BASELINE_DEFAULT_X)}</label>
         <label>Y {_axis_select_html("y", _BASELINE_DEFAULT_Y)}</label>
       </div>
+      <div class="norm-row">
+        <span class="norm-label">Normalise:</span>
+        <span class="granularity-toggle" title="Plot run totals (all GPUs / all sockets summed) or divide the power and throughput axes by the point's GPU count">
+          <button type="button" class="gran-btn scatter-norm-btn on" data-norm="run">per run</button><button type="button" class="gran-btn scatter-norm-btn" data-norm="gpu">per GPU</button>
+        </span>
+      </div>
+
       <div class="run-legend"></div>
       <div class="pareto-root" data-points="{points_json}" data-frontier="off" data-drives-charts="off">
         <svg class="pareto-svg" viewBox="0 0 900 520" preserveAspectRatio="xMidYMid meet"></svg>
