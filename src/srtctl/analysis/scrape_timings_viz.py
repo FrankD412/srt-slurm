@@ -5,19 +5,21 @@
 
 Reads the diagnostic file written next to ``power/samples.csv`` (see
 ``docs/power-telemetry.md`` § "Diagnosing slow scrapes") and emits one
-self-contained HTML page with inline SVG charts:
+self-contained HTML page. Python parses the records into a JSON payload; the
+inline script draws five linked SVG charts from it:
 
-1. slot-grid timeline (one lane per host, one bar per scrape request),
+1. per-host request timeline (wall clock) with each cycle's scheduled slot,
 2. schedule lag per host against ``scrape_seq``,
 3. per-cycle cost decomposition (slowest request, slowest parse, writer lock
-   wait, sample write),
-4. write-health strip from the ``cycle_write`` records,
+   wait, sample write) against the sample interval,
+4. ``cycle_write`` health strip,
 5. host × seq coverage heatmap of ``row_count``.
 
-A ``(hostname, scrape_seq)`` pair with no ``scrape`` record is an endpoint
-abandoned at the cycle deadline; it is rendered as a hatched slot rather than
-dropped. Stdlib only. The page defaults to dark mode with a light/dark toggle,
-and every mark carries a hover tooltip (HTML panel with JS, SVG <title> without).
+Dragging on any chart zooms every chart to that ``scrape_seq`` range (the
+timeline maps the range to its wall-clock span); double-click resets. Every mark
+has a hover tooltip. A ``(hostname, scrape_seq)`` pair with no ``scrape`` record
+is an endpoint abandoned at the cycle deadline and is drawn hatched, not dropped.
+Stdlib only; dark theme by default with a persisted light/dark toggle.
 
 Usage::
 
@@ -29,26 +31,21 @@ from __future__ import annotations
 import argparse
 import html
 import json
-import math
 import statistics
 import sys
 from collections import defaultdict
-from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-SVG_W = 1200
-PAD_L = 130
-PAD_R = 24
-PAD_T = 12
-PAD_B = 34
-PLOT_W = SVG_W - PAD_L - PAD_R
-
-# Outcome colours are CSS classes so they can follow the theme; the hues here
-# feed the cost-stack segments and the heatmap ramp, which are inline.
-HOST_HUES = [212, 18, 158, 280, 45, 340, 95, 190]
+# Cost-stack segments: (payload key, legend label, colour). One table drives the
+# Python legend and the JS drawing so they cannot drift.
+COST_SEGMENTS = (
+    ("request", "slowest request", "hsl(212 62% 55%)"),
+    ("parse", "slowest parse", "hsl(158 50% 48%)"),
+    ("lock", "writer lock wait", "hsl(45 80% 55%)"),
+    ("write", "sample write", "hsl(18 70% 55%)"),
+)
 
 
 @dataclass
@@ -79,10 +76,6 @@ class Scrape:
         if self.http_status is not None and self.http_status != 200:
             return "http_error"
         return "ok"
-
-    @property
-    def css_class(self) -> str:
-        return {"ok": "o-ok", "http_error": "o-http", "timeout": "o-timeout", "other_error": "o-other"}[self.outcome]
 
 
 @dataclass
@@ -134,12 +127,12 @@ class Timings:
         scheduled = sorted(w.scheduled_at for w in self.writes.values() if w.scheduled_at is not None)
         if len(scheduled) >= 2:
             gaps = [scheduled[i + 1] - scheduled[i] for i in range(len(scheduled) - 1)]
-            return statistics.median(gaps), "median gap between cycle_write.scheduled_at_unix slots"
+            return statistics.median(gaps), "from scheduled slots"
         starts = sorted(
             min(s.started for s in group) for group in self.by_seq().values() if any(not s.is_bracket for s in group)
         )
         gaps = [starts[i + 1] - starts[i] for i in range(len(starts) - 1)]
-        return (statistics.median(gaps), "inferred: median gap between cycle request starts") if gaps else None
+        return (statistics.median(gaps), "inferred from request starts") if gaps else None
 
 
 def load_timings(path: Path) -> Timings:
@@ -194,538 +187,53 @@ def load_timings(path: Path) -> Timings:
     return t
 
 
-# --------------------------------------------------------------------------- SVG helpers
+# --------------------------------------------------------------------------- payload
 
 
-def _esc(s: object) -> str:
-    return html.escape(str(s), quote=True)
-
-
-def _fmt_s(seconds: float) -> str:
-    if seconds >= 1:
-        return f"{seconds:.2f} s"
-    return f"{seconds * 1000:.1f} ms"
-
-
-def _nice_ticks(lo: float, hi: float, n: int = 6) -> list[float]:
-    if hi <= lo:
-        return [lo]
-    raw = (hi - lo) / n
-    mag = 10 ** math.floor(math.log10(raw))
-    step = next(m * mag for m in (1, 2, 2.5, 5, 10) if m * mag >= raw)
-    first = math.ceil(lo / step) * step
-    ticks = []
-    v = first
-    while v <= hi + 1e-12:
-        ticks.append(round(v, 10))
-        v += step
-    return ticks
-
-
-def _fmt_ms(seconds: float | None) -> str:
-    return "—" if seconds is None else _fmt_s(seconds)
-
-
-def _fmt_clock(unix: float) -> str:
-    dt = datetime.fromtimestamp(unix, tz=timezone.utc)
-    return dt.strftime("%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
-
-
-def _tip(title: str, rows: Sequence[tuple[str, object]], note: str | None = None) -> tuple[str, str]:
-    """Attributes for a hoverable element: JSON rows for the HTML tooltip + a <title> fallback.
-
-    Returns ``data-tip="..."`` and a ``<title>`` element; callers place the title
-    inside the element. The page script removes the <title>s so both never show.
-    """
-    payload = {"title": title, "rows": [[k, str(v)] for k, v in rows], "note": note}
-    plain = title + " · " + " · ".join(f"{k} {v}" for k, v in rows) + (f" · {note}" if note else "")
-    return f'data-tip="{_esc(json.dumps(payload, separators=(",", ":")))}"', f"<title>{_esc(plain)}</title>"
-
-
-def _fmt_tick(v: float) -> str:
-    if v == 0:
-        return "0"
-    if abs(v) >= 100:
-        return f"{v:.0f}"
-    return f"{v:.3g}"
-
-
-def _svg_open(height: int, title: str) -> str:
-    return (
-        f'<svg class="chart" viewBox="0 0 {SVG_W} {height}" role="img" aria-label="{_esc(title)}" '
-        f'preserveAspectRatio="xMidYMid meet" style="aspect-ratio:{SVG_W}/{height}">'
-        '<defs><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">'
-        '<line x1="0" y1="0" x2="0" y2="6" class="hatch-line" stroke-width="1.5"/></pattern></defs>'
-    )
-
-
-def _x_axis(y: float, x_of, lo: float, hi: float, label: str, *, integer: bool = False) -> str:
-    parts = [f'<line x1="{PAD_L}" y1="{y:.1f}" x2="{PAD_L + PLOT_W}" y2="{y:.1f}" class="ax"/>']
-    ticks = list(range(int(lo), int(hi) + 1)) if integer else _nice_ticks(lo, hi)
-    if integer and len(ticks) > 30:
-        stride = (len(ticks) + 29) // 30
-        ticks = ticks[::stride]
-    for v in ticks:
-        x = x_of(v)
-        parts.append(f'<line x1="{x:.1f}" y1="{y:.1f}" x2="{x:.1f}" y2="{y + 4:.1f}" class="ax"/>')
-        parts.append(
-            f'<text x="{x:.1f}" y="{y + 15:.1f}" text-anchor="middle" class="tick">{_fmt_tick(v) if not integer else v}</text>'
-        )
-    parts.append(
-        f'<text x="{PAD_L + PLOT_W / 2:.1f}" y="{y + 29:.1f}" text-anchor="middle" class="axis">{_esc(label)}</text>'
-    )
-    return "".join(parts)
-
-
-def _y_axis(y_of, lo: float, hi: float, top: float, bottom: float, label: str) -> str:
-    parts = [f'<line x1="{PAD_L}" y1="{top:.1f}" x2="{PAD_L}" y2="{bottom:.1f}" class="ax"/>']
-    for v in _nice_ticks(lo, hi, 5):
-        y = y_of(v)
-        parts.append(f'<line x1="{PAD_L}" y1="{y:.1f}" x2="{PAD_L + PLOT_W}" y2="{y:.1f}" class="grid"/>')
-        parts.append(f'<text x="{PAD_L - 6}" y="{y + 4:.1f}" text-anchor="end" class="tick">{_fmt_tick(v)}</text>')
-    mid = (top + bottom) / 2
-    parts.append(
-        f'<text x="14" y="{mid:.1f}" text-anchor="middle" class="axis" transform="rotate(-90 14 {mid:.1f})">{_esc(label)}</text>'
-    )
-    return "".join(parts)
-
-
-def _host_color(index: int) -> str:
-    return f"hsl({HOST_HUES[index % len(HOST_HUES)]} 62% 52%)"
-
-
-# --------------------------------------------------------------------------- charts
-
-
-_OUTCOME_LABEL = {
-    "ok": "OK — HTTP 200, body parsed",
-    "http_error": "HTTP error",
-    "timeout": "Request timeout",
-    "other_error": "Request exception",
-}
-
-
-def _scrape_tip(s: Scrape, w: CycleWrite | None, t0: float) -> tuple[str, list[tuple[str, object]], str | None]:
-    """Title, rows and note for one settled scrape record (shared by timeline, lag, coverage)."""
-    rows: list[tuple[str, object]] = [
-        ("host", s.hostname),
-        ("scrape_seq", s.seq),
-        ("started", f"{_fmt_clock(s.started)}  (+{s.started - t0:.3f} s)"),
-        ("finished", _fmt_clock(s.finished)),
-        ("request duration", _fmt_s(s.duration)),
-        ("parse", _fmt_ms(s.parse)),
-        ("HTTP status", s.http_status if s.http_status is not None else "—"),
-    ]
-    if s.error_type:
-        rows.append(("exception", s.error_type))
-    if s.is_bracket:
-        rows.append(("schedule lag", "n/a — bracket/manual scrape"))
-    else:
-        rows.append(("schedule lag", _fmt_ms(s.lag)))
-        if w is not None and w.scheduled_at is not None:
-            rows.append(("scheduled slot", _fmt_clock(w.scheduled_at)))
-    rows.append(("GPU rows", s.row_count))
-    if s.sample_ts is not None:
-        rows.append(("sample timestamp", _fmt_clock(s.sample_ts)))
-    if s.reason_codes:
-        rows.append(("reason codes", ", ".join(s.reason_codes)))
-    note = None
-    if s.outcome == "timeout":
-        note = "requests raised a Timeout; the cycle deadline had not yet expired so a record exists."
-    elif s.outcome == "http_error":
-        note = "Non-2xx response; no rows were parsed and no power sample was invented."
-    elif s.row_count == 0:
-        note = "Settled with 0 rows — body parsed but yielded no GPU readings."
-    return _OUTCOME_LABEL[s.outcome], rows, note
-
-
-def chart_timeline(t: Timings) -> str:
-    hosts, seqs, slots, by_seq = t.hosts, t.seqs, t.by_slot(), t.by_seq()
-    lane_h = 26
-    height = PAD_T + lane_h * len(hosts) + PAD_B
+def build_payload(t: Timings) -> dict[str, Any]:
+    """Everything the page script needs, with times relative to ``t0`` (seconds)."""
+    hosts = t.hosts
+    host_index = {h: i for i, h in enumerate(hosts)}
     t0 = min([s.started for s in t.scrapes] + [w.scheduled_at for w in t.writes.values() if w.scheduled_at is not None])
-    t1 = max(s.finished for s in t.scrapes)
-    span = max(t1 - t0, 1e-6)
-
-    def x_of(sec: float) -> float:
-        return PAD_L + (sec / span) * PLOT_W
-
-    # Cycle spans from the settled scrapes of each seq. A cycle with no scrape
-    # record at all (every endpoint abandoned) is anchored at its
-    # cycle_write.scheduled_at_unix when present and runs to the next cycle's
-    # scheduled slot; only files predating that field fall back to interpolating
-    # between neighbours.
-    cycle_span: dict[int, tuple[float, float]] = {}
-    for seq in seqs:
-        group = by_seq.get(seq)
-        if group:
-            cycle_span[seq] = (min(s.started for s in group) - t0, max(s.finished for s in group) - t0)
-    for i, seq in enumerate(seqs):
-        if seq in cycle_span:
-            continue
-        w = t.writes.get(seq)
-        if w is not None and w.scheduled_at is not None:
-            a = w.scheduled_at - t0
-            nxt_sched = next(
-                (
-                    t.writes[s].scheduled_at
-                    for s in seqs[i + 1 :]
-                    if s in t.writes and t.writes[s].scheduled_at is not None
-                ),
-                None,
-            )
-            b = (nxt_sched - t0) if nxt_sched is not None else min(span, a + 0.02)
-            cycle_span[seq] = (a, max(b, a + 0.005))
-            continue
-        prev = next((cycle_span[s] for s in reversed(seqs[:i]) if s in cycle_span), None)
-        nxt = next((cycle_span[s] for s in seqs[i + 1 :] if s in cycle_span), None)
-        if prev and nxt:
-            cycle_span[seq] = (prev[1], nxt[0])
-        elif prev:
-            cycle_span[seq] = (prev[1], min(span, prev[1] + (prev[1] - prev[0]) + 0.01))
-        elif nxt:
-            cycle_span[seq] = (max(0.0, nxt[0] - (nxt[1] - nxt[0]) - 0.01), nxt[0])
-
-    parts = [_svg_open(height, "Scrape request timeline per host")]
-    lanes_bottom = PAD_T + lane_h * len(hosts)
-    for hi_, host in enumerate(hosts):
-        y = PAD_T + hi_ * lane_h
-        if hi_ % 2:
-            parts.append(f'<rect x="{PAD_L}" y="{y}" width="{PLOT_W}" height="{lane_h}" class="band"/>')
-        parts.append(
-            f'<text x="{PAD_L - 8}" y="{y + lane_h / 2 + 4:.1f}" text-anchor="end" class="lane">{_esc(host)}</text>'
-        )
-        for seq in seqs:
-            s = slots.get((host, seq))
-            if s is None:
-                if seq not in cycle_span:
-                    continue
-                a, b = cycle_span[seq]
-                x, w = x_of(a), max(x_of(b) - x_of(a), 4)
-                wr = t.writes.get(seq)
-                rows: list[tuple[str, object]] = [("host", host), ("scrape_seq", seq)]
-                if wr is not None and wr.scheduled_at is not None:
-                    rows.append(("scheduled at", _fmt_clock(wr.scheduled_at)))
-                rows.append(("slot span", f"{_fmt_s(a)} → {_fmt_s(b)} after t₀"))
-                attr, title = _tip(
-                    "Abandoned — no scrape record",
-                    rows,
-                    "The request had not settled when the cycle deadline expired; the collector counted an "
-                    "endpoint_timeout and wrote no timing record for this (host, seq).",
-                )
-                parts.append(
-                    f'<rect x="{x:.1f}" y="{y + 4}" width="{w:.1f}" height="{lane_h - 8}" fill="url(#hatch)" '
-                    f'class="missing" stroke-dasharray="2 2" {attr}>{title}</rect>'
-                )
-                continue
-            x = x_of(s.started - t0)
-            w = max(x_of(s.finished - t0) - x, 2.5)
-            attr, title = _tip(*_scrape_tip(s, t.writes.get(seq), t0))
-            cls = s.css_class + (" bracket" if s.is_bracket else "")
-            parts.append(
-                f'<rect x="{x:.1f}" y="{y + 5}" width="{w:.1f}" height="{lane_h - 10}" class="{cls}" rx="1.5" {attr}>'
-                f"{title}</rect>"
-            )
-    # Scheduled slot ticks (cycle_write.scheduled_at_unix): the gap from a tick
-    # to the bars that follow it is the schedule lag, drawn on the wall clock.
-    for seq in seqs:
-        w = t.writes.get(seq)
-        if w is None or w.scheduled_at is None:
-            continue
-        x = x_of(w.scheduled_at - t0)
-        group = by_seq.get(seq, [])
-        first_start = min((s.started for s in group), default=None)
-        rows = [
-            ("scrape_seq", seq),
-            ("scheduled at", _fmt_clock(w.scheduled_at)),
-            ("offset", f"+{w.scheduled_at - t0:.3f} s"),
-        ]
-        if first_start is not None:
-            rows.append(("first request started", f"+{_fmt_s(max(0.0, first_start - w.scheduled_at))} after slot"))
-        attr, title = _tip("Scheduled slot", rows)
-        parts.append(
-            f'<line x1="{x:.1f}" y1="{PAD_T}" x2="{x:.1f}" y2="{lanes_bottom}" class="sched" '
-            f'stroke-dasharray="1 3" {attr}>{title}</line>'
-        )
-    parts.append(_x_axis(lanes_bottom, x_of, 0, span, "wall-clock seconds since the first scheduled slot / request"))
-    parts.append("</svg>")
-    return "".join(parts)
-
-
-def chart_lag(t: Timings) -> str:
-    hosts, seqs = t.hosts, t.seqs
-    plot_h = 200
-    height = PAD_T + plot_h + PAD_B
-    lags = [s.lag for s in t.scrapes if s.lag is not None]
-    if not lags:
-        return '<p class="empty">No scheduled scrapes carry a schedule_lag_seconds value.</p>'
-    lo, hi = 0.0, max(lags) * 1.08 or 0.01
-    seq_lo, seq_hi = seqs[0], seqs[-1]
-
-    def x_of(seq: float) -> float:
-        return PAD_L + ((seq - seq_lo) / max(seq_hi - seq_lo, 1)) * PLOT_W
-
-    def y_of(v: float) -> float:
-        return PAD_T + plot_h - (v / hi) * plot_h
-
-    parts = [_svg_open(height, "Schedule lag per host by scrape sequence")]
-    parts.append(_y_axis(y_of, lo, hi, PAD_T, PAD_T + plot_h, "schedule lag (s)"))
-    slots, by_seq = t.by_slot(), t.by_seq()
-    for i, host in enumerate(hosts):
-        # Break the line at any seq this host has no lag for (abandoned or bracket),
-        # so a gap never reads as an interpolated value.
-        runs: list[list[tuple[int, float]]] = [[]]
-        for seq in seqs:
-            s = slots.get((host, seq))
-            if s is not None and s.lag is not None:
-                runs[-1].append((seq, s.lag))
-            elif runs[-1]:
-                runs.append([])
-        pts = [p for run in runs for p in run]
-        if not pts:
-            continue
-        for run in runs:
-            if len(run) < 2:
-                continue
-            d = " ".join(f"{x_of(seq):.1f},{y_of(lag):.1f}" for seq, lag in run)
-            parts.append(f'<polyline points="{d}" fill="none" stroke="{_host_color(i)}" stroke-width="1.8"/>')
-        for seq, lag in pts:
-            s = slots[(host, seq)]
-            w = t.writes.get(seq)
-            rows = [("host", host), ("scrape_seq", seq), ("schedule lag", _fmt_s(lag))]
-            if w is not None and w.scheduled_at is not None:
-                rows.append(("scheduled slot", _fmt_clock(w.scheduled_at)))
-            rows.append(("request started", _fmt_clock(s.started)))
-            rows.append(("request duration", _fmt_s(s.duration)))
-            others = [o.lag for o in by_seq.get(seq, []) if o.lag is not None and o.hostname != host]
-            if others:
-                rows.append(("other hosts' lag (this seq)", f"{_fmt_s(min(others))} – {_fmt_s(max(others))}"))
-            attr, title = _tip("Schedule lag", rows)
-            parts.append(
-                f'<circle cx="{x_of(seq):.1f}" cy="{y_of(lag):.1f}" r="3" fill="{_host_color(i)}" {attr}>{title}</circle>'
-            )
-        # gaps in the line = missing (abandoned) or bracket slots
-        for seq in seqs:
-            if (host, seq) not in slots:
-                attr, title = _tip(
-                    "Abandoned — no scrape record",
-                    [("host", host), ("scrape_seq", seq)],
-                    "No lag can be measured: the request never settled before the cycle deadline.",
-                )
-                parts.append(
-                    f'<line x1="{x_of(seq):.1f}" y1="{PAD_T}" x2="{x_of(seq):.1f}" y2="{PAD_T + plot_h}" '
-                    f'stroke="{_host_color(i)}" stroke-dasharray="2 3" opacity="0.6" stroke-width="3" {attr}>{title}</line>'
-                )
-    parts.append(_x_axis(PAD_T + plot_h, x_of, seq_lo, seq_hi, "scrape_seq", integer=True))
-    parts.append("</svg>")
-    legend = "".join(
-        f'<span class="key"><i style="background:{_host_color(i)}"></i>{_esc(host)}</span>'
-        for i, host in enumerate(hosts)
-    )
-    return f'<div class="legend">{legend}</div>' + "".join(parts)
-
-
-def chart_cycle_cost(t: Timings) -> str:
-    seqs, by_seq = t.seqs, t.by_seq()
-    plot_h = 220
-    height = PAD_T + plot_h + PAD_B
-    seq_lo, seq_hi = seqs[0], seqs[-1]
-    inferred = t.inferred_interval()
-    interval, interval_how = inferred if inferred is not None else (None, "")
-    stacks: dict[int, list[tuple[str, float, str]]] = {}
-    for seq in seqs:
-        group = by_seq.get(seq, [])
-        w = t.writes.get(seq)
-        stacks[seq] = [
-            ("slowest request", max((s.duration for s in group), default=0.0), "hsl(212 62% 55%)"),
-            ("slowest parse", max((s.parse for s in group if s.parse is not None), default=0.0), "hsl(158 50% 48%)"),
-            ("writer lock wait", w.lock_wait if w else 0.0, "hsl(45 80% 55%)"),
-            ("sample write", w.write_seconds if w else 0.0, "hsl(18 70% 55%)"),
-        ]
-    hi = max([sum(v for _, v, _ in st) for st in stacks.values()] + [interval or 0.0]) * 1.1 or 0.01
-
-    def x_of(seq: float) -> float:
-        return PAD_L + ((seq - seq_lo + 0.5) / (seq_hi - seq_lo + 1)) * PLOT_W
-
-    def y_of(v: float) -> float:
-        return PAD_T + plot_h - (v / hi) * plot_h
-
-    bar_w = max(2.0, PLOT_W / (seq_hi - seq_lo + 1) * 0.7)
-    parts = [_svg_open(height, "Per-cycle cost decomposition")]
-    parts.append(_y_axis(y_of, 0.0, hi, PAD_T, PAD_T + plot_h, "seconds in the cycle"))
-    for seq, st in stacks.items():
-        base = 0.0
-        x = x_of(seq) - bar_w / 2
-        group = by_seq.get(seq, [])
-        w = t.writes.get(seq)
-        slowest = max(group, key=lambda s: s.duration, default=None)
-        total = sum(v for _, v, _ in st)
-        rows: list[tuple[str, object]] = [("scrape_seq", seq), ("total", _fmt_s(total))]
-        rows += [(name, _fmt_s(v)) for name, v, _ in st]
-        if slowest is not None:
-            rows.append(("slowest host", f"{slowest.hostname} ({_fmt_s(slowest.duration)}, {slowest.outcome})"))
-        rows.append(("hosts settled", f"{len(group)} of {len(t.hosts)}"))
-        if interval is not None:
-            rows.append(("vs interval", f"{100 * total / interval:.0f}% of {_fmt_s(interval)}"))
-        note = None
-        if w is None:
-            note = "No cycle_write record for this seq: lock-wait and write terms are unknown (shown as 0)."
-        elif interval is not None and total > interval:
-            note = "Cycle cost exceeded the sample interval — the next slot starts late and lag accumulates."
-        attr, title = _tip("Cycle cost", rows, note)
-        # One invisible hit-rect spanning the full column so the tooltip works on thin bars too.
-        parts.append(
-            f'<rect x="{x:.1f}" y="{PAD_T}" width="{bar_w:.1f}" height="{plot_h}" fill="transparent" class="hit" {attr}>'
-            f"{title}</rect>"
-        )
-        for _name, v, color in st:
-            if v <= 0:
-                continue
-            y_top, y_bot = y_of(base + v), y_of(base)
-            parts.append(
-                f'<rect x="{x:.1f}" y="{y_top:.1f}" width="{bar_w:.1f}" height="{max(y_bot - y_top, 0.5):.1f}" '
-                f'fill="{color}" pointer-events="none"/>'
-            )
-            base += v
-        if w is None:
-            parts.append(
-                f'<text x="{x_of(seq):.1f}" y="{PAD_T + plot_h - 3:.1f}" text-anchor="middle" class="tick warn" '
-                f'pointer-events="none">?</text>'
-            )
-    if interval is not None:
-        y = y_of(interval)
-        # Put the label over whichever end of the plot has the shorter bars,
-        # checking only the bars the label actually covers (~7 px per char).
-        how_short = "from scheduled slots" if "scheduled_at_unix" in interval_how else "inferred from request starts"
-        label = f"sample interval ≈ {_fmt_s(interval)} ({how_short})"
-        covered = min(len(seqs), max(1, math.ceil(len(label) * 7.0 / (PLOT_W / len(seqs)))))
-        totals = {seq: sum(v for _, v, _ in st) for seq, st in stacks.items()}
-        left_max = max(totals[s] for s in seqs[:covered])
-        right_max = max(totals[s] for s in seqs[-covered:])
-        if left_max <= right_max:
-            lx, anchor = PAD_L + 6, "start"
-        else:
-            lx, anchor = PAD_L + PLOT_W - 4, "end"
-        parts.append(
-            f'<line x1="{PAD_L}" y1="{y:.1f}" x2="{PAD_L + PLOT_W}" y2="{y:.1f}" class="ref" stroke-dasharray="6 3"/>'
-            f'<text x="{lx}" y="{y - 4:.1f}" text-anchor="{anchor}" class="tick ref-label">{_esc(label)}</text>'
-        )
-    parts.append(_x_axis(PAD_T + plot_h, x_of, seq_lo, seq_hi, "scrape_seq", integer=True))
-    parts.append("</svg>")
-    legend = "".join(f'<span class="key"><i style="background:{c}"></i>{n}</span>' for n, _, c in stacks[seqs[0]])
-    return f'<div class="legend">{legend}</div>' + "".join(parts)
-
-
-def chart_write_health(t: Timings) -> str:
-    seqs = t.seqs
-    strip_h = 28
-    height = PAD_T + strip_h + PAD_B
-    seq_lo, seq_hi = seqs[0], seqs[-1]
-
-    def x_of(seq: float) -> float:
-        return PAD_L + ((seq - seq_lo + 0.5) / (seq_hi - seq_lo + 1)) * PLOT_W
-
-    cell_w = max(2.0, PLOT_W / (seq_hi - seq_lo + 1) * 0.85)
-    parts = [_svg_open(height, "Sample batch write health per cycle")]
-    parts.append(
-        f'<text x="{PAD_L - 8}" y="{PAD_T + strip_h / 2 + 4:.1f}" text-anchor="end" class="lane">cycle_write</text>'
-    )
-    failures: list[str] = []
-    for seq in seqs:
-        w = t.writes.get(seq)
-        x = x_of(seq) - cell_w / 2
-        if w is None:
-            fill, cls = 'fill="url(#hatch)"', "missing"
-            attr, title = _tip(
-                "No cycle_write record",
-                [("scrape_seq", seq)],
-                "Either the diagnostics queue dropped it (see dropped_records) or the file was cut off.",
-            )
-        else:
-            rows = [
-                ("scrape_seq", seq),
-                (
-                    "scheduled slot",
-                    _fmt_clock(w.scheduled_at) if w.scheduled_at is not None else "n/a — bracket/manual",
-                ),
-                ("rows attempted", w.row_count),
-                ("writer lock wait", _fmt_s(w.lock_wait)),
-                ("append + flush", _fmt_s(w.write_seconds)),
-                ("completed", "yes" if w.completed else "no"),
-            ]
-            if w.completed:
-                fill, cls = "", "o-ok cell"
-                attr, title = _tip("Batch written", rows)
-            else:
-                fill, cls = "", "o-http cell"
-                why = w.error or "refused (session finalizing)"
-                rows.append(("reason", why))
-                attr, title = _tip(
-                    "Batch NOT written",
-                    rows,
-                    "sample_write_error names the exception class; null means the session had already disabled "
-                    "artifact mutation and refused the append.",
-                )
-                failures.append(f"seq {seq}: {why}")
-        parts.append(
-            f'<rect x="{x:.1f}" y="{PAD_T + 4}" width="{cell_w:.1f}" height="{strip_h - 8}" {fill} class="{cls}" {attr}>'
-            f"{title}</rect>"
-        )
-    parts.append(_x_axis(PAD_T + strip_h, x_of, seq_lo, seq_hi, "scrape_seq", integer=True))
-    parts.append("</svg>")
-    note = (
-        f'<p class="note warn">{len(failures)} failed batch write(s): {_esc("; ".join(failures))}</p>'
-        if failures
-        else '<p class="note">Every cycle_write record reports sample_write_completed = true.</p>'
-    )
-    return "".join(parts) + note
-
-
-def chart_coverage(t: Timings) -> str:
-    hosts, seqs, slots = t.hosts, t.seqs, t.by_slot()
-    row_h = 22
-    height = PAD_T + row_h * len(hosts) + PAD_B
-    seq_lo, seq_hi = seqs[0], seqs[-1]
-    max_rows = max((s.row_count for s in t.scrapes), default=1) or 1
-    t0 = min(s.started for s in t.scrapes)
-
-    def x_of(seq: float) -> float:
-        return PAD_L + ((seq - seq_lo + 0.5) / (seq_hi - seq_lo + 1)) * PLOT_W
-
-    cell_w = PLOT_W / (seq_hi - seq_lo + 1)
-    parts = [_svg_open(height, "GPU rows per host per scrape sequence")]
-    for i, host in enumerate(hosts):
-        y = PAD_T + i * row_h
-        parts.append(
-            f'<text x="{PAD_L - 8}" y="{y + row_h / 2 + 4:.1f}" text-anchor="end" class="lane">{_esc(host)}</text>'
-        )
-        for seq in seqs:
-            s = slots.get((host, seq))
-            x = x_of(seq) - cell_w / 2
-            if s is None:
-                attrs = 'fill="url(#hatch)" class="missing"'
-                attr, title = _tip(
-                    "Abandoned — no scrape record",
-                    [("host", host), ("scrape_seq", seq)],
-                    "Unsettled at the cycle deadline; no rows and no timing record.",
-                )
-            else:
-                if s.row_count == 0:
-                    attrs = 'class="o-http cell"'
-                else:
-                    # Ramp on the ok hue: full rows = the ok colour, fewer rows fade toward the surface.
-                    alpha = 0.3 + 0.7 * (s.row_count / max_rows)
-                    attrs = f'class="o-ok cell" fill-opacity="{alpha:.2f}"'
-                heading, rows, note = _scrape_tip(s, t.writes.get(seq), t0)
-                rows.insert(2, ("rows vs max seen", f"{s.row_count} / {max_rows}"))
-                attr, title = _tip(heading, rows, note)
-            parts.append(
-                f'<rect x="{x + 0.5:.1f}" y="{y + 1}" width="{max(cell_w - 1, 1):.1f}" height="{row_h - 2}" {attrs} {attr}>'
-                f"{title}</rect>"
-            )
-    parts.append(_x_axis(PAD_T + row_h * len(hosts), x_of, seq_lo, seq_hi, "scrape_seq", integer=True))
-    parts.append("</svg>")
-    return "".join(parts)
+    interval = t.inferred_interval()
+    return {
+        "job_id": t.job_id,
+        "run_name": t.run_name,
+        "t0": t0,
+        "hosts": hosts,
+        "seqs": t.seqs,
+        "interval": {"seconds": interval[0], "method": interval[1]} if interval else None,
+        "cost_segments": [{"key": k, "label": label, "color": c} for k, label, c in COST_SEGMENTS],
+        "scrapes": [
+            {
+                "h": host_index[s.hostname],
+                "q": s.seq,
+                "s": round(s.started - t0, 6),
+                "f": round(s.finished - t0, 6),
+                "d": s.duration,
+                "p": s.parse,
+                "lag": s.lag,
+                "ts": None if s.sample_ts is None else round(s.sample_ts - t0, 6),
+                "st": s.http_status,
+                "err": s.error_type,
+                "n": s.row_count,
+                "rc": s.reason_codes,
+                "o": s.outcome,
+            }
+            for s in t.scrapes
+        ],
+        "writes": {
+            str(w.seq): {
+                "sa": None if w.scheduled_at is None else round(w.scheduled_at - t0, 6),
+                "n": w.row_count,
+                "lw": w.lock_wait,
+                "ws": w.write_seconds,
+                "ok": w.completed,
+                "err": w.error,
+            }
+            for w in t.writes.values()
+        },
+    }
 
 
 # --------------------------------------------------------------------------- page
@@ -748,27 +256,34 @@ _CSS = """
 body { margin: 0; padding: 24px; background: var(--page); color: var(--ink-primary);
   font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
 .page-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.page-head .controls { display: flex; gap: 8px; flex: none; }
 h1 { font-size: 20px; margin: 0 0 4px; }
-h2 { font-size: 16px; margin: 0 0 6px; }
+h2 { font-size: 16px; margin: 0; }
 .subtitle { color: var(--ink-secondary); margin: 0 0 20px; }
-.theme-toggle { appearance: none; font: inherit; font-size: 12px; font-weight: 600; color: var(--ink-secondary);
+.btn { appearance: none; font: inherit; font-size: 12px; font-weight: 600; color: var(--ink-secondary);
   background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; cursor: pointer;
   white-space: nowrap; }
-.theme-toggle:hover { color: var(--ink-primary); border-color: var(--ink-muted); }
+.btn:hover { color: var(--ink-primary); border-color: var(--ink-muted); }
+.btn[hidden] { display: none; }
 .stat-cards { display: flex; gap: 12px; margin: 4px 0 24px; flex-wrap: wrap; }
-.stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 12px 18px; min-width: 110px; }
+.stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; min-width: 96px; }
 .stat-card-num { font-size: 22px; font-weight: 700; margin: 0; font-variant-numeric: tabular-nums; }
 .stat-card-label { color: var(--ink-secondary); font-size: 12px; margin: 2px 0 0; }
 .stat-card.warn .stat-card-num { color: var(--warn); }
 .chart-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 12px 16px 8px; margin-bottom: 16px; }
+.chart-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin: 0 0 4px; }
+.zoom-hint { color: var(--ink-muted); font-size: 11px; white-space: nowrap; flex: none; }
+.zoom-hint.zoomed { color: var(--slot-0); font-weight: 600; }
 .chart-panel p.blurb { margin: 0 0 8px; color: var(--ink-secondary); font-size: 13px; }
-svg.chart { display: block; width: 100%; height: auto; }
+svg.chart { display: block; width: 100%; user-select: none; touch-action: none; }
+svg.chart.dragging { cursor: col-resize; }
 svg text { fill: var(--ink-primary); font-family: inherit; }
 svg text.tick { font-size: 11px; fill: var(--ink-muted); }
 svg text.axis { font-size: 11px; font-weight: 600; letter-spacing: .02em; fill: var(--ink-secondary); }
 svg text.lane { font-size: 12px; fill: var(--ink-secondary); }
 svg text.warn { fill: var(--err); font-weight: 700; }
-svg text.ref-label { fill: var(--ink-secondary); }
+svg text.ref-label { fill: var(--ink-secondary); paint-order: stroke; stroke: var(--surface); stroke-width: 4px;
+  stroke-linejoin: round; }
 svg .ax { stroke: var(--axis); }
 svg .grid { stroke: var(--grid); }
 svg .band { fill: var(--ink-primary); fill-opacity: .035; }
@@ -779,6 +294,11 @@ svg .missing { stroke: var(--ink-muted); }
 svg .o-ok { fill: var(--ok); } svg .o-http { fill: var(--err); } svg .o-timeout { fill: var(--timeout); } svg .o-other { fill: var(--other); }
 svg .bracket { stroke: var(--slot-0); stroke-width: 2; stroke-dasharray: 3 2; }
 svg .cell { stroke: var(--grid); }
+svg .hit { fill: transparent; }
+svg .hit:hover { fill: var(--ink-primary); fill-opacity: .06; }
+svg .tipped { cursor: help; }
+svg .tipped:hover { filter: brightness(1.25); }
+svg .zoom-band { fill: var(--slot-0); fill-opacity: .18; stroke: var(--slot-0); stroke-width: 1; pointer-events: none; }
 .legend { display: flex; gap: 6px 14px; flex-wrap: wrap; margin: 4px 0 8px; font-size: 12px; color: var(--ink-secondary); }
 .legend .key { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 4px; }
 .legend .key i { display: inline-block; width: 12px; height: 12px; border-radius: 2px; border: 1px solid var(--border); }
@@ -790,12 +310,9 @@ svg .cell { stroke: var(--grid); }
 .note, .empty { margin: 6px 0 0; color: var(--ink-muted); font-size: 12px; }
 .note.warn { color: var(--warn); }
 footer { color: var(--ink-muted); font-size: 12px; margin-top: 24px; }
-svg [data-tip] { cursor: help; }
-svg [data-tip]:hover { filter: brightness(1.25); }
-svg .hit:hover { fill: var(--ink-primary); fill-opacity: .06; }
 .tooltip { position: fixed; pointer-events: none; background: var(--surface); border: 1px solid var(--border);
   border-radius: 4px; padding: 7px 10px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.25); opacity: 0;
-  z-index: 10; max-width: 420px; transition: opacity .08s; }
+  z-index: 10; max-width: 440px; transition: opacity .08s; }
 .tooltip.on { opacity: 1; }
 .tooltip .t-title { font-weight: 700; margin-bottom: 4px; color: var(--ink-primary); }
 .tooltip .t-row { display: flex; justify-content: space-between; gap: 14px; line-height: 1.45; }
@@ -805,66 +322,502 @@ svg .hit:hover { fill: var(--ink-primary); fill-opacity: .06; }
   font-size: 11.5px; white-space: normal; }
 """
 
-# Tooltip: one fixed-position panel fed from data-tip JSON on hover. The SVG
-# <title> fallbacks are removed at load so the browser's native tooltip does not
-# appear alongside it; without JS they remain and still work.
-_TOOLTIP_JS = """
-document.addEventListener('DOMContentLoaded', function () {
-  var tip = document.createElement('div'); tip.className = 'tooltip'; document.body.appendChild(tip);
-  document.querySelectorAll('svg [data-tip] > title').forEach(function (t) { t.remove(); });
-  function node(tag, cls, text, parent) {
-    var el = document.createElement(tag); el.className = cls; el.textContent = text; parent.appendChild(el); return el;
-  }
-  function show(el, ev) {
-    var d; try { d = JSON.parse(el.getAttribute('data-tip')); } catch (e) { return; }
-    tip.textContent = '';
-    node('div', 't-title', d.title, tip);
-    d.rows.forEach(function (r) {
-      var row = node('div', 't-row', '', tip);
-      node('span', 't-key', r[0], row);
-      node('span', 't-val', r[1], row);
-    });
-    if (d.note) node('div', 't-note', d.note, tip);
-    tip.classList.add('on'); move(ev);
-  }
-  function move(ev) {
-    var pad = 14, w = tip.offsetWidth, hgt = tip.offsetHeight;
-    var x = ev.clientX + pad, y = ev.clientY + pad;
-    if (x + w > window.innerWidth - 8) x = ev.clientX - w - pad;
-    if (y + hgt > window.innerHeight - 8) y = ev.clientY - hgt - pad;
-    tip.style.left = x + 'px'; tip.style.top = y + 'px';
-  }
-  document.addEventListener('pointerover', function (ev) {
-    var el = ev.target.closest ? ev.target.closest('svg [data-tip]') : null;
-    if (el) show(el, ev);
-  });
-  document.addEventListener('pointermove', function (ev) { if (tip.classList.contains('on')) move(ev); });
-  document.addEventListener('pointerout', function (ev) {
-    var el = ev.target.closest ? ev.target.closest('svg [data-tip]') : null;
-    if (el && !(ev.relatedTarget && el.contains(ev.relatedTarget))) tip.classList.remove('on');
-  });
-});
-"""
-
 # Applied before first paint so a stored light preference never flashes dark.
 _THEME_JS = """
 (function () {
-  var KEY = "scrape-timings-theme";
+  var KEY = 'scrape-timings-theme';
   var root = document.documentElement;
-  try { var saved = localStorage.getItem(KEY); if (saved === "light" || saved === "dark") root.dataset.theme = saved; } catch (e) {}
-  function label(btn) { btn.textContent = root.dataset.theme === "dark" ? "Switch to light mode" : "Switch to dark mode"; }
-  document.addEventListener("DOMContentLoaded", function () {
-    var btn = document.querySelector(".theme-toggle");
+  try { var saved = localStorage.getItem(KEY); if (saved === 'light' || saved === 'dark') root.dataset.theme = saved; } catch (e) {}
+  function label(btn) { btn.textContent = root.dataset.theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'; }
+  document.addEventListener('DOMContentLoaded', function () {
+    var btn = document.querySelector('.theme-toggle');
     if (!btn) return;
     label(btn);
-    btn.addEventListener("click", function () {
-      root.dataset.theme = root.dataset.theme === "dark" ? "light" : "dark";
+    btn.addEventListener('click', function () {
+      root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark';
       try { localStorage.setItem(KEY, root.dataset.theme); } catch (e) {}
       label(btn);
     });
   });
 })();
 """
+
+# Chart drawing. All five charts share one zoom state: a contiguous index range
+# into DATA.seqs. Dragging on any chart maps the pixel span back to seq indices
+# (the timeline goes via wall-clock time) and redraws everything.
+_CHARTS_JS = """
+(function () {
+  var DATA = JSON.parse(document.getElementById('scrape-data').textContent);
+  var NS = 'http://www.w3.org/2000/svg';
+  var PAD = { l: 130, r: 24, t: 12, b: 34 };
+  var HOST_HUES = [212, 18, 158, 280, 45, 340, 95, 190];
+  var OUTCOME_CLASS = { ok: 'o-ok', http_error: 'o-http', timeout: 'o-timeout', other_error: 'o-other' };
+  var OUTCOME_LABEL = { ok: 'OK - HTTP 200, body parsed', http_error: 'HTTP error', timeout: 'Request timeout', other_error: 'Request exception' };
+
+  function hostColor(i) { return 'hsl(' + HOST_HUES[i % HOST_HUES.length] + ' 62% 52%)'; }
+  function el(tag, attrs, parent) {
+    var e = document.createElementNS(NS, tag);
+    for (var k in attrs) if (attrs[k] !== null && attrs[k] !== undefined) e.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+  function text(parent, x, y, str, cls, anchor, extra) {
+    var t = el('text', { x: x.toFixed(1), y: y.toFixed(1), 'class': cls, 'text-anchor': anchor || 'start' }, parent);
+    if (extra) for (var k in extra) t.setAttribute(k, extra[k]);
+    t.textContent = str;
+    return t;
+  }
+  function fmtS(s) { return s >= 1 ? s.toFixed(2) + ' s' : (s * 1000).toFixed(1) + ' ms'; }
+  function fmtMs(s) { return s === null || s === undefined ? '-' : fmtS(s); }
+  function fmtClock(rel) { return new Date((DATA.t0 + rel) * 1000).toISOString().slice(11, 23) + 'Z'; }
+  function fmtTick(v) { if (v === 0) return '0'; if (Math.abs(v) >= 100) return v.toFixed(0); return Number(v.toPrecision(3)).toString(); }
+  function niceTicks(lo, hi, n) {
+    if (hi <= lo) return [lo];
+    var raw = (hi - lo) / n, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    var step = [1, 2, 2.5, 5, 10].map(function (m) { return m * mag; }).filter(function (s) { return s >= raw; })[0];
+    var out = [], v = Math.ceil(lo / step) * step;
+    while (v <= hi + 1e-12) { out.push(Number(v.toFixed(10))); v += step; }
+    return out;
+  }
+
+  // ---- index the payload ---------------------------------------------------
+  var seqs = DATA.seqs, hosts = DATA.hosts;
+  var bySeq = new Map(), slot = new Map();
+  DATA.scrapes.forEach(function (s) {
+    if (!bySeq.has(s.q)) bySeq.set(s.q, []);
+    bySeq.get(s.q).push(s);
+    slot.set(s.h + '|' + s.q, s);
+  });
+  var writes = DATA.writes;
+  function writeOf(q) { return writes[String(q)] || null; }
+  var interval = DATA.interval ? DATA.interval.seconds : null;
+
+  // Cycle span per seq (relative seconds): settled scrapes; else the scheduled
+  // slot to the next scheduled slot; else interpolated between neighbours.
+  var span = new Map();
+  seqs.forEach(function (q) {
+    var g = bySeq.get(q);
+    if (g && g.length) span.set(q, [Math.min.apply(null, g.map(function (s) { return s.s; })), Math.max.apply(null, g.map(function (s) { return s.f; }))]);
+  });
+  var tEnd = Math.max.apply(null, DATA.scrapes.map(function (s) { return s.f; }));
+  seqs.forEach(function (q, i) {
+    if (span.has(q)) return;
+    var w = writeOf(q);
+    if (w && w.sa !== null) {
+      var nxt = null;
+      for (var j = i + 1; j < seqs.length && nxt === null; j++) { var wn = writeOf(seqs[j]); if (wn && wn.sa !== null) nxt = wn.sa; }
+      var b = nxt !== null ? nxt : Math.min(tEnd, w.sa + 0.02);
+      span.set(q, [w.sa, Math.max(b, w.sa + 0.005)]);
+      return;
+    }
+    var prev = null, next = null;
+    for (var a = i - 1; a >= 0 && !prev; a--) prev = span.get(seqs[a]) || null;
+    for (var c = i + 1; c < seqs.length && !next; c++) next = span.get(seqs[c]) || null;
+    if (prev && next) span.set(q, [prev[1], next[0]]);
+    else if (prev) span.set(q, [prev[1], Math.min(tEnd, prev[1] + (prev[1] - prev[0]) + 0.01)]);
+    else if (next) span.set(q, [Math.max(0, next[0] - (next[1] - next[0]) - 0.01), next[0]]);
+  });
+
+  // ---- tooltip -------------------------------------------------------------
+  var tip = document.createElement('div'); tip.className = 'tooltip'; document.body.appendChild(tip);
+  function node(tag, cls, str, parent) { var e = document.createElement(tag); e.className = cls; e.textContent = str; parent.appendChild(e); return e; }
+  function setTip(target, title, rows, note) { target.__tip = { title: title, rows: rows, note: note || null }; target.classList.add('tipped'); }
+  function showTip(d, ev) {
+    tip.textContent = '';
+    node('div', 't-title', d.title, tip);
+    d.rows.forEach(function (r) { var row = node('div', 't-row', '', tip); node('span', 't-key', r[0], row); node('span', 't-val', String(r[1]), row); });
+    if (d.note) node('div', 't-note', d.note, tip);
+    tip.classList.add('on'); moveTip(ev);
+  }
+  function moveTip(ev) {
+    var pad = 14, w = tip.offsetWidth, h = tip.offsetHeight, x = ev.clientX + pad, y = ev.clientY + pad;
+    if (x + w > window.innerWidth - 8) x = ev.clientX - w - pad;
+    if (y + h > window.innerHeight - 8) y = ev.clientY - h - pad;
+    tip.style.left = x + 'px'; tip.style.top = y + 'px';
+  }
+  function hideTip() { tip.classList.remove('on'); }
+  function tipTarget(n) { while (n && n.nodeType === 1 && !n.__tip && n.tagName !== 'svg') n = n.parentNode; return n && n.__tip ? n : null; }
+  var dragging = false;
+  document.addEventListener('pointerover', function (ev) { if (dragging) return; var t = tipTarget(ev.target); if (t) showTip(t.__tip, ev); });
+  document.addEventListener('pointermove', function (ev) { if (tip.classList.contains('on')) moveTip(ev); });
+  document.addEventListener('pointerout', function (ev) { var t = tipTarget(ev.target); if (t && !(ev.relatedTarget && t.contains(ev.relatedTarget))) hideTip(); });
+
+  function scrapeTip(s) {
+    var w = writeOf(s.q);
+    var rows = [['host', hosts[s.h]], ['scrape_seq', s.q], ['started', fmtClock(s.s) + '  (+' + s.s.toFixed(3) + ' s)'], ['finished', fmtClock(s.f)],
+      ['request duration', fmtS(s.d)], ['parse', fmtMs(s.p)], ['HTTP status', s.st === null ? '-' : s.st]];
+    if (s.err) rows.push(['exception', s.err]);
+    if (s.lag === null) rows.push(['schedule lag', 'n/a - bracket/manual scrape']);
+    else { rows.push(['schedule lag', fmtS(s.lag)]); if (w && w.sa !== null) rows.push(['scheduled slot', fmtClock(w.sa)]); }
+    rows.push(['GPU rows', s.n]);
+    if (s.ts !== null) rows.push(['sample timestamp', fmtClock(s.ts)]);
+    if (s.rc.length) rows.push(['reason codes', s.rc.join(', ')]);
+    var note = null;
+    if (s.o === 'timeout') note = 'requests raised a Timeout; the cycle deadline had not yet expired so a record exists.';
+    else if (s.o === 'http_error') note = 'Non-2xx response; no rows were parsed and no power sample was invented.';
+    else if (s.n === 0) note = 'Settled with 0 rows - body parsed but yielded no GPU readings.';
+    return { title: OUTCOME_LABEL[s.o], rows: rows, note: note };
+  }
+  function abandonedTip(h, q, extraRows, note) {
+    var rows = [['host', hosts[h]], ['scrape_seq', q]].concat(extraRows || []);
+    return { title: 'Abandoned - no scrape record', rows: rows, note: note || 'The request had not settled when the cycle deadline expired; the collector counted an endpoint_timeout and wrote no timing record for this (host, seq).' };
+  }
+
+  // ---- shared zoom state ---------------------------------------------------
+  var view = { lo: 0, hi: seqs.length - 1 };
+  var charts = [];
+  function visible() { return seqs.slice(view.lo, view.hi + 1); }
+  function setView(lo, hi) {
+    lo = Math.max(0, Math.min(lo, seqs.length - 1)); hi = Math.max(lo, Math.min(hi, seqs.length - 1));
+    if (lo === view.lo && hi === view.hi) return;
+    view.lo = lo; view.hi = hi;
+    charts.forEach(function (c) { c.draw(); });
+    updateHints();
+  }
+  function resetView() { setView(0, seqs.length - 1); }
+  function updateHints() {
+    var full = view.lo === 0 && view.hi === seqs.length - 1;
+    document.querySelectorAll('.zoom-hint').forEach(function (h) {
+      h.textContent = full ? 'drag to zoom - linked across charts' : 'seq ' + seqs[view.lo] + '-' + seqs[view.hi] + ' of ' + seqs[0] + '-' + seqs[seqs.length - 1] + ' - double-click to reset';
+      h.classList.toggle('zoomed', !full);
+    });
+    var btn = document.querySelector('.zoom-reset'); if (btn) btn.hidden = full;
+  }
+
+  // ---- chart scaffolding ---------------------------------------------------
+  var clipSeq = 0;
+  function makeChart(id, height, drawFn, seqRangeAt) {
+    var svg = document.querySelector('svg.chart[data-chart="' + id + '"]');
+    if (!svg) return null;
+    svg.style.height = height + 'px';
+    var defs = el('defs', {}, svg);
+    var pat = el('pattern', { id: 'hatch-' + id, width: 6, height: 6, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' }, defs);
+    el('line', { x1: 0, y1: 0, x2: 0, y2: 6, 'class': 'hatch-line', 'stroke-width': 1.5 }, pat);
+    var clipId = 'clip-' + id + '-' + (clipSeq++);
+    var clip = el('clipPath', { id: clipId }, defs);
+    var clipRect = el('rect', { x: PAD.l, y: 0, width: 10, height: height }, clip);
+    var gAxes = el('g', { 'class': 'axes' }, svg);
+    var gPlot = el('g', { 'class': 'plot', 'clip-path': 'url(#' + clipId + ')' }, svg);
+    var gTop = el('g', { 'class': 'annot', 'pointer-events': 'none' }, svg);
+    var band = el('rect', { 'class': 'zoom-band', x: 0, y: PAD.t, width: 0, height: height - PAD.t - PAD.b, visibility: 'hidden' }, svg);
+    var chart = { id: id, svg: svg, H: height, W: 0, plotW: 0, gAxes: gAxes, gPlot: gPlot, hatch: 'url(#hatch-' + id + ')', gTop: gTop, seqRangeAt: null };
+    chart.layout = function () {
+      var w = svg.getBoundingClientRect().width || 800;
+      chart.W = w; chart.plotW = w - PAD.l - PAD.r;
+      svg.setAttribute('viewBox', '0 0 ' + w + ' ' + height);
+      clipRect.setAttribute('width', chart.plotW);
+    };
+    chart.draw = function () {
+      if (!chart.W) chart.layout();
+      gAxes.textContent = ''; gPlot.textContent = ''; gTop.textContent = '';
+      drawFn(chart);
+    };
+    chart.seqRangeAt = function (xa, xb) { return seqRangeAt(chart, xa, xb); };
+    // Band scale over the visible seqs: every seq chart shares it so zoom bands line up.
+    chart.n = function () { return view.hi - view.lo + 1; };
+    chart.bandW = function () { return chart.plotW / chart.n(); };
+    chart.xOfIdx = function (i) { return PAD.l + (i - view.lo + 0.5) / chart.n() * chart.plotW; };
+    chart.idxAt = function (x) { return Math.max(view.lo, Math.min(view.hi, view.lo + Math.floor((x - PAD.l) / chart.plotW * chart.n()))); };
+
+    // Drag-to-zoom on the svg itself (marks keep their own pointer events for tooltips).
+    var start = null;
+    svg.addEventListener('pointerdown', function (ev) {
+      if (ev.button !== 0) return;
+      start = ev.clientX - svg.getBoundingClientRect().left;
+      svg.setPointerCapture(ev.pointerId);
+    });
+    svg.addEventListener('pointermove', function (ev) {
+      if (start === null) return;
+      var x = ev.clientX - svg.getBoundingClientRect().left;
+      if (!dragging && Math.abs(x - start) < 3) return;
+      dragging = true; hideTip(); svg.classList.add('dragging');
+      var a = Math.max(PAD.l, Math.min(start, x)), b = Math.min(PAD.l + chart.plotW, Math.max(start, x));
+      band.setAttribute('x', a); band.setAttribute('width', Math.max(0, b - a)); band.setAttribute('visibility', 'visible');
+    });
+    function endDrag(ev) {
+      if (start === null) return;
+      var wasDragging = dragging;
+      var a = band.x.baseVal.value, b = a + band.width.baseVal.value;
+      start = null; dragging = false; svg.classList.remove('dragging'); band.setAttribute('visibility', 'hidden');
+      if (!wasDragging) return;
+      var r = chart.seqRangeAt(a, b);
+      if (r) setView(r[0], r[1]);
+    }
+    svg.addEventListener('pointerup', endDrag);
+    svg.addEventListener('pointercancel', endDrag);
+    svg.addEventListener('dblclick', resetView);
+
+    var pending = false;
+    new ResizeObserver(function () { if (pending) return; pending = true; requestAnimationFrame(function () { pending = false; chart.layout(); chart.draw(); }); }).observe(svg);
+    charts.push(chart);
+    return chart;
+  }
+
+  function seqRangeBand(chart, xa, xb) { return [chart.idxAt(xa), chart.idxAt(xb - 0.001)]; }
+
+  function xAxisSeq(chart, y) {
+    var g = chart.gAxes;
+    el('line', { x1: PAD.l, y1: y, x2: PAD.l + chart.plotW, y2: y, 'class': 'ax' }, g);
+    var vis = visible(), stride = Math.ceil(vis.length / 30);
+    vis.forEach(function (q, k) {
+      if (k % stride) return;
+      var x = chart.xOfIdx(view.lo + k);
+      el('line', { x1: x, y1: y, x2: x, y2: y + 4, 'class': 'ax' }, g);
+      text(g, x, y + 15, String(q), 'tick', 'middle');
+    });
+    text(g, PAD.l + chart.plotW / 2, y + 29, 'scrape_seq', 'axis', 'middle');
+  }
+  function yAxis(chart, yOf, lo, hi, top, bottom, label) {
+    var g = chart.gAxes;
+    el('line', { x1: PAD.l, y1: top, x2: PAD.l, y2: bottom, 'class': 'ax' }, g);
+    niceTicks(lo, hi, 5).forEach(function (v) {
+      var y = yOf(v);
+      el('line', { x1: PAD.l, y1: y, x2: PAD.l + chart.plotW, y2: y, 'class': 'grid' }, g);
+      text(g, PAD.l - 6, y + 4, fmtTick(v), 'tick', 'end');
+    });
+    var mid = (top + bottom) / 2;
+    text(g, 14, mid, label, 'axis', 'middle', { transform: 'rotate(-90 14 ' + mid.toFixed(1) + ')' });
+  }
+
+  // ---- 1. timeline ---------------------------------------------------------
+  var LANE = 26;
+  function timelineWindow() {
+    var a = Infinity, b = -Infinity;
+    visible().forEach(function (q) {
+      var sp = span.get(q); if (sp) { a = Math.min(a, sp[0]); b = Math.max(b, sp[1]); }
+      var w = writeOf(q); if (w && w.sa !== null) a = Math.min(a, w.sa);
+    });
+    if (!isFinite(a)) { a = 0; b = tEnd; }
+    var pad = Math.max((b - a) * 0.02, 1e-3);
+    return [a - pad, b + pad];
+  }
+  function drawTimeline(c) {
+    var win = timelineWindow(), tA = win[0], tB = win[1];
+    var xOfT = function (t) { return PAD.l + (t - tA) / (tB - tA) * c.plotW; };
+    var lanesBottom = PAD.t + LANE * hosts.length;
+    c.timeAt = function (x) { return tA + (x - PAD.l) / c.plotW * (tB - tA); };
+    hosts.forEach(function (host, hi) {
+      var y = PAD.t + hi * LANE;
+      if (hi % 2) el('rect', { x: PAD.l, y: y, width: c.plotW, height: LANE, 'class': 'band' }, c.gAxes);
+      text(c.gAxes, PAD.l - 8, y + LANE / 2 + 4, host, 'lane', 'end');
+      visible().forEach(function (q) {
+        var s = slot.get(hi + '|' + q);
+        if (!s) {
+          var sp = span.get(q); if (!sp) return;
+          var x0 = xOfT(sp[0]), w0 = Math.max(xOfT(sp[1]) - x0, 4);
+          var r0 = el('rect', { x: x0, y: y + 4, width: w0, height: LANE - 8, fill: c.hatch, 'class': 'missing', 'stroke-dasharray': '2 2' }, c.gPlot);
+          var wr = writeOf(q), extra = [];
+          if (wr && wr.sa !== null) extra.push(['scheduled at', fmtClock(wr.sa)]);
+          extra.push(['slot span', '+' + sp[0].toFixed(3) + ' s to +' + sp[1].toFixed(3) + ' s']);
+          var at = abandonedTip(hi, q, extra); setTip(r0, at.title, at.rows, at.note);
+          return;
+        }
+        var x = xOfT(s.s), w = Math.max(xOfT(s.f) - x, 2.5);
+        var r = el('rect', { x: x, y: y + 5, width: w, height: LANE - 10, rx: 1.5, 'class': OUTCOME_CLASS[s.o] + (s.lag === null ? ' bracket' : '') }, c.gPlot);
+        var d = scrapeTip(s); setTip(r, d.title, d.rows, d.note);
+      });
+    });
+    visible().forEach(function (q) {
+      var w = writeOf(q); if (!w || w.sa === null) return;
+      var x = xOfT(w.sa);
+      var ln = el('line', { x1: x, y1: PAD.t, x2: x, y2: lanesBottom, 'class': 'sched', 'stroke-dasharray': '1 3', 'stroke-width': 3, 'stroke-opacity': 0 }, c.gPlot);
+      el('line', { x1: x, y1: PAD.t, x2: x, y2: lanesBottom, 'class': 'sched', 'stroke-dasharray': '1 3', 'pointer-events': 'none' }, c.gPlot);
+      var g = bySeq.get(q) || [], first = g.length ? Math.min.apply(null, g.map(function (s) { return s.s; })) : null;
+      var rows = [['scrape_seq', q], ['scheduled at', fmtClock(w.sa)], ['offset', '+' + w.sa.toFixed(3) + ' s']];
+      if (first !== null) rows.push(['first request started', '+' + fmtS(Math.max(0, first - w.sa)) + ' after slot']);
+      setTip(ln, 'Scheduled slot', rows);
+    });
+    // x axis in seconds since t0
+    var g = c.gAxes;
+    el('line', { x1: PAD.l, y1: lanesBottom, x2: PAD.l + c.plotW, y2: lanesBottom, 'class': 'ax' }, g);
+    niceTicks(tA, tB, 8).forEach(function (v) {
+      var x = xOfT(v); if (x < PAD.l - 0.5 || x > PAD.l + c.plotW + 0.5) return;
+      el('line', { x1: x, y1: lanesBottom, x2: x, y2: lanesBottom + 4, 'class': 'ax' }, g);
+      text(g, x, lanesBottom + 15, fmtTick(v), 'tick', 'middle');
+    });
+    text(g, PAD.l + c.plotW / 2, lanesBottom + 29, 'wall-clock seconds since the first scheduled slot / request (' + fmtClock(0) + ')', 'axis', 'middle');
+  }
+  function seqRangeTimeline(c, xa, xb) {
+    var ta = c.timeAt(xa), tb = c.timeAt(xb), lo = null, hi = null;
+    for (var i = view.lo; i <= view.hi; i++) {
+      var sp = span.get(seqs[i]); if (!sp) continue;
+      if (sp[1] >= ta && sp[0] <= tb) { if (lo === null) lo = i; hi = i; }
+    }
+    if (lo === null) {
+      var best = view.lo, bd = Infinity;
+      for (var j = view.lo; j <= view.hi; j++) { var s2 = span.get(seqs[j]); if (!s2) continue; var d = Math.abs((s2[0] + s2[1]) / 2 - (ta + tb) / 2); if (d < bd) { bd = d; best = j; } }
+      lo = hi = best;
+    }
+    return [lo, hi];
+  }
+
+  // ---- 2. lag --------------------------------------------------------------
+  var LAG_H = 200;
+  function drawLag(c) {
+    var vis = visible(), lags = [];
+    vis.forEach(function (q) { (bySeq.get(q) || []).forEach(function (s) { if (s.lag !== null) lags.push(s.lag); }); });
+    var hi = lags.length ? Math.max.apply(null, lags) * 1.08 : 0.01; if (hi <= 0) hi = 0.01;
+    var yOf = function (v) { return PAD.t + LAG_H - v / hi * LAG_H; };
+    yAxis(c, yOf, 0, hi, PAD.t, PAD.t + LAG_H, 'schedule lag (s)');
+    hosts.forEach(function (host, h) {
+      var runs = [[]], color = hostColor(h);
+      vis.forEach(function (q, k) {
+        var s = slot.get(h + '|' + q);
+        if (s && s.lag !== null) runs[runs.length - 1].push([view.lo + k, s]);
+        else if (runs[runs.length - 1].length) runs.push([]);
+      });
+      runs.forEach(function (run) {
+        if (run.length < 2) return;
+        el('polyline', { points: run.map(function (p) { return c.xOfIdx(p[0]).toFixed(1) + ',' + yOf(p[1].lag).toFixed(1); }).join(' '), fill: 'none', stroke: color, 'stroke-width': 1.8, 'pointer-events': 'none' }, c.gPlot);
+      });
+      runs.forEach(function (run) { run.forEach(function (p) {
+        var s = p[1], w = writeOf(s.q);
+        var dot = el('circle', { cx: c.xOfIdx(p[0]), cy: yOf(s.lag), r: 3, fill: color }, c.gPlot);
+        var rows = [['host', host], ['scrape_seq', s.q], ['schedule lag', fmtS(s.lag)]];
+        if (w && w.sa !== null) rows.push(['scheduled slot', fmtClock(w.sa)]);
+        rows.push(['request started', fmtClock(s.s)], ['request duration', fmtS(s.d)]);
+        var others = (bySeq.get(s.q) || []).filter(function (o) { return o.lag !== null && o.h !== h; }).map(function (o) { return o.lag; });
+        if (others.length) rows.push(["other hosts' lag (this seq)", fmtS(Math.min.apply(null, others)) + ' - ' + fmtS(Math.max.apply(null, others))]);
+        setTip(dot, 'Schedule lag', rows);
+      }); });
+      vis.forEach(function (q, k) {
+        if (slot.has(h + '|' + q)) return;
+        var x = c.xOfIdx(view.lo + k);
+        var ln = el('line', { x1: x, y1: PAD.t, x2: x, y2: PAD.t + LAG_H, stroke: color, 'stroke-dasharray': '2 3', opacity: 0.6, 'stroke-width': 3 }, c.gPlot);
+        var at = abandonedTip(h, q, [], 'No lag can be measured: the request never settled before the cycle deadline.');
+        setTip(ln, at.title, at.rows, at.note);
+      });
+    });
+    xAxisSeq(c, PAD.t + LAG_H);
+    var legend = document.querySelector('.legend[data-legend="hosts"]');
+    if (legend && !legend.childElementCount) hosts.forEach(function (host, h) {
+      var k = document.createElement('span'); k.className = 'key';
+      var i = document.createElement('i'); i.style.background = hostColor(h); k.appendChild(i);
+      k.appendChild(document.createTextNode(host)); legend.appendChild(k);
+    });
+  }
+
+  // ---- 3. cycle cost -------------------------------------------------------
+  var COST_H = 220;
+  function costStack(q) {
+    var g = bySeq.get(q) || [], w = writeOf(q);
+    var slowest = g.reduce(function (m, s) { return !m || s.d > m.d ? s : m; }, null);
+    var parsed = g.filter(function (s) { return s.p !== null; });
+    return {
+      request: g.length ? Math.max.apply(null, g.map(function (s) { return s.d; })) : 0,
+      parse: parsed.length ? Math.max.apply(null, parsed.map(function (s) { return s.p; })) : 0,
+      lock: w ? w.lw : 0, write: w ? w.ws : 0, slowest: slowest, settled: g.length, write_rec: w
+    };
+  }
+  function drawCost(c) {
+    var vis = visible(), stacks = vis.map(costStack);
+    var totals = stacks.map(function (st) { return DATA.cost_segments.reduce(function (a, seg) { return a + st[seg.key]; }, 0); });
+    var hi = Math.max.apply(null, totals.concat([interval || 0])) * 1.1; if (!(hi > 0)) hi = 0.01;
+    var yOf = function (v) { return PAD.t + COST_H - v / hi * COST_H; };
+    yAxis(c, yOf, 0, hi, PAD.t, PAD.t + COST_H, 'seconds in the cycle');
+    var barW = Math.max(2, c.bandW() * 0.7);
+    vis.forEach(function (q, k) {
+      var st = stacks[k], total = totals[k], x = c.xOfIdx(view.lo + k) - barW / 2;
+      var rows = [['scrape_seq', q], ['total', fmtS(total)]];
+      DATA.cost_segments.forEach(function (seg) { rows.push([seg.label, fmtS(st[seg.key])]); });
+      if (st.slowest) rows.push(['slowest host', hosts[st.slowest.h] + ' (' + fmtS(st.slowest.d) + ', ' + st.slowest.o + ')']);
+      rows.push(['hosts settled', st.settled + ' of ' + hosts.length]);
+      if (interval !== null) rows.push(['vs interval', (100 * total / interval).toFixed(0) + '% of ' + fmtS(interval)]);
+      var note = null;
+      if (!st.write_rec) note = 'No cycle_write record for this seq: lock-wait and write terms are unknown (shown as 0).';
+      else if (interval !== null && total > interval) note = 'Cycle cost exceeded the sample interval - the next slot starts late and lag accumulates.';
+      var hit = el('rect', { x: x, y: PAD.t, width: barW, height: COST_H, 'class': 'hit' }, c.gPlot);
+      setTip(hit, 'Cycle cost', rows, note);
+      var base = 0;
+      DATA.cost_segments.forEach(function (seg) {
+        var v = st[seg.key]; if (v <= 0) return;
+        var yt = yOf(base + v), yb = yOf(base);
+        el('rect', { x: x, y: yt, width: barW, height: Math.max(yb - yt, 0.5), fill: seg.color, 'pointer-events': 'none' }, c.gPlot);
+        base += v;
+      });
+      if (!st.write_rec) text(c.gPlot, x + barW / 2, PAD.t + COST_H - 3, '?', 'tick warn', 'middle', { 'pointer-events': 'none' });
+    });
+    if (interval !== null) {
+      var y = yOf(interval);
+      el('line', { x1: PAD.l, y1: y, x2: PAD.l + c.plotW, y2: y, 'class': 'ref', 'stroke-dasharray': '6 3', 'pointer-events': 'none' }, c.gPlot);
+      var label = 'sample interval ≈ ' + fmtS(interval) + ' (' + DATA.interval.method + ')';
+      var covered = Math.min(vis.length, Math.max(1, Math.ceil(label.length * 7 / c.bandW())));
+      var leftMax = Math.max.apply(null, totals.slice(0, covered)), rightMax = Math.max.apply(null, totals.slice(-covered));
+      var onLeft = leftMax <= rightMax;
+      text(c.gTop, onLeft ? PAD.l + 6 : PAD.l + c.plotW - 4, y - 4, label, 'tick ref-label', onLeft ? 'start' : 'end');
+    }
+    xAxisSeq(c, PAD.t + COST_H);
+  }
+
+  // ---- 4. write health -----------------------------------------------------
+  var STRIP_H = 28;
+  function drawWrite(c) {
+    var vis = visible(), cellW = Math.max(2, c.bandW() * 0.85);
+    text(c.gAxes, PAD.l - 8, PAD.t + STRIP_H / 2 + 4, 'cycle_write', 'lane', 'end');
+    vis.forEach(function (q, k) {
+      var w = writeOf(q), x = c.xOfIdx(view.lo + k) - cellW / 2, r;
+      if (!w) {
+        r = el('rect', { x: x, y: PAD.t + 4, width: cellW, height: STRIP_H - 8, fill: c.hatch, 'class': 'missing' }, c.gPlot);
+        setTip(r, 'No cycle_write record', [['scrape_seq', q]], 'Either the diagnostics queue dropped it (see dropped_records) or the file was cut off.');
+        return;
+      }
+      var rows = [['scrape_seq', q], ['scheduled slot', w.sa === null ? 'n/a - bracket/manual' : fmtClock(w.sa)], ['rows attempted', w.n],
+        ['writer lock wait', fmtS(w.lw)], ['append + flush', fmtS(w.ws)], ['completed', w.ok ? 'yes' : 'no']];
+      r = el('rect', { x: x, y: PAD.t + 4, width: cellW, height: STRIP_H - 8, 'class': (w.ok ? 'o-ok' : 'o-http') + ' cell' }, c.gPlot);
+      if (w.ok) setTip(r, 'Batch written', rows);
+      else { rows.push(['reason', w.err || 'refused (session finalizing)']); setTip(r, 'Batch NOT written', rows, 'sample_write_error names the exception class; null means the session had already disabled artifact mutation and refused the append.'); }
+    });
+    xAxisSeq(c, PAD.t + STRIP_H);
+  }
+
+  // ---- 5. coverage ---------------------------------------------------------
+  var ROW_H = 22;
+  var maxRows = Math.max(1, Math.max.apply(null, DATA.scrapes.map(function (s) { return s.n; })));
+  function drawCoverage(c) {
+    var vis = visible(), cellW = c.bandW();
+    hosts.forEach(function (host, h) {
+      var y = PAD.t + h * ROW_H;
+      text(c.gAxes, PAD.l - 8, y + ROW_H / 2 + 4, host, 'lane', 'end');
+      vis.forEach(function (q, k) {
+        var s = slot.get(h + '|' + q), x = c.xOfIdx(view.lo + k) - cellW / 2, r;
+        var attrs = { x: x + 0.5, y: y + 1, width: Math.max(cellW - 1, 1), height: ROW_H - 2 };
+        if (!s) {
+          attrs.fill = c.hatch; attrs['class'] = 'missing'; r = el('rect', attrs, c.gPlot);
+          var at = abandonedTip(h, q, [], 'Unsettled at the cycle deadline; no rows and no timing record.'); setTip(r, at.title, at.rows, at.note);
+          return;
+        }
+        if (s.n === 0) attrs['class'] = 'o-http cell';
+        else { attrs['class'] = 'o-ok cell'; attrs['fill-opacity'] = (0.3 + 0.7 * s.n / maxRows).toFixed(2); }
+        r = el('rect', attrs, c.gPlot);
+        var d = scrapeTip(s); d.rows.splice(2, 0, ['rows vs max seen', s.n + ' / ' + maxRows]); setTip(r, d.title, d.rows, d.note);
+      });
+    });
+    xAxisSeq(c, PAD.t + ROW_H * hosts.length);
+  }
+
+  // ---- boot ----------------------------------------------------------------
+  makeChart('timeline', PAD.t + LANE * hosts.length + PAD.b, drawTimeline, seqRangeTimeline);
+  makeChart('lag', PAD.t + LAG_H + PAD.b, drawLag, seqRangeBand);
+  makeChart('cost', PAD.t + COST_H + PAD.b, drawCost, seqRangeBand);
+  makeChart('write', PAD.t + STRIP_H + PAD.b, drawWrite, seqRangeBand);
+  makeChart('coverage', PAD.t + ROW_H * hosts.length + PAD.b, drawCoverage, seqRangeBand);
+  charts.forEach(function (c) { c.layout(); c.draw(); });
+  updateHints();
+  var resetBtn = document.querySelector('.zoom-reset'); if (resetBtn) resetBtn.addEventListener('click', resetView);
+  window.__scrapeViz = { setView: setView, resetView: resetView, view: view, seqs: seqs };
+})();
+"""
+
+
+def _esc(s: object) -> str:
+    return html.escape(str(s), quote=True)
+
+
+def _stat_card(num: object, label: str, *, warn: bool = False) -> str:
+    cls = "stat-card warn" if warn else "stat-card"
+    return (
+        f'<div class="{cls}"><p class="stat-card-num">{_esc(num)}</p><p class="stat-card-label">{_esc(label)}</p></div>'
+    )
 
 
 def _timeline_legend() -> str:
@@ -881,10 +834,17 @@ def _timeline_legend() -> str:
     return f'<div class="legend">{out}</div>'
 
 
-def _stat_card(num: object, label: str, *, warn: bool = False) -> str:
-    cls = "stat-card warn" if warn else "stat-card"
+def _cost_legend() -> str:
+    out = "".join(f'<span class="key"><i style="background:{c}"></i>{label}</span>' for _, label, c in COST_SEGMENTS)
+    return f'<div class="legend">{out}</div>'
+
+
+def _panel(chart_id: str, title: str, blurb: str, before: str = "", after: str = "") -> str:
     return (
-        f'<div class="{cls}"><p class="stat-card-num">{_esc(num)}</p><p class="stat-card-label">{_esc(label)}</p></div>'
+        f'<section class="chart-panel"><div class="chart-head"><h2>{_esc(title)}</h2>'
+        '<span class="zoom-hint"></span></div>'
+        f'<p class="blurb">{_esc(blurb)}</p>{before}'
+        f'<svg class="chart" data-chart="{chart_id}"></svg>{after}</section>'
     )
 
 
@@ -896,7 +856,7 @@ def render_html(t: Timings, source: Path) -> str:
     brackets = [s for s in t.scrapes if s.is_bracket]
     missing = sum(1 for h in hosts for q in seqs if (h, q) not in t.by_slot())
     failed = sum(1 for s in t.scrapes if s.outcome != "ok")
-    write_failures = sum(1 for w in t.writes.values() if not w.completed)
+    write_failures = [w for w in t.writes.values() if not w.completed]
     cards = [
         _stat_card(f"{seqs[0]} – {seqs[-1]}", f"scrape_seq range ({len(seqs)} cycles)"),
         _stat_card(len(hosts), "hosts seen"),
@@ -904,7 +864,7 @@ def render_html(t: Timings, source: Path) -> str:
         _stat_card(failed, "failed requests", warn=failed > 0),
         _stat_card(missing, "abandoned slots (host × seq, no record)", warn=missing > 0),
         _stat_card(
-            f"{len(t.writes)} / {write_failures}", "cycle_write records / failed writes", warn=write_failures > 0
+            f"{len(t.writes)} / {len(write_failures)}", "cycle_write records / failed writes", warn=bool(write_failures)
         ),
     ]
     if t.dropped_records is None:
@@ -916,58 +876,76 @@ def render_html(t: Timings, source: Path) -> str:
     if t.unknown_events:
         cards.append(_stat_card(t.unknown_events, "unknown event kinds", warn=True))
 
-    def panel(title: str, blurb: str, body: str) -> str:
-        return f'<section class="chart-panel"><h2>{_esc(title)}</h2><p class="blurb">{_esc(blurb)}</p>{body}</section>'
+    write_note = (
+        '<p class="note warn">'
+        + _esc(
+            f"{len(write_failures)} failed batch write(s): "
+            + "; ".join(f"seq {w.seq}: {w.error or 'refused (session finalizing)'}" for w in write_failures)
+        )
+        + "</p>"
+        if write_failures
+        else '<p class="note">Every cycle_write record reports sample_write_completed = true.</p>'
+    )
 
     body = "".join(
         [
-            panel(
+            _panel(
+                "timeline",
                 "Scrape request timeline — one lane per host, one bar per request (request_started_at_unix → request_finished_at_unix)",
                 "Bar colour is the request outcome; hatched slots are (host, scrape_seq) pairs with no scrape record, i.e. the "
                 "endpoint was still unsettled at the cycle deadline. Dashed blue outline = bracket/manual scrape. Dotted vertical "
-                "ticks are each cycle's scheduled slot; the gap from a tick to its bars is the schedule lag. Hover a bar for details.",
-                _timeline_legend() + chart_timeline(t),
+                "ticks are each cycle's scheduled slot; the gap from a tick to its bars is the schedule lag. Hover for details; "
+                "drag to zoom.",
+                before=_timeline_legend(),
             ),
-            panel(
+            _panel(
+                "lag",
                 "Schedule lag per host by scrape_seq — request start minus the cycle's scheduled slot (schedule_lag_seconds)",
                 "Steady growth means cycle overrun is accumulating; a spike on every host at one seq means one slow endpoint stalled "
-                "that batch. Vertical dashed ticks mark seqs where that host has no record.",
-                chart_lag(t),
+                "that batch. Vertical dashed ticks mark seqs where that host has no record. The y-axis follows the visible range.",
+                before='<div class="legend" data-legend="hosts"></div>',
             ),
-            panel(
+            _panel(
+                "cost",
                 "Per-cycle cost decomposition by scrape_seq — slowest request, slowest parse, writer lock wait, sample write",
                 "The cycle waits for its slowest endpoint, so the max request_duration_seconds across hosts is the dominant term. "
                 "Dashed line = sample interval, taken as the median gap between cycle_write.scheduled_at_unix slots (the setting "
                 "itself is not in the file).",
-                chart_cycle_cost(t),
+                before=_cost_legend(),
             ),
-            panel(
+            _panel(
+                "write",
                 "Sample batch write health per scrape_seq — cycle_write.sample_write_completed",
                 "Green = batch appended and flushed; red = not written (sample_write_error names the exception, or the session was "
                 "already finalizing and refused the batch); hatched = no cycle_write record for that seq.",
-                chart_write_health(t),
+                after=write_note,
             ),
-            panel(
+            _panel(
+                "coverage",
                 "GPU rows returned per host per scrape_seq — scrape.row_count",
                 "Stronger green = more rows; red = a settled request that produced 0 rows (failure); hatched = abandoned (no record).",
-                chart_coverage(t),
             ),
         ]
     )
+    payload = json.dumps(build_payload(t), separators=(",", ":")).replace("</", "<\\/")
     title = f"{_esc(t.run_name or '—')}" + (f" · job {_esc(t.job_id)}" if t.job_id else "")
     return (
         '<!DOCTYPE html><html lang="en" data-theme="dark"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         f"<title>scrape-timings — {_esc(t.run_name or source.name)}</title><style>{_CSS}</style>"
-        f"<script>{_THEME_JS}</script><script>{_TOOLTIP_JS}</script></head><body>"
+        f"<script>{_THEME_JS}</script></head><body>"
         '<div class="page-head"><div>'
         f"<h1>Power collector scrape timings — {title}</h1>"
         f'<p class="subtitle">Source: {_esc(source)} · diagnostic sidecar written by the power collector; '
         "not publication-validation evidence.</p></div>"
-        '<button type="button" class="theme-toggle">Switch to light mode</button></div>'
+        '<div class="controls"><button type="button" class="btn zoom-reset" hidden>Reset zoom</button>'
+        '<button type="button" class="btn theme-toggle">Switch to light mode</button></div></div>'
         f'<div class="stat-cards">{"".join(cards)}</div>{body}'
         "<footer>Generated by srtctl.analysis.scrape_timings_viz · every value is read from the JSONL; "
-        "the sample interval is the only derived quantity.</footer></body></html>"
+        "the sample interval is the only derived quantity. Drag on any chart to zoom all of them to a scrape_seq range; "
+        "double-click to reset.</footer>"
+        f'<script id="scrape-data" type="application/json">{payload}</script>'
+        f"<script>{_CHARTS_JS}</script></body></html>"
     )
 
 
