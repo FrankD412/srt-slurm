@@ -152,3 +152,33 @@ finalization and offline validation use the recorded cadence and the same
 coverage rule. Previously accepted sparse packages can fail revalidation; their
 files are not rewritten. This limits sample loss, not the numerical error in
 energy.
+
+## Diagnosing slow scrapes
+
+The collector writes best-effort `scrape-timings.jsonl` beside `samples.csv`.
+Every line carries an `event`: `scrape` per settled endpoint request,
+`cycle_write` per collection cycle, and one closing `diagnostic_summary`.
+Join a `scrape` record to its GPU rows using `(hostname, scrape_seq)`.
+Each records its start/end times, HTTP status or exception, request and parse
+durations, sample timestamp, row count and reason codes. Failed HTTP requests
+retain timing records, with null parse duration and sample timestamp, without
+inventing power samples. Requests still unsettled when the cycle deadline
+expires have no timing record.
+
+Instants are unix timestamps; durations come from the monotonic clock.
+`schedule_lag_seconds` measures request start against the background cycle's
+scheduled slot, which `cycle_write` records as `scheduled_at_unix`; manual and
+final bracketing scrapes use null for both. The collector writes a cycle's
+endpoints together, so the `cycle_write` record keyed by `scrape_seq` carries
+the batch's `writer_lock_wait_seconds`, `sample_write_seconds` and attempted
+`row_count` once. Its `sample_write_completed` reports whether the batch was appended and
+flushed; when it is false, `sample_write_error` names the exception class if
+the append raised, or is null when the session was already finalizing and
+refused the batch.
+
+Only a daemon writer performs diagnostic file I/O, outside the sample writer
+lock. Its queue holds at most 128 pending records; overflow drops diagnostics,
+not power samples. A final `diagnostic_summary` reports `dropped_records`.
+Missing summary means diagnostics may be incomplete. Shutdown waits only until
+the existing collector deadline. This optional sidecar is not publication
+validation evidence, and its absence or write failure does not invalidate power.
