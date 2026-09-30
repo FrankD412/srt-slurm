@@ -35,7 +35,7 @@ import json
 import logging
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -117,6 +117,8 @@ class _EndpointState:
     ready_deadline: float | None = None
     next_probe_at: float = 0.0
     launched_at: float | None = None
+    # Steps of this endpoint sent SIGTERM that have not exited yet; the relaunch waits for them.
+    stopping: list[ManagedProcess] = field(default_factory=list)
     settled: bool = False  # nothing more for the supervisor to do with this endpoint
 
     @property
@@ -131,7 +133,9 @@ class WorkerSupervisor:
     ``reconcile()`` is called from the process monitor thread every tick. It is
     cheap when nothing has happened (one ``poll()`` per tracked step) and does
     all of its work under one lock, so ``track()`` from the main thread and the
-    monitor never interleave.
+    monitor never interleave. It never waits on a process: steps it stops are
+    signalled on one tick and settled on later ones (``ManagedProcess.advance_stop``),
+    so ``check_failures`` keeps running for everything else meanwhile.
     """
 
     def __init__(
@@ -267,7 +271,8 @@ class WorkerSupervisor:
                 if state.settled:
                     continue
                 if state.due_at is not None:
-                    if now >= state.due_at:
+                    state.stopping = [proc for proc in state.stopping if not proc.advance_stop()]
+                    if now >= state.due_at and not state.stopping:
                         self._relaunch(state, now)
                     continue
                 self._observe(state, now)
@@ -281,7 +286,7 @@ class WorkerSupervisor:
             # announces the death only in its log (``ManagedProcess.fatal_log_patterns``).
             # The registry's check_failures skips supervised processes, so the
             # supervisor runs the same scan and turns a hit into an exit: stop the
-            # step, then relaunch it through the normal backoff path.
+            # step (with its siblings, below), then relaunch through the normal backoff path.
             for proc in procs:
                 marker = proc.scan_log_for_fatal_marker()
                 if marker is None:
@@ -294,8 +299,6 @@ class WorkerSupervisor:
                     pattern,
                     fatal_line,
                 )
-                proc.request_stop(list_step_ids() if proc.step_name else None)
-                proc.await_stop()
                 exited = [proc]
                 break
         if not exited:
@@ -340,15 +343,21 @@ class WorkerSupervisor:
                     crash_log=str(trigger.log_file) if trigger.log_file else None,
                 )
             )
+            if fatal_line is not None and trigger.critical:
+                # The marker was consumed by our scan and the step is still up, so
+                # the registry would never see this failure on its own.
+                self.registry.record_failure(trigger.name, fatal_line)
             self._release(state, procs)
             self._write()
             return
 
-        # Siblings of a multi-step endpoint cannot carry on without the lost rank.
+        # Siblings of a multi-step endpoint cannot carry on without the lost rank,
+        # and a step that printed a fatal marker is still up. Signal them now; the
+        # relaunch waits until every one has exited (``reconcile``).
         running = [proc for proc in procs if proc.is_running]
         if running:
             logger.warning(
-                "Worker %s exited; stopping %d sibling step(s) of %s before relaunch",
+                "Worker %s exited; stopping %d step(s) of %s before relaunch",
                 trigger.name,
                 len(running),
                 state.label,
@@ -356,8 +365,7 @@ class WorkerSupervisor:
             step_ids = list_step_ids() if any(proc.step_name for proc in running) else None
             for proc in running:
                 proc.request_stop(step_ids)
-            for proc in running:
-                proc.await_stop()
+            state.stopping = [proc for proc in running if proc.is_running]
 
         state.restarts += 1
         delay = state.policy.backoff(state.restarts)

@@ -108,6 +108,7 @@ class ManagedProcess:
     supervised: bool = False
     _stopped_via_step: bool = field(default=False, init=False, repr=False)
     _stop_deadline: float | None = field(default=None, init=False, repr=False)
+    _stop_escalations: int = field(default=0, init=False, repr=False)
     # Log-watch state: bytes already scanned, the partial line after the last newline,
     # and the compiled patterns (built on first use).
     _log_offset: int = field(default=0, init=False, repr=False)
@@ -201,6 +202,38 @@ class ManagedProcess:
         if not self._stopped_via_step:
             self.popen.terminate()
         self._stop_deadline = time.monotonic() + self.terminate_timeout
+        self._stop_escalations = 0
+
+    def advance_stop(self) -> bool:
+        """Non-blocking ``await_stop``: escalate once the current deadline passes; True once the process is gone.
+
+        Past the SIGTERM deadline a step-signalled process gets SIGTERM on its srun
+        (which aborts the step), anything else SIGKILL; each escalation allows 5s
+        more. For callers that must not block, such as a process-monitor tick.
+        """
+        if not self.is_running:
+            return True
+        now = time.monotonic()
+        if self._stop_deadline is None or now < self._stop_deadline:
+            return False
+        if self._stop_escalations == 0 and self._stopped_via_step:
+            logger.warning(
+                "Step %s (%s) did not exit %.0fs after SIGTERM; terminating srun",
+                self.step_name,
+                self.name,
+                self.terminate_timeout,
+            )
+            self.popen.terminate()
+        else:
+            first_kill = self._stop_escalations == (1 if self._stopped_via_step else 0)
+            if first_kill:
+                logger.warning("Process %s did not exit after SIGTERM, killing...", self.name)
+            else:
+                logger.error("Process %s was not reaped after SIGKILL", self.name)
+            self.popen.kill()
+        self._stop_escalations += 1
+        self._stop_deadline = now + 5.0
+        return False
 
     def await_stop(self) -> None:
         """Wait out this process's own deadline after ``request_stop``, then escalate to SIGKILL."""
@@ -412,6 +445,14 @@ class ProcessRegistry:
                     )
 
             return len(self._failed_processes) > 0
+
+    def record_failure(self, name: str, reason: str | None = None) -> None:
+        """Mark ``name`` failed from outside ``check_failures`` (a supervisor that gave up on a fatal marker)."""
+        with self._lock:
+            if name not in self._failed_processes:
+                self._failed_processes.append(name)
+            if reason is not None:
+                self._failure_reasons[name] = reason
 
     @property
     def has_failures(self) -> bool:

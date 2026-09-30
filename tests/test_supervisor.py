@@ -367,6 +367,55 @@ def test_a_multi_node_endpoint_restarts_as_a_unit(tmp_path: Path) -> None:
     assert (tmp_path / "node-b_decode_w1.out.1").exists()
 
 
+def test_a_step_that_ignores_sigterm_does_not_block_the_monitor_tick(tmp_path: Path) -> None:
+    """Stopping a sibling is signalled on one tick and settled on later ones; the relaunch waits for it."""
+    processes = [_process(node="node-a", rank=0), _process(node="node-b", rank=1)]
+    policy = RestartPolicy(policy="on-failure", backoff_seconds=0, max_backoff_seconds=0)
+    h = Harness(tmp_path, policy, processes=processes)
+    leader, follower = h.steps["decode_1_node-a"], h.steps["decode_1_node-b"]
+    leader.popen.terminate.side_effect = None  # ignores SIGTERM
+    clock = [0.0]
+
+    with (
+        patch("srtctl.core.processes.shutil.which", return_value=None),
+        patch("srtctl.core.processes.time.monotonic", side_effect=lambda: clock[0]),
+    ):
+        follower.exit(1)
+        h.tick()
+        leader.popen.terminate.assert_called_once()
+        leader.popen.wait.assert_not_called()  # the tick returned without waiting out terminate_timeout
+        assert leader.managed.is_running
+        assert h.supervisor.events[-1].outcome == "scheduled"
+
+        h.tick()
+        assert h.launcher.calls == []  # due, but the old rank still holds the GPUs and ports
+
+        clock[0] = 1.0  # the leader's terminate_timeout has passed
+        h.tick()
+        leader.popen.kill.assert_called_once()
+        leader.popen.wait.assert_not_called()
+        assert not leader.managed.is_running
+
+        h.tick()
+        assert h.launcher.calls == [(("decode", 1), 1)]
+
+
+def test_a_fatal_marker_after_the_last_restart_fails_the_run(tmp_path: Path) -> None:
+    """Once restarts are exhausted a fatal marker is the registry's failure, although the step is still up."""
+    h = Harness(tmp_path, RestartPolicy(policy="on-failure", max_restarts=0))
+    old = h.steps["decode_1_node-b"]
+    old.managed.fatal_log_patterns = (r"EngineCore .* died",)
+    with old.managed.log_file.open("a") as f:  # type: ignore[union-attr]
+        f.write("ERROR EngineCore worker died unexpectedly, shutting down client\n")
+
+    h.tick()
+
+    assert old.managed.supervised is False
+    assert h.supervisor.events[-1].outcome == "exhausted"
+    assert h.registry.check_failures() is True
+    assert h.launcher.calls == []
+
+
 def test_the_stop_event_cancels_a_pending_relaunch(tmp_path: Path) -> None:
     h = Harness(tmp_path, ON_FAILURE)
     h.steps["decode_1_node-b"].exit(1)
