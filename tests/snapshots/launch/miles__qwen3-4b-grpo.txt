@@ -7,13 +7,13 @@ nodelist: node-01
 output: <output>/logs/services/logs/service_train_node-01.out
 container_image: miles
 container_mounts:
-    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
-    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
     /data/home/idhanani/datasets: /data/home/idhanani/datasets
     /data/home/idhanani/miles-runs: /data/home/idhanani/miles-runs
     /data/home/idhanani/models: /data/home/idhanani/models
     <model>: /model
     <output>/logs: /logs
+    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
+    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
 env_to_set:
     CUDA_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
     ETCD_ENDPOINTS: http://127.0.0.1:2379
@@ -29,13 +29,13 @@ nodelist: node-02
 output: <output>/logs/services/logs/service_train_node-02.out
 container_image: miles
 container_mounts:
-    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
-    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
     /data/home/idhanani/datasets: /data/home/idhanani/datasets
     /data/home/idhanani/miles-runs: /data/home/idhanani/miles-runs
     /data/home/idhanani/models: /data/home/idhanani/models
     <model>: /model
     <output>/logs: /logs
+    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
+    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
 env_to_set:
     CUDA_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
     ETCD_ENDPOINTS: http://127.0.0.1:2379
@@ -51,13 +51,13 @@ nodelist: node-01
 output: <output>/logs/services/logs/service_dcgm-exporter_node-01.out
 container_image: nvcr.io#nvidia/k8s/dcgm-exporter:3.3.9-3.6.1-ubuntu22.04
 container_mounts:
-    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
-    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
     /data/home/idhanani/datasets: /data/home/idhanani/datasets
     /data/home/idhanani/miles-runs: /data/home/idhanani/miles-runs
     /data/home/idhanani/models: /data/home/idhanani/models
     <model>: /model
     <output>/logs: /logs
+    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
+    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
 srun_export_env:
     ETCD_ENDPOINTS: http://127.0.0.1:2379
 use_bash_wrapper: False
@@ -69,13 +69,13 @@ nodelist: node-02
 output: <output>/logs/services/logs/service_dcgm-exporter_node-02.out
 container_image: nvcr.io#nvidia/k8s/dcgm-exporter:3.3.9-3.6.1-ubuntu22.04
 container_mounts:
-    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
-    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
     /data/home/idhanani/datasets: /data/home/idhanani/datasets
     /data/home/idhanani/miles-runs: /data/home/idhanani/miles-runs
     /data/home/idhanani/models: /data/home/idhanani/models
     <model>: /model
     <output>/logs: /logs
+    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
+    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
 srun_export_env:
     ETCD_ENDPOINTS: http://127.0.0.1:2379
 use_bash_wrapper: False
@@ -87,13 +87,13 @@ nodelist: node-01
 output: <output>/logs/services/logs/service_node-exporter_node-01.out
 container_image: quay.io#prometheus/node-exporter:v1.8.2
 container_mounts:
-    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
-    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
     /data/home/idhanani/datasets: /data/home/idhanani/datasets
     /data/home/idhanani/miles-runs: /data/home/idhanani/miles-runs
     /data/home/idhanani/models: /data/home/idhanani/models
     <model>: /model
     <output>/logs: /logs
+    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
+    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
 srun_export_env:
     ETCD_ENDPOINTS: http://127.0.0.1:2379
 use_bash_wrapper: False
@@ -105,13 +105,13 @@ nodelist: node-02
 output: <output>/logs/services/logs/service_node-exporter_node-02.out
 container_image: quay.io#prometheus/node-exporter:v1.8.2
 container_mounts:
-    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
-    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
     /data/home/idhanani/datasets: /data/home/idhanani/datasets
     /data/home/idhanani/miles-runs: /data/home/idhanani/miles-runs
     /data/home/idhanani/models: /data/home/idhanani/models
     <model>: /model
     <output>/logs: /logs
+    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
+    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
 srun_export_env:
     ETCD_ENDPOINTS: http://127.0.0.1:2379
 use_bash_wrapper: False
@@ -132,13 +132,13 @@ nodelist: node-01
 output: <output>/logs/benchmark.out
 container_image: miles
 container_mounts:
-    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
-    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
     /data/home/idhanani/datasets: /data/home/idhanani/datasets
     /data/home/idhanani/miles-runs: /data/home/idhanani/miles-runs
     /data/home/idhanani/models: /data/home/idhanani/models
     <model>: /model
     <output>/logs: /logs
+    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
+    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
 env_to_set:
     GLOO_SOCKET_IFNAME: bond0
     MILES_RECIPE: scripts/run_qwen3_dense.py

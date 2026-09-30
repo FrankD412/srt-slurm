@@ -7,10 +7,10 @@ nodelist: node-01
 output: <output>/logs/services/logs/service_etcd.out
 container_image: sglang
 container_mounts:
-    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
-    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
     <model>: /model
     <output>/logs: /logs
+    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
+    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
 use_bash_wrapper: True
 bash_preamble: |
     rm -rf /tmp/etcd && mkdir -p /tmp/etcd
@@ -22,10 +22,10 @@ nodelist: node-01
 output: <output>/logs/workers/node-01_agg_w0.out
 container_image: sglang
 container_mounts:
-    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
-    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
     <model>: /model
     <output>/logs: /logs
+    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
+    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
 env_to_set:
     DYN_LOG: info,dynamo_runtime::pipeline::network::ingress::push_handler=warn
     DYN_REQUEST_PLANE: tcp
@@ -48,10 +48,10 @@ nodelist: node-01
 output: <output>/logs/workers/node-01_frontend_0.out
 container_image: sglang
 container_mounts:
-    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
-    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
     <model>: /model
     <output>/logs: /logs
+    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
+    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
 env_to_set:
     DYN_REQUEST_PLANE: tcp
     DYN_SKIP_SGLANG_LOG_FORMATTING: 1
@@ -69,10 +69,10 @@ nodelist: node-01
 output: <output>/logs/services/logs/service_dcgm-exporter_node-01.out
 container_image: nvcr.io#nvidia/k8s/dcgm-exporter:3.3.9-3.6.1-ubuntu22.04
 container_mounts:
-    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
-    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
     <model>: /model
     <output>/logs: /logs
+    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
+    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
 srun_export_env:
     ETCD_ENDPOINTS: http://127.0.0.1:2379
 use_bash_wrapper: False
@@ -84,10 +84,10 @@ nodelist: node-02
 output: <output>/logs/services/logs/service_dcgm-exporter_node-02.out
 container_image: nvcr.io#nvidia/k8s/dcgm-exporter:3.3.9-3.6.1-ubuntu22.04
 container_mounts:
-    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
-    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
     <model>: /model
     <output>/logs: /logs
+    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
+    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
 srun_export_env:
     ETCD_ENDPOINTS: http://127.0.0.1:2379
 use_bash_wrapper: False
@@ -99,10 +99,10 @@ nodelist: node-03
 output: <output>/logs/services/logs/service_dcgm-exporter_node-03.out
 container_image: nvcr.io#nvidia/k8s/dcgm-exporter:3.3.9-3.6.1-ubuntu22.04
 container_mounts:
-    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
-    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
     <model>: /model
     <output>/logs: /logs
+    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
+    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
 srun_export_env:
     ETCD_ENDPOINTS: http://127.0.0.1:2379
 use_bash_wrapper: False
@@ -114,10 +114,10 @@ nodelist: node-01
 output: <output>/logs/services/logs/service_node-exporter_node-01.out
 container_image: quay.io#prometheus/node-exporter:v1.8.2
 container_mounts:
-    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
-    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
     <model>: /model
     <output>/logs: /logs
+    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
+    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
 srun_export_env:
     ETCD_ENDPOINTS: http://127.0.0.1:2379
 use_bash_wrapper: False
@@ -129,10 +129,10 @@ nodelist: node-02
 output: <output>/logs/services/logs/service_node-exporter_node-02.out
 container_image: quay.io#prometheus/node-exporter:v1.8.2
 container_mounts:
-    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
-    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
     <model>: /model
     <output>/logs: /logs
+    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
+    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
 srun_export_env:
     ETCD_ENDPOINTS: http://127.0.0.1:2379
 use_bash_wrapper: False
@@ -144,10 +144,10 @@ nodelist: node-03
 output: <output>/logs/services/logs/service_node-exporter_node-03.out
 container_image: quay.io#prometheus/node-exporter:v1.8.2
 container_mounts:
-    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
-    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
     <model>: /model
     <output>/logs: /logs
+    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
+    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
 srun_export_env:
     ETCD_ENDPOINTS: http://127.0.0.1:2379
 use_bash_wrapper: False
@@ -168,10 +168,10 @@ nodelist: node-01
 output: <output>/logs/benchmark.out
 container_image: sglang
 container_mounts:
-    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
-    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
     <model>: /model
     <output>/logs: /logs
+    <repo>/src/srtctl/benchmarks/scripts: /srtctl-benchmarks
+    <repo>/src/srtctl/runtime_scripts: /srtctl-runtime
 env_to_set:
     SRTCTL_FRONTEND_TYPE: dynamo
     SRT_FRONTEND_HOST: 127.0.0.1
