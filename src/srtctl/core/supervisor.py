@@ -275,12 +275,37 @@ class WorkerSupervisor:
     def _observe(self, state: _EndpointState, now: float) -> None:
         procs = [proc for proc in (self.registry.get_process(name) for name in state.names) if proc is not None]
         exited = [proc for proc in procs if not proc.is_running]
+        fatal_line: str | None = None
+        if not exited:
+            # An engine that dies behind a launcher leaves its srun step up and
+            # announces the death only in its log (``ManagedProcess.fatal_log_patterns``).
+            # The registry's check_failures skips supervised processes, so the
+            # supervisor runs the same scan and turns a hit into an exit: stop the
+            # step, then relaunch it through the normal backoff path.
+            for proc in procs:
+                marker = proc.scan_log_for_fatal_marker()
+                if marker is None:
+                    continue
+                pattern, fatal_line = marker
+                logger.error(
+                    "Worker %s reported a fatal condition in its log while its step is still running "
+                    "(matched /%s/): %s",
+                    proc.name,
+                    pattern,
+                    fatal_line,
+                )
+                proc.request_stop(list_step_ids() if proc.step_name else None)
+                proc.await_stop()
+                exited = [proc]
+                break
         if not exited:
             self._probe_ready(state, now)
             return
 
         trigger = exited[0]
         exit_code = trigger.exit_code
+        if fatal_line is not None and not exit_code:
+            exit_code = 1  # a fatal marker is a failure whatever the stopped step returned
         if not state.policy.restarts_on(exit_code):
             # A clean exit under on-failure: not ours to relaunch. Hand the
             # endpoint back so the role's critical flag has the final say.

@@ -231,6 +231,35 @@ def test_on_failure_schedules_then_relaunches_after_the_backoff(tmp_path: Path) 
     assert h.supervisor.summary_line() == "Worker restarts: 1 (decode_1 x1)"
 
 
+def test_a_fatal_log_marker_on_a_live_step_is_an_exit(tmp_path: Path) -> None:
+    """An engine that dies behind its launcher (step still up, fatal line in the log) is relaunched.
+
+    The registry's check_failures skips supervised processes, so this scan is
+    the supervisor's; without it such a worker would sit until walltime.
+    """
+    h = Harness(tmp_path, ON_FAILURE)
+    old = h.steps["decode_1_node-b"]
+    old.managed.fatal_log_patterns = (r"EngineCore .* died",)
+    h.tick()
+    assert old.managed.is_running and h.launcher.calls == []
+
+    with old.managed.log_file.open("a") as f:  # type: ignore[union-attr]
+        f.write("ERROR EngineCore worker died unexpectedly, shutting down client\n")
+    h.tick()
+
+    # The step was stopped and the exit scheduled for relaunch; the registry saw no failure.
+    assert not old.managed.is_running
+    old.popen.terminate.assert_called_once()
+    assert h.registry.check_failures() is False
+    (event,) = h.supervisor.events
+    assert (event.outcome, event.attempt, event.backoff_seconds) == ("scheduled", 1, 10)
+    assert event.exit_code != 0
+
+    h.advance(10)
+    h.tick()
+    assert h.launcher.calls == [(("decode", 1), 1)]
+
+
 def test_backoff_grows_across_restarts_of_the_same_endpoint(tmp_path: Path) -> None:
     h = Harness(tmp_path, ON_FAILURE)
     h.steps["decode_1_node-b"].exit(1)
