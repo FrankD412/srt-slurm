@@ -1,0 +1,149 @@
+# SGLang Fast Engine Recovery (weight cache daemon)
+
+SGLang's [weight cache daemon](https://www.lmsys.org/blog/2026-08-21-sglang-fast-recovery/) is a persistent GPU process that loads the model once, keeps the post-quantized, TP-sharded tensors in HBM, and hands CUDA IPC handles to any engine on the same GPU. An engine started with `--weight-cache-mode client` maps those tensors instead of reading the checkpoint, so its weight load takes well under a second regardless of model size. The rest of engine startup (CUDA graphs, kernel JIT, tokenizer) still runs.
+
+srtctl needs no code for this. The daemon is a [service](services.md) with `placement.per: worker`, the engine flag is an ordinary `roles.<role>.args` entry, and [`roles.<role>.restart`](config-reference.md#restart) is what relaunches a dead engine so the fast load pays off. `examples/features/sglang-weight-cache.yaml` is the runnable version.
+
+What this gives you is a fast **restart**. It is not a standby: SGLang has no election, so the blog's "active-standby" scenario is a deployment pattern, not a feature. A sub-second cutover to a parked engine is what [shadow engine recovery](shadow-engine-recovery.md) does for vLLM through Dynamo's GPU Memory Service.
+
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [What Runs](#what-runs)
+- [What srtctl Owns vs What You Set](#what-srtctl-owns-vs-what-you-set)
+- [Testing a Relaunch](#testing-a-relaunch)
+- [Validation](#validation)
+- [Limitations](#limitations)
+- [Troubleshooting](#troubleshooting)
+
+---
+
+## Quick Start
+
+```yaml
+schema: 2
+model:
+  container: lmsysorg/sglang:v0.5.20        # v0.5.19 or newer
+frontend:
+  type: sglang-router
+engine: sglang
+roles:
+  agg:
+    nodes: 1
+    workers: 2
+    gpus: 2
+    restart: {policy: always, backoff_seconds: 5}
+    env:
+      SGLANG_WEIGHT_CACHE_SOCKET_TEMPLATE: "/dev/shm/sglang-wc/{device_uuid}.sock"
+      SGLANG_WEIGHT_CACHE_READY_TEMPLATE: "/dev/shm/sglang-wc/{device_uuid}.ready"
+    args:
+      tensor-parallel-size: 2
+      weight-cache-mode: client
+services:
+  - name: weight-cache
+    type: generic
+    start: before_workers
+    critical: true
+    placement: {node: agg, per: worker}
+    env:
+      SGLANG_WEIGHT_CACHE_SOCKET_TEMPLATE: "/dev/shm/sglang-wc/{device_uuid}.sock"
+      SGLANG_WEIGHT_CACHE_READY_TEMPLATE: "/dev/shm/sglang-wc/{device_uuid}.ready"
+    preamble: "mkdir -p /dev/shm/sglang-wc"
+    command: ["python3", "-m", "sglang.srt.weight_cache.daemon", "--model-path", "/model", "--tensor-parallel-size", "2"]
+    readiness:
+      log: {pattern: "All 2 weight cache daemons on node 0 are ready"}
+      timeout_seconds: 900
+```
+
+`srtctl dry-run -f <recipe>` lists the service with its placement, probe and environment before you submit.
+
+## What Runs
+
+Per worker on each of its nodes:
+
+```
+step service_weight-cache_agg_0_<node>       (CUDA_VISIBLE_DEVICES of worker 0)   /dev/shm/sglang-wc/
+  python3 -m sglang.srt.weight_cache.daemon ... --tensor-parallel-size 2         +- <gpu-0-uuid>.sock  .ready
+    one daemon per TP rank: load from disk, export tensors as IPC handles ------> +- <gpu-1-uuid>.sock  .ready
+    prints "All 2 weight cache daemons on node 0 are ready"  (the readiness probe)
+                                                                                       ^ connect by own GPU UUID
+step agg_0_<node>                             (same CUDA_VISIBLE_DEVICES)              |
+  python3 -m sglang.launch_server ... --weight-cache-mode client  <---------------------+
+    Load weight end. elapsed=0.09 s   (fingerprint checked, tensors mapped, no disk read)
+  on exit: roles.agg.restart relaunches agg_0_<node>_r1; it maps the same tensors again
+```
+
+- **The service.** `placement.per: worker` gives one instance per worker on each of its nodes, pinned to that worker's device mask, so the daemon's device k and the engine's device k are the same GPU and derive the same UUID. `start: before_workers` puts it up before the engines and, at cleanup, stops it after them (shutdown tier 1). It is `critical` because an engine's liveness watchdog SIGKILLs the engine when its daemon PID disappears (the mapped pointers would dangle).
+- **The paths.** Both sides read `SGLANG_WEIGHT_CACHE_SOCKET_TEMPLATE` and `SGLANG_WEIGHT_CACHE_READY_TEMPLATE`; the template must contain `{device_uuid}`, which srtctl's placeholder rendering leaves alone. SGLang's default is `/tmp`, a per-container tmpfs under enroot that the engine step cannot see. `/dev/shm` is the host's, bind-mounted into every container on the node. One node-wide directory is enough because the files are keyed by physical GPU UUID; the daemon removes its files on SIGTERM and cleans up stale ones (dead PID) when it starts.
+- **The engine.** `--weight-cache-mode client` connects to the daemon for its GPU, validates a fingerprint (model path and architecture, TP/PP/DP/EP ranks, quantization method and config hash, dtype, compute capability, torch version), and maps every tensor zero-copy. An absent socket falls back to a disk load; a refused connection or a fingerprint mismatch raises.
+- **The relaunch.** With `restart: always` or `on-failure`, the supervisor relaunches an exited engine step in place (same node, GPUs and ports, `_r<n>` step name, crash log rotated aside) after the backoff. The relaunched engine maps the daemon's tensors again. `worker_restarts.json` and the lockfile record each event.
+
+## What srtctl Owns vs What You Set
+
+| Piece | Owner | Value |
+| --- | --- | --- |
+| one daemon group per worker, in its device mask | srtctl | `placement: {node: <role>, per: worker}` |
+| start order and shutdown order | srtctl | `start: before_workers` (tier 1, stopped after the engines) |
+| readiness gate | you | `readiness.log.pattern` with the rank count the daemon prints (`All <tp> weight cache daemons on node <rank> are ready`) |
+| the daemon's argv | you | the engine's model, parallelism, dtype and quantization flags, exactly; a mismatch is refused at engine start, not at load |
+| socket and ready paths | you | the two templates, identical on the service and in `roles.<role>.env`, under `/dev/shm` |
+| relaunch | you | `roles.<role>.restart`; without it an exited engine's step just ends and `critical` decides |
+| the image | you | SGLang v0.5.19 or newer (env-configurable paths, GPU-UUID keyed sockets, static DP/EP layouts) |
+
+## Testing a Relaunch
+
+Kill the engine process, not its step. From the login node:
+
+```bash
+# the engine's srun step on the node (the port is in the sweep log's "Command:" line)
+srun --jobid <job> --overlap -w <node> -N1 bash -c 'pkill -9 -f "sglang.launch_server.*--port 6100"'
+```
+
+Then watch:
+
+- the sweep log: `Worker agg_0_<node> exited with code 137; relaunching agg_0 in 5s (restart 1/3)`, then `Relaunched agg_0 as agg_0_<node>_r1`;
+- the new engine log (`<node>_agg_w0.out`; the crash log moved to `<node>_agg_w0.out.1`): `[IpcModelLoader] Loaded model via IPC (mode=client)` and `Load weight end. elapsed=0.0x s`, then `The server is fired up and ready to roll!`;
+- the router's `/workers` on the head node: the worker's URL is unchanged, so it is back in rotation as soon as it answers.
+
+The daemon service's log shows nothing during a relaunch; the tensors stay mapped in the daemon regardless of how many engines come and go.
+
+## Validation
+
+Validated on sa-b200 (one B200 node, two TP2 Qwen3-0.6B workers behind the sglang-router, `examples/features/sglang-weight-cache.yaml`, `lmsysorg/sglang:nightly-dev-cu13-20260930-cae69be5`), job 17903 on 2026-09-30, with `roles.agg.restart: {policy: always, backoff_seconds: 5}`. Times are from the timestamps inside the step logs and `worker_restarts.json`.
+
+| Event | Observed |
+| --- | --- |
+| Daemon service start to `All 2 weight cache daemons on node 0 are ready` (container start, dist init, disk load, IPC export) | 80 s per worker, the two workers one after another; the disk load itself 5.9 s per rank, 228 tensors exported |
+| Engine `Load weight begin` to `Load weight end` through the daemon | 0.04 to 0.11 s (`Zero-copy: mapped 228 tensors`, `mem usage=0.00 GB`: the weights are the daemon's) |
+| Engines start to both `ready to roll` | 1 min 48 s (CUDA graph capture 35 s per engine dominates for this model) |
+| SIGKILL of worker 0's engine process to the supervisor's `relaunching agg_0 in 5s` | same second (`exited with code -9`) |
+| Kill to `Relaunched agg_0 as agg_0_<node>_r1` | 9 s (5 s backoff plus the srun) |
+| Relaunched engine: container start to `server_args` | 33 s (a new step is a new container) |
+| Relaunched engine: weights through the daemon | 0.11 s (`Loaded model via IPC (mode=client), total=0.10s`) |
+| Relaunched engine: CUDA graph capture | 35 s |
+| Kill to the relaunched engine serving (`ready_seconds` 110.7 from the relaunch) | 118 s; the crash log rotated to `<node>_agg_w0.out.1`, `worker_restarts.json` records `outcome: ready` |
+| Router `/workers` after the relaunch, and a completion through it | both workers healthy on their original URLs; answered |
+
+A 0.6B model makes the absolute saving on the weight load trivial, and what remains of the relaunch is container start-up and CUDA graph capture, which the daemon does not touch. The point of the run is that the mechanism holds end to end with a generic service and the stock restart policy. The blog's numbers for a 1T FP8 model are 495 s from disk versus 0.6 s through the daemon; on a model of that size the relaunch above would still take about two minutes instead of ten.
+
+## Limitations
+
+- Fast restart only. No standby engine and no cutover; see [shadow engine recovery](shadow-engine-recovery.md) for that on vLLM.
+- SGLang v0.5.19 or newer. Older builds hard-code `/tmp/sglang_weight_cache_rank*` paths, which a separate srun step cannot reach.
+- IPC-safe quantizations only: unquantized and block-wise FP8 as of v0.5.20. Per-tensor FP8, Marlin, AWQ/GPTQ and NVFP4 raise at daemon start.
+- Not with speculative decoding (`--speculative-algorithm`); the daemon does not export the draft model.
+- The daemon's argv is written by hand. It must carry the same model, parallelism, dtype and quantization flags as the engine; srtctl does not derive one from the other.
+- Multi-node workers need `--nnodes`, `--node-rank {worker_node_rank}` and a `--dist-init-method tcp://<leader>:<port>` distinct from the engine's dist-init port. A single multi-node worker can use `{head_ip}` and a fixed port; there is no per-worker leader placeholder for several.
+- Per-worker service instances start one after another, each gated on its readiness probe, so a node with N workers pays N daemon start-ups in sequence.
+- The daemon is not relaunched. If it dies, its engines SIGKILL themselves (dangling mappings) and, with a restart policy, come back through a disk load or fail on a refused socket; `critical: true` on the service fails the run instead.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| engine log: `Daemon socket not found at /tmp/sglang_weight_cache_...` and a normal disk load | the templates are not set on the engine, or point at a per-container path | set both templates in `roles.<role>.env` under `/dev/shm` |
+| service log: `sglang serve: error: unrecognized arguments` | the daemon parses the full engine argument set; a flag the image no longer knows | drop the flag; the same flag would break the engine too |
+| engine log: `Daemon config mismatch` | the daemon's argv differs from the engine's (model, TP, dtype, quantization) | mirror the engine's flags in `services[].command` |
+| engine dies with `Weight cache daemon (pid=...) died while this engine holds its weights` | the service was stopped or crashed | keep `start: before_workers` (stopped after the engines) and `critical: true`; check the service log |
+| readiness probe times out while the daemons say `Listening on ...` | the pattern's rank or node count does not match the launcher's summary line | use the printed `All <n> weight cache daemons on node <k> are ready` text |
+| `already running (pid=...)` at daemon start | a live daemon from another job on the same GPU | nodes are exclusive under srtctl; if it happens, that daemon leaked from a job that was killed without cleanup; stop it by hand |

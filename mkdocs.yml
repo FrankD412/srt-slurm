@@ -63,6 +63,7 @@ nav:
       - Mooncake KV Store: mooncake-kv-store.md
       - Services: services.md
       - Pools: pools.md
+      - SGLang Fast Engine Recovery: sglang-weight-cache.md
       - Miles RL Post-Training: miles.md
   - Benchmarking:
       - Accuracy Benchmarks: accuracy.md
