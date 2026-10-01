@@ -16,7 +16,9 @@ inline script draws five linked SVG charts from it:
 5. host × seq coverage heatmap of ``row_count``.
 
 Dragging on any chart zooms every chart to that ``scrape_seq`` range (the
-timeline maps the range to its wall-clock span); double-click resets. Every mark
+timeline maps the range to its wall-clock span); while zoomed, a scrollbar under
+each chart (or shift+wheel / a sideways trackpad swipe) pans the window, and
+double-click resets. Every mark
 has a hover tooltip. A ``(hostname, scrape_seq)`` pair with no ``scrape`` record
 is an endpoint abandoned at the cycle deadline and is drawn hatched, not dropped.
 Stdlib only; dark theme by default with a persisted light/dark toggle.
@@ -247,12 +249,14 @@ _CSS = """
   --page: #0d0d0d; --surface: #1a1a19; --ink-primary: #ffffff; --ink-secondary: #c3c2b7;
   --ink-muted: #898781; --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
   --slot-0: #3987e5; --slot-1: #d95926; --slot-2: #199e70;
-  --ok: #199e70; --err: #e5484d; --timeout: #d95926; --other: #b07cd8; --warn: #f0a04b; }
+  --ok: #199e70; --err: #e5484d; --timeout: #d95926; --other: #b07cd8; --warn: #f0a04b;
+  --lag-lo: #9fd8ff; --lag-mid: #ffe14d; --lag-hi: #ff4fd8; }
 :root[data-theme=light] { color-scheme: light;
   --page: #f9f9f7; --surface: #fcfcfb; --ink-primary: #0b0b0b; --ink-secondary: #52514e;
   --ink-muted: #898781; --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
   --slot-0: #2a78d6; --slot-1: #eb6834; --slot-2: #1baf7a;
-  --ok: #1baf7a; --err: #d33b3b; --timeout: #eb6834; --other: #8e4fc2; --warn: #b8741a; }
+  --ok: #1baf7a; --err: #d33b3b; --timeout: #eb6834; --other: #8e4fc2; --warn: #b8741a;
+  --lag-lo: #3b6c99; --lag-mid: #9a7c00; --lag-hi: #c2189b; }
 body { margin: 0; padding: 24px; background: var(--page); color: var(--ink-primary);
   font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
 .page-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
@@ -293,20 +297,49 @@ svg .hatch-line { stroke: var(--ink-muted); }
 svg .missing { stroke: var(--ink-muted); }
 svg .o-ok { fill: var(--ok); } svg .o-http { fill: var(--err); } svg .o-timeout { fill: var(--timeout); } svg .o-other { fill: var(--other); }
 svg .bracket { stroke: var(--slot-0); stroke-width: 2; stroke-dasharray: 3 2; }
+svg .lag-lo { stroke: var(--lag-lo); }
+svg .lag-mid { stroke: var(--lag-mid); }
+svg .lag-hi { stroke: var(--lag-hi); }
+svg .lag-casing { stroke: var(--page); stroke-opacity: .9; }
+svg .head { stroke: var(--page); stroke-width: 1.5px; paint-order: stroke; }
+svg .head.lag-lo { fill: var(--lag-lo); } svg .head.lag-mid { fill: var(--lag-mid); } svg .head.lag-hi { fill: var(--lag-hi); }
 svg .cell { stroke: var(--grid); }
 svg .hit { fill: transparent; }
 svg .hit:hover { fill: var(--ink-primary); fill-opacity: .06; }
 svg .tipped { cursor: help; }
 svg .tipped:hover { filter: brightness(1.25); }
 svg .zoom-band { fill: var(--slot-0); fill-opacity: .18; stroke: var(--slot-0); stroke-width: 1; pointer-events: none; }
+/* Pan scrollbar: aligned to the plot area (PAD.l = 130, PAD.r = 24 in the script). Styled
+   explicitly so macOS overlay scrollbars stay visible instead of auto-hiding. */
+.pan { margin: 2px 24px 6px 130px; overflow-x: scroll; overflow-y: hidden; height: 12px; }
+.pan[hidden] { display: none; }
+.pan-inner { height: 1px; }
+.pan::-webkit-scrollbar { height: 10px; }
+.pan::-webkit-scrollbar-track { background: var(--grid); border-radius: 5px; }
+.pan::-webkit-scrollbar-thumb { background: var(--slot-0); border-radius: 5px; border: 2px solid var(--grid); }
+.pan::-webkit-scrollbar-thumb:hover { background: var(--ink-secondary); }
+@supports not selector(::-webkit-scrollbar) { .pan { scrollbar-color: var(--slot-0) var(--grid); } }
 .legend { display: flex; gap: 6px 14px; flex-wrap: wrap; margin: 4px 0 8px; font-size: 12px; color: var(--ink-secondary); }
 .legend .key { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 4px; }
 .legend .key i { display: inline-block; width: 12px; height: 12px; border-radius: 2px; border: 1px solid var(--border); }
+.legend button.key { font: inherit; color: inherit; background: none; cursor: pointer; }
+.legend button.key:hover { border-color: var(--ink-muted); color: var(--ink-primary); }
+.legend button.key.off { opacity: .4; text-decoration: line-through; }
+.legend button.key.off i { background: transparent !important; }
+.legend .filter-hint { align-self: center; color: var(--ink-muted); font-size: 11px; }
+.legend .filter-hint button { font: inherit; color: var(--slot-0); background: none; border: 0; padding: 0; cursor: pointer; }
+.legend .filter-label { align-self: center; color: var(--ink-muted); font-size: 11px; font-weight: 600; min-width: 64px; }
+.legend-stack { margin: 4px 0 8px; } .legend-stack .legend { margin: 0 0 4px; }
 .legend .key i.ok { background: var(--ok); } .legend .key i.err { background: var(--err); }
 .legend .key i.timeout { background: var(--timeout); } .legend .key i.other { background: var(--other); }
 .legend .key i.hatch { background: repeating-linear-gradient(45deg, var(--ink-muted) 0 1.5px, transparent 1.5px 6px); }
 .legend .key i.bracket { background: var(--ok); outline: 2px dashed var(--slot-0); outline-offset: -2px; }
 .legend .key i.sched { width: 0; border: 0; border-left: 1.5px dotted var(--ink-primary); border-radius: 0; height: 14px; }
+.legend .key i.lag-lo, .legend .key i.lag-mid, .legend .key i.lag-hi { width: 18px; height: 2px; border: 0; border-radius: 1px;
+  box-shadow: 0 0 0 1.5px var(--page); }
+.legend .key i.lag-lo { background: var(--lag-lo); }
+.legend .key i.lag-mid { background: var(--lag-mid); }
+.legend .key i.lag-hi { background: var(--lag-hi); }
 .note, .empty { margin: 6px 0 0; color: var(--ink-muted); font-size: 12px; }
 .note.warn { color: var(--warn); }
 footer { color: var(--ink-muted); font-size: 12px; margin-top: 24px; }
@@ -475,13 +508,115 @@ _CHARTS_JS = """
     updateHints();
   }
   function resetView() { setView(0, seqs.length - 1); }
+  // ---- horizontal pan when zoomed ------------------------------------------
+  // Each panel carries a native scrollbar (div.pan) under its plot area. The
+  // scroll content is (all seqs / visible seqs) x the track width, so the thumb
+  // is the zoom window; scrolling any of them slides the shared view without
+  // changing its width. Shift+wheel or a horizontal trackpad swipe on a chart
+  // drives the same scrollbar.
+  var panSrc = null;
+  function syncPans() {
+    var n = view.hi - view.lo + 1, full = n >= seqs.length;
+    document.querySelectorAll('.pan').forEach(function (p) {
+      p.hidden = full;
+      if (full) return;
+      var inner = p.firstElementChild, track = p.clientWidth;
+      inner.style.width = (track * seqs.length / n) + 'px';
+      if (p !== panSrc) p.scrollLeft = view.lo / seqs.length * inner.offsetWidth;
+    });
+  }
+  function onPanScroll(ev) {
+    var p = ev.currentTarget, n = view.hi - view.lo + 1;
+    if (p.hidden || n >= seqs.length) return;
+    var maxLo = seqs.length - n, w = p.firstElementChild.offsetWidth;
+    var lo = Math.max(0, Math.min(maxLo, Math.round(p.scrollLeft / w * seqs.length)));
+    if (lo === view.lo) return;
+    panSrc = p; setView(lo, lo + n - 1); panSrc = null;
+  }
+  function wirePans() {
+    document.querySelectorAll('.pan').forEach(function (p) { p.addEventListener('scroll', onPanScroll, { passive: true }); });
+    document.querySelectorAll('section.chart-panel').forEach(function (sec) {
+      var svg = sec.querySelector('svg.chart'), p = sec.querySelector('.pan');
+      if (!svg || !p) return;
+      svg.addEventListener('wheel', function (ev) {
+        if (p.hidden) return;
+        var dx = ev.shiftKey && !ev.deltaX ? ev.deltaY : ev.deltaX;
+        if (!dx || Math.abs(dx) < Math.abs(ev.shiftKey ? 0 : ev.deltaY)) return;
+        ev.preventDefault();
+        p.scrollLeft += dx;
+        onPanScroll({ currentTarget: p });
+      }, { passive: false });
+    });
+    window.addEventListener('resize', syncPans);
+  }
   function updateHints() {
+    syncPans();
     var full = view.lo === 0 && view.hi === seqs.length - 1;
     document.querySelectorAll('.zoom-hint').forEach(function (h) {
-      h.textContent = full ? 'drag to zoom - linked across charts' : 'seq ' + seqs[view.lo] + '-' + seqs[view.hi] + ' of ' + seqs[0] + '-' + seqs[seqs.length - 1] + ' - double-click to reset';
+      h.textContent = full ? 'drag to zoom - linked across charts' : 'seq ' + seqs[view.lo] + '-' + seqs[view.hi] + ' of ' + seqs[0] + '-' + seqs[seqs.length - 1] + ' - scroll sideways to pan, double-click to reset';
       h.classList.toggle('zoomed', !full);
     });
     var btn = document.querySelector('.zoom-reset'); if (btn) btn.hidden = full;
+  }
+
+  // ---- series filters (lag + cost charts) ----------------------------------
+  // One host filter shared by the lag and cost charts, one delay-type filter for
+  // the cost stack. Legend chips are buttons: click toggles, shift-click isolates
+  // (shift-click the only visible one to show all again).
+  var hostOn = hosts.map(function () { return true; });
+  var segOn = {}; DATA.cost_segments.forEach(function (seg) { segOn[seg.key] = true; });
+  var filterViews = [];
+  function hostVisible(h) { return hostOn[h]; }
+  function toggleIn(state, keys, key, solo) {
+    if (solo) {
+      var onlyThis = keys.every(function (k) { return k === key ? state[k] : !state[k]; });
+      keys.forEach(function (k) { state[k] = onlyThis || k === key; });
+    } else state[key] = !state[key];
+  }
+  function refilter() {
+    filterViews.forEach(function (f) { f(); });
+    charts.forEach(function (c) { if (c.id === 'lag' || c.id === 'cost') c.draw(); });
+  }
+  function buildFilterLegend(container, label, items, state, keyOf) {
+    var keys = items.map(keyOf);
+    if (label) { var lab = document.createElement('span'); lab.className = 'filter-label'; lab.textContent = label; container.appendChild(lab); }
+    var btns = items.map(function (it, idx) {
+      var b = document.createElement('button'); b.type = 'button'; b.className = 'key';
+      var sw = document.createElement('i'); sw.style.background = it.color; b.appendChild(sw);
+      b.appendChild(document.createTextNode(it.label));
+      b.title = 'click to show/hide ' + it.label + ' · shift-click to show only ' + it.label;
+      b.addEventListener('click', function (ev) { toggleIn(state, keys, keys[idx], ev.shiftKey); refilter(); });
+      container.appendChild(b);
+      return b;
+    });
+    var hint = document.createElement('span'); hint.className = 'filter-hint'; container.appendChild(hint);
+    function sync() {
+      var hidden = 0;
+      btns.forEach(function (b, idx) { var on = state[keys[idx]]; b.classList.toggle('off', !on); b.setAttribute('aria-pressed', on ? 'true' : 'false'); if (!on) hidden++; });
+      hint.textContent = '';
+      if (!hidden) { hint.textContent = 'click to toggle · shift-click to isolate'; return; }
+      hint.appendChild(document.createTextNode(hidden + ' of ' + keys.length + ' hidden · '));
+      var all = document.createElement('button'); all.type = 'button'; all.textContent = 'show all';
+      all.addEventListener('click', function () { keys.forEach(function (k) { state[k] = true; }); refilter(); });
+      hint.appendChild(all);
+    }
+    filterViews.push(sync); sync();
+  }
+  function buildFilters() {
+    var hostItems = hosts.map(function (host, h) { return { label: host, color: hostColor(h), h: h }; });
+    document.querySelectorAll('.legend[data-legend="hosts"]').forEach(function (lg) {
+      buildFilterLegend(lg, lg.dataset.label || null, hostItems, hostOn, function (it) { return it.h; });
+    });
+    document.querySelectorAll('.legend[data-legend="segments"]').forEach(function (lg) {
+      buildFilterLegend(lg, lg.dataset.label || null, DATA.cost_segments, segOn, function (seg) { return seg.key; });
+    });
+  }
+  function filterNote(c) {
+    var nh = hostOn.filter(Boolean).length, ns = DATA.cost_segments.filter(function (s) { return segOn[s.key]; }).length;
+    var msg = null;
+    if (!nh) msg = 'all hosts hidden - pick one in the legend';
+    else if (c.id === 'cost' && !ns) msg = 'all delay types hidden - pick one in the legend';
+    if (msg) text(c.gTop, PAD.l + c.plotW / 2, PAD.t + 40, msg, 'tick', 'middle');
   }
 
   // ---- chart scaffolding ---------------------------------------------------
@@ -596,7 +731,7 @@ _CHARTS_JS = """
   function drawTimeline(c) {
     var win = timelineWindow(), tA = win[0], tB = win[1];
     var xOfT = function (t) { return PAD.l + (t - tA) / (tB - tA) * c.plotW; };
-    var lanesBottom = PAD.t + LANE * hosts.length;
+    var lanesBottom = PAD.t + LANE * hosts.length, arrows = [];
     c.timeAt = function (x) { return tA + (x - PAD.l) / c.plotW * (tB - tA); };
     hosts.forEach(function (host, hi) {
       var y = PAD.t + hi * LANE;
@@ -615,9 +750,45 @@ _CHARTS_JS = """
           return;
         }
         var x = xOfT(s.s), w = Math.max(xOfT(s.f) - x, 2.5);
+        // Lag connector: scheduled slot -> request start. Length is the drift off the
+        // schedule; colour grades it against the sample interval (or 1 s if unknown).
+        // Collected here and drawn after every bar so arrows are never hidden under one.
+        var wr2 = writeOf(q);
+        if (s.lag !== null && wr2 && wr2.sa !== null && s.lag > 0) {
+          var ratio = s.lag / (interval || 1);
+          arrows.push({ xs: xOfT(wr2.sa), xe: x, ym: y + LANE / 2, cls: ratio > 1 ? 'lag-hi' : ratio > 0.25 ? 'lag-mid' : 'lag-lo' });
+        }
         var r = el('rect', { x: x, y: y + 5, width: w, height: LANE - 10, rx: 1.5, 'class': OUTCOME_CLASS[s.o] + (s.lag === null ? ' bracket' : '') }, c.gPlot);
         var d = scrapeTip(s); setTip(r, d.title, d.rows, d.note);
       });
+    });
+    // Each arrow is a surface-coloured casing under a coloured core, so it stays
+    // legible where it crosses a bar of any outcome colour. During an overrun a
+    // cycle's lag spans later slots, so arrows in a lane are packed into tracks
+    // (greedy interval colouring): an arrow that starts before the previous one
+    // ends drops to the next free track instead of drawing over it. Tracks are
+    // centred on the lane and squeezed to fit its height.
+    var gArrows = el('g', { 'pointer-events': 'none' }, c.gPlot);
+    var byLane = {};
+    arrows.forEach(function (a) { (byLane[a.ym] = byLane[a.ym] || []).push(a); });
+    Object.keys(byLane).forEach(function (k) {
+      var ls = byLane[k].sort(function (a, b) { return a.xs - b.xs; }), ends = [];
+      ls.forEach(function (a) {
+        var t = 0; while (t < ends.length && ends[t] > a.xs - 2) t++;
+        ends[t] = a.xe; a.track = t;
+      });
+      var n = ends.length, gap = Math.min(6, (LANE - 14) / Math.max(n, 1));
+      ls.forEach(function (a) { a.ym = Number(k) + (a.track - (n - 1) / 2) * gap; });
+    });
+    arrows.forEach(function (a) {
+      var len = a.xe - a.xs, head = Math.min(7, Math.max(len * 0.6, 0)), hh = 4;
+      var shaftEnd = len > 6 ? a.xe - head + 1 : a.xe;
+      el('line', { x1: a.xs, y1: a.ym, x2: shaftEnd, y2: a.ym, 'class': 'lag-casing', 'stroke-width': 5, 'stroke-linecap': 'round' }, gArrows);
+      el('line', { x1: a.xs, y1: a.ym, x2: shaftEnd, y2: a.ym, 'class': a.cls, 'stroke-width': 2, 'stroke-linecap': 'round' }, gArrows);
+      if (len > 6) {
+        var pts = (a.xe - head) + ',' + (a.ym - hh) + ' ' + a.xe + ',' + a.ym + ' ' + (a.xe - head) + ',' + (a.ym + hh);
+        el('polygon', { points: pts, 'class': a.cls + ' head', 'stroke-linejoin': 'round' }, gArrows);
+      }
     });
     visible().forEach(function (q) {
       var w = writeOf(q); if (!w || w.sa === null) return;
@@ -657,11 +828,12 @@ _CHARTS_JS = """
   var LAG_H = 200;
   function drawLag(c) {
     var vis = visible(), lags = [];
-    vis.forEach(function (q) { (bySeq.get(q) || []).forEach(function (s) { if (s.lag !== null) lags.push(s.lag); }); });
+    vis.forEach(function (q) { (bySeq.get(q) || []).forEach(function (s) { if (s.lag !== null && hostVisible(s.h)) lags.push(s.lag); }); });
     var hi = lags.length ? Math.max.apply(null, lags) * 1.08 : 0.01; if (hi <= 0) hi = 0.01;
     var yOf = function (v) { return PAD.t + LAG_H - v / hi * LAG_H; };
     yAxis(c, yOf, 0, hi, PAD.t, PAD.t + LAG_H, 'schedule lag (s)');
     hosts.forEach(function (host, h) {
+      if (!hostVisible(h)) return;
       var runs = [[]], color = hostColor(h);
       vis.forEach(function (q, k) {
         var s = slot.get(h + '|' + q);
@@ -691,18 +863,16 @@ _CHARTS_JS = """
       });
     });
     xAxisSeq(c, PAD.t + LAG_H);
-    var legend = document.querySelector('.legend[data-legend="hosts"]');
-    if (legend && !legend.childElementCount) hosts.forEach(function (host, h) {
-      var k = document.createElement('span'); k.className = 'key';
-      var i = document.createElement('i'); i.style.background = hostColor(h); k.appendChild(i);
-      k.appendChild(document.createTextNode(host)); legend.appendChild(k);
-    });
+    filterNote(c);
   }
 
   // ---- 3. cycle cost -------------------------------------------------------
+  // Request and parse terms are per-host maxima, so they follow the host filter;
+  // writer lock wait and sample write are per-cycle (one cycle_write per seq) and
+  // do not depend on which hosts are shown.
   var COST_H = 220;
   function costStack(q) {
-    var g = bySeq.get(q) || [], w = writeOf(q);
+    var g = (bySeq.get(q) || []).filter(function (s) { return hostVisible(s.h); }), w = writeOf(q);
     var slowest = g.reduce(function (m, s) { return !m || s.d > m.d ? s : m; }, null);
     var parsed = g.filter(function (s) { return s.p !== null; });
     return {
@@ -713,25 +883,28 @@ _CHARTS_JS = """
   }
   function drawCost(c) {
     var vis = visible(), stacks = vis.map(costStack);
-    var totals = stacks.map(function (st) { return DATA.cost_segments.reduce(function (a, seg) { return a + st[seg.key]; }, 0); });
+    var segs = DATA.cost_segments.filter(function (seg) { return segOn[seg.key]; });
+    var nHostsOn = hostOn.filter(Boolean).length, filtered = segs.length < DATA.cost_segments.length || nHostsOn < hosts.length;
+    var totals = stacks.map(function (st) { return segs.reduce(function (a, seg) { return a + st[seg.key]; }, 0); });
     var hi = Math.max.apply(null, totals.concat([interval || 0])) * 1.1; if (!(hi > 0)) hi = 0.01;
     var yOf = function (v) { return PAD.t + COST_H - v / hi * COST_H; };
-    yAxis(c, yOf, 0, hi, PAD.t, PAD.t + COST_H, 'seconds in the cycle');
+    yAxis(c, yOf, 0, hi, PAD.t, PAD.t + COST_H, filtered ? 'seconds in the cycle (filtered)' : 'seconds in the cycle');
     var barW = Math.max(2, c.bandW() * 0.7);
     vis.forEach(function (q, k) {
       var st = stacks[k], total = totals[k], x = c.xOfIdx(view.lo + k) - barW / 2;
-      var rows = [['scrape_seq', q], ['total', fmtS(total)]];
-      DATA.cost_segments.forEach(function (seg) { rows.push([seg.label, fmtS(st[seg.key])]); });
-      if (st.slowest) rows.push(['slowest host', hosts[st.slowest.h] + ' (' + fmtS(st.slowest.d) + ', ' + st.slowest.o + ')']);
-      rows.push(['hosts settled', st.settled + ' of ' + hosts.length]);
+      var rows = [['scrape_seq', q], [filtered ? 'total (shown terms)' : 'total', fmtS(total)]];
+      DATA.cost_segments.forEach(function (seg) { rows.push([seg.label + (segOn[seg.key] ? '' : ' (hidden)'), fmtS(st[seg.key])]); });
+      if (st.slowest) rows.push(['slowest host' + (nHostsOn < hosts.length ? ' (shown)' : ''), hosts[st.slowest.h] + ' (' + fmtS(st.slowest.d) + ', ' + st.slowest.o + ')']);
+      rows.push(['hosts settled' + (nHostsOn < hosts.length ? ' (shown)' : ''), st.settled + ' of ' + nHostsOn]);
       if (interval !== null) rows.push(['vs interval', (100 * total / interval).toFixed(0) + '% of ' + fmtS(interval)]);
       var note = null;
       if (!st.write_rec) note = 'No cycle_write record for this seq: lock-wait and write terms are unknown (shown as 0).';
       else if (interval !== null && total > interval) note = 'Cycle cost exceeded the sample interval - the next slot starts late and lag accumulates.';
+      if (filtered) note = (note ? note + ' ' : '') + 'Filtered view: the bar stacks only the shown delay types, and request/parse are maxima over the shown hosts only; lock wait and sample write are per-cycle and ignore the host filter.';
       var hit = el('rect', { x: x, y: PAD.t, width: barW, height: COST_H, 'class': 'hit' }, c.gPlot);
       setTip(hit, 'Cycle cost', rows, note);
       var base = 0;
-      DATA.cost_segments.forEach(function (seg) {
+      segs.forEach(function (seg) {
         var v = st[seg.key]; if (v <= 0) return;
         var yt = yOf(base + v), yb = yOf(base);
         el('rect', { x: x, y: yt, width: barW, height: Math.max(yb - yt, 0.5), fill: seg.color, 'pointer-events': 'none' }, c.gPlot);
@@ -749,6 +922,7 @@ _CHARTS_JS = """
       text(c.gTop, onLeft ? PAD.l + 6 : PAD.l + c.plotW - 4, y - 4, label, 'tick ref-label', onLeft ? 'start' : 'end');
     }
     xAxisSeq(c, PAD.t + COST_H);
+    filterNote(c);
   }
 
   // ---- 4. write health -----------------------------------------------------
@@ -798,6 +972,7 @@ _CHARTS_JS = """
   }
 
   // ---- boot ----------------------------------------------------------------
+  buildFilters();
   makeChart('timeline', PAD.t + LANE * hosts.length + PAD.b, drawTimeline, seqRangeTimeline);
   makeChart('lag', PAD.t + LAG_H + PAD.b, drawLag, seqRangeBand);
   makeChart('cost', PAD.t + COST_H + PAD.b, drawCost, seqRangeBand);
@@ -805,6 +980,7 @@ _CHARTS_JS = """
   makeChart('coverage', PAD.t + ROW_H * hosts.length + PAD.b, drawCoverage, seqRangeBand);
   charts.forEach(function (c) { c.layout(); c.draw(); });
   updateHints();
+  wirePans();
   var resetBtn = document.querySelector('.zoom-reset'); if (resetBtn) resetBtn.addEventListener('click', resetView);
   window.__scrapeViz = { setView: setView, resetView: resetView, view: view, seqs: seqs };
 })();
@@ -831,14 +1007,22 @@ def _timeline_legend() -> str:
         ("hatch", "no scrape record — abandoned at the cycle deadline"),
         ("bracket", "bracket / manual scrape (no scheduled slot, no lag)"),
         ("sched", "scheduled slot (cycle_write.scheduled_at_unix)"),
+        ("lag-lo", "schedule lag ≤ 25 % of interval"),
+        ("lag-mid", "lag 25–100 % of interval"),
+        ("lag-hi", "lag > interval — slot overrun"),
     ]
     out = "".join(f'<span class="key"><i class="{cls}"></i>{label}</span>' for cls, label in keys)
     return f'<div class="legend">{out}</div>'
 
 
 def _cost_legend() -> str:
-    out = "".join(f'<span class="key"><i style="background:{c}"></i>{label}</span>' for _, label, c in COST_SEGMENTS)
-    return f'<div class="legend">{out}</div>'
+    # Both rows are filled by the inline script as toggle buttons: delay types
+    # (COST_SEGMENTS, via the payload) and hosts (shared with the lag chart).
+    return (
+        '<div class="legend-stack">'
+        '<div class="legend" data-legend="segments" data-label="delay type"></div>'
+        '<div class="legend" data-legend="hosts" data-label="hosts"></div></div>'
+    )
 
 
 def _panel(chart_id: str, title: str, blurb: str, before: str = "", after: str = "") -> str:
@@ -846,7 +1030,9 @@ def _panel(chart_id: str, title: str, blurb: str, before: str = "", after: str =
         f'<section class="chart-panel"><div class="chart-head"><h2>{_esc(title)}</h2>'
         '<span class="zoom-hint"></span></div>'
         f'<p class="blurb">{_esc(blurb)}</p>{before}'
-        f'<svg class="chart" data-chart="{chart_id}"></svg>{after}</section>'
+        f'<svg class="chart" data-chart="{chart_id}"></svg>'
+        '<div class="pan" hidden><div class="pan-inner"></div></div>'
+        f"{after}</section>"
     )
 
 
@@ -896,23 +1082,29 @@ def render_html(t: Timings, source: Path) -> str:
                 "Scrape request timeline — one lane per host, one bar per request (request_started_at_unix → request_finished_at_unix)",
                 "Bar colour is the request outcome; hatched slots are (host, scrape_seq) pairs with no scrape record, i.e. the "
                 "endpoint was still unsettled at the cycle deadline. Dashed blue outline = bracket/manual scrape. Dotted vertical "
-                "ticks are each cycle's scheduled slot; the gap from a tick to its bars is the schedule lag. Hover for details; "
-                "drag to zoom.",
+                "ticks are each cycle's scheduled slot; the arrow from a tick to its bar is that request's schedule lag "
+                "(schedule_lag_seconds) — lengthening arrows mean requests are drifting off the schedule, coloured yellow past "
+                "25 % of the sample interval and magenta once they overrun it (hues chosen to stay clear of the outcome colours). "
+                "When a cycle's lag runs past later slots, the overlapping arrows are stacked on separate lines within the lane. "
+                "Hover for details; drag to zoom.",
                 before=_timeline_legend(),
             ),
             _panel(
                 "lag",
                 "Schedule lag per host by scrape_seq — request start minus the cycle's scheduled slot (schedule_lag_seconds)",
                 "Steady growth means cycle overrun is accumulating; a spike on every host at one seq means one slow endpoint stalled "
-                "that batch. Vertical dashed ticks mark seqs where that host has no record. The y-axis follows the visible range.",
-                before='<div class="legend" data-legend="hosts"></div>',
+                "that batch. Vertical dashed ticks mark seqs where that host has no record. The y-axis follows the visible range. "
+                "Click a host in the legend to hide or show it (shift-click to isolate); the host filter is shared with the "
+                "cost chart below.",
+                before='<div class="legend" data-legend="hosts" data-label="hosts"></div>',
             ),
             _panel(
                 "cost",
                 "Per-cycle cost decomposition by scrape_seq — slowest request, slowest parse, writer lock wait, sample write",
                 "The cycle waits for its slowest endpoint, so the max request_duration_seconds across hosts is the dominant term. "
                 "Dashed line = sample interval, taken as the median gap between cycle_write.scheduled_at_unix slots (the setting "
-                "itself is not in the file).",
+                "itself is not in the file). Click a delay type to drop it from the stack, or a host to drop it from the "
+                "request/parse maxima (shift-click isolates); lock wait and sample write are per-cycle and ignore the host filter.",
                 before=_cost_legend(),
             ),
             _panel(
@@ -945,7 +1137,7 @@ def render_html(t: Timings, source: Path) -> str:
         f'<div class="stat-cards">{"".join(cards)}</div>{body}'
         "<footer>Generated by srtctl.analysis.scrape_timings_viz · every value is read from the JSONL; "
         "the sample interval is the only derived quantity. Drag on any chart to zoom all of them to a scrape_seq range; "
-        "double-click to reset.</footer>"
+        "while zoomed, the scrollbar under each chart (or shift+wheel) pans; double-click to reset.</footer>"
         f'<script id="scrape-data" type="application/json">{payload}</script>'
         f"<script>{_CHARTS_JS}</script></body></html>"
     )
