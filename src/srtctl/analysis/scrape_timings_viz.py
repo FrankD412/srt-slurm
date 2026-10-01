@@ -580,7 +580,9 @@ _CHARTS_JS = """
   }
 
   // ---- 1. timeline ---------------------------------------------------------
-  var LANE = 26;
+  // Lane height adapts to the host count: few hosts get tall lanes so the
+  // timeline fills ~220 px of plot; many hosts fall back to compact 26 px lanes.
+  var LANE = Math.max(26, Math.min(72, Math.round(220 / Math.max(hosts.length, 1))));
   function timelineWindow() {
     var a = Infinity, b = -Infinity;
     visible().forEach(function (q) {
