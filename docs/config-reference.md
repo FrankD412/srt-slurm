@@ -1679,7 +1679,7 @@ telemetry:
 | `collect_interval_ms` | int | `1000` | Milliseconds between collector cycles (shared by the DCGM and CPU legs); must be at most `3000` (replaces the retired `default_frequency`, which was seconds despite its name) |
 | `storage_subdir` | string | `power` | Output directory below the run log directory |
 | `required` | bool | `false` | Fail the benchmark when publishable DCGM power artifacts cannot be produced (CPU power is always best-effort; see below) |
-| `clock_sync_check` | bool | `true` | Before any server starts, probe every allocation node (`timedatectl` → `chronyc` → `ntpq`, bare host, unprivileged) for an NTP-synchronised clock. A failure aborts the job when `required` is true and warns otherwise. Disable on clusters where those tools are unavailable to unprivileged users |
+| `clock_sync_check` | bool | `true` | Before any server starts, probe every allocation node (`timedatectl` → `chronyc` → `ntpq`, bare host, unprivileged) for an NTP-synchronised clock. A failure aborts the job when `required` is true; otherwise the run continues and the manifest records `clock_sync_unverified` with `publication_valid: false`. Disable on clusters where those tools are unavailable to unprivileged users |
 | `startup_timeout_seconds` | float | `30.0` | Exporter readiness timeout (shared by the DCGM and CPU legs) |
 | `request_timeout_seconds` | float | `2.0` | Per-request exporter timeout (shared by the DCGM and CPU legs) |
 | `collector_join_timeout_seconds` | float/null | `null` | Shutdown join timeout; defaults from `request_timeout_seconds` |
