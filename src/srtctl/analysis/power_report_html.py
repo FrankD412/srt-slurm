@@ -1573,6 +1573,9 @@ function initPareto(root) {
   const drawFrontier = root.dataset.frontier !== "off";
   const frontierOnlyBox = card.querySelector("input[data-frontier-only]");
   const frontierOnly = () => !!(frontierOnlyBox && frontierOnlyBox.checked);
+  // "Frontier points only" also collapses each concurrency to its best point on
+  // the current axes (so two sweeps of the same ladder don't both appear).
+  const bestPerConc = () => frontierOnly() && drawFrontier;
   const modelSel = card.querySelector("select[data-model]");
   const modelOk = p => !modelSel || !modelSel.value || p.model === modelSel.value;
   // Baseline mode: Y is divided by the baseline run's Y at the same concurrency.
@@ -1716,6 +1719,29 @@ function initPareto(root) {
       if (!modelOk(p) || metric(p, xAxis) === null) return;
       variantsFor(yAxis).forEach(v => { if (yVal(p, v) !== null) items.push({ i, v }); });
     });
+    // "Best per concurrency": within each (family, benchmark type, power basis),
+    // keep the single point per concurrency that is best on the Y axis (its
+    // "better" direction), ties broken by X. Re-evaluated on every axis change, so
+    // the survivor at a given concurrency can differ between e.g. tok/s per GPU
+    // and watts per GPU. Applied before the frontier so the line runs through the
+    // survivors only.
+    let bestDropped = 0;
+    if (bestPerConc()) {
+      const better = (a, b, axis) => axis.better === "min" ? a < b : a > b;
+      const best = new Map();
+      items.forEach(it => {
+        const p = points[it.i];
+        const k = [p.group, p.bench || "", p.m.concurrency, it.v.key].join("|");
+        const cur = best.get(k);
+        if (!cur) { best.set(k, it); return; }
+        const cy = yVal(points[cur.i], cur.v), ny = yVal(p, it.v);
+        const cx = metric(points[cur.i], xAxis), nx = metric(p, xAxis);
+        if (better(ny, cy, yAxis) || (ny === cy && better(nx, cx, xAxis))) best.set(k, it);
+      });
+      const keep = new Set(best.values());
+      bestDropped = items.length - keep.size;
+      items = items.filter(it => keep.has(it));
+    }
     plotted = [...new Set(items.map(it => it.i))];
     // Legend chips for families outside the chosen model drop out with their points.
     runLegend.querySelectorAll(".run-key").forEach(key => {
@@ -1804,6 +1830,7 @@ function initPareto(root) {
       const n = items.length - shown.length;
       if (n) note.textContent = (note.textContent ? note.textContent + " " : "") + n + " dominated point(s) hidden (frontier only).";
     }
+    if (bestDropped && note) note.textContent = (note.textContent ? note.textContent + " " : "") + bestDropped + " point(s) hidden: another run is better at the same concurrency on these axes.";
 
     shown.forEach(it => {
       const p = points[it.i], v = it.v, col = variantColor(p.color, v);
@@ -2730,7 +2757,7 @@ def _pareto_view_html(
         {_model_select_html(points)}
         <label>X {_axis_select_html("x", _PARETO_DEFAULT_X)}</label>
         <label>Y {_axis_select_html("y", _PARETO_DEFAULT_Y)}</label>
-        <label class="frontier-only" title="Hide points that another point of the same group beats on both axes"><input type="checkbox" data-frontier-only checked> Frontier points only</label>
+        <label class="frontier-only" title="Keep, at each concurrency, only the point that is best on the Y axis (ties: best X), then hide points another point of the same group beats on both axes. Unchecked shows every point."><input type="checkbox" data-frontier-only checked> Frontier points only</label>
       </div>
       <div class="run-legend"></div>
       <div class="basis-legend run-legend" hidden></div>
