@@ -559,7 +559,7 @@ function lowerBound(arr, target) {
 // Pareto points (each point has its own pre-rendered chart group) or moving
 // between tabs keeps the chosen granularity and y-scales. Changing a toggle in
 // one panel broadcasts to all.
-const CHART_PREFS = { granularity: "dev", scales: {} };   // scales: chart title -> "linear" | "log"; default view = device average
+const CHART_PREFS = { granularity: "gpu", scales: {} };   // scales: chart title -> "linear" | "log"; default view = per GPU
 const CHART_GROUPS = [];
 function broadcastChartPrefs(origin) {
   CHART_GROUPS.forEach(g => { if (g !== origin && g.applyPrefs) g.applyPrefs(); });
@@ -1108,7 +1108,7 @@ const NODE_POWER_SEGMENTS = [
   { key: "soc",      label: "SoC / SysIO",      color: "hsl(45 90% 62%)" },
   { key: "dram",     label: "DRAM",             color: "hsl(20 80% 55%)" },
   { key: "cpu_rest", label: "CPU envelope (other)", color: "hsl(35 40% 72%)" },
-  { key: "cpu",      label: "CPU (socket total)", color: "hsl(35 85% 50%)" },
+  { key: "cpu",      label: "CPU socket envelope (total)", color: "hsl(12 70% 52%)" },
   { key: "cpu_est",  label: "CPU (estimated, not measured)", color: "hsl(35 30% 60%)" },
   { key: "overhead", label: "Rack overhead (projected, assumed)", color: "hsl(262 45% 60%)" },
 ];
@@ -1124,7 +1124,7 @@ const TYPE_POWER_HIDDEN = new Set();
 // Node-bar normalisation shared by the by-type and per-node cards: "node" = the
 // whole node's draw; "gpu" = every segment / that node's GPU count, so a bar reads
 // as watts attributable to one GPU (GPU watts per GPU + CPU watts per GPU + ...).
-let NODE_BAR_NORM = "node";
+let NODE_BAR_NORM = "gpu";
 const TYPE_ROLE_ORDER = ["prefill", "decode"];
 function roleKeyOf(n) {
   const r = (n.roles || []).filter(Boolean).sort();
@@ -1201,6 +1201,22 @@ function renderTypePower(card, point) {
         if (!segs.length) segs.push(["cpu", cpuW / sockN]);
       } else segs.push(["cpu", cpuW / sockN]);
       rows.push({ group: heading, label: "per CPU socket", segs, meta: sockN + " sockets on " + ns.length + (ns.length === 1 ? " node" : " nodes") });
+      // Socket breakdown: the same quantities side by side rather than stacked, so the
+      // envelope can be read against each rail. ACPI nodes carry a Grace envelope
+      // (power_w) plus CPU-rail / SysIO (/ DRAM); DCGM nodes carry rails only, in
+      // which case power_w *is* the CPU rail and no envelope bar is drawn.
+      if (anyRails) {
+        const railTot = rk => ns.reduce((a, n) => a + ((n.cpu_rails_w || {})[rk] || 0), 0) / sockN;
+        const rail = railTot("cpu_rail"), soc = railTot("soc"), dram = railTot("dram");
+        const hasEnvelope = cpuW / sockN - (rail + soc + dram) > 0.5;
+        const meta = sockN + " sockets on " + ns.length + (ns.length === 1 ? " node" : " nodes");
+        const pct = v => hasEnvelope ? " (" + fmtNum(100 * v / (cpuW / sockN), 0) + "% of socket)" : "";
+        if (hasEnvelope) rows.push({ group: heading, label: "\u2514 socket envelope", segs: [["cpu", cpuW / sockN]], meta: "Grace socket total (ACPI power_w); " + meta });
+        if (rail > 0) rows.push({ group: heading, label: "\u2514 CPU rail", segs: [["cpu_rail", rail]], meta: "CPU rail" + pct(rail) + "; " + meta });
+        if (soc > 0) rows.push({ group: heading, label: "\u2514 SysIO / SoC", segs: [["soc", soc]], meta: "SysIO / SoC rail" + pct(soc) + "; " + meta });
+        if (dram > 0) rows.push({ group: heading, label: "\u2514 DRAM", segs: [["dram", dram]], meta: "DRAM rail" + pct(dram) + "; " + meta });
+        if (!hasEnvelope) rows.push({ group: heading, label: "\u2514 socket envelope", segs: [], meta: "not reported by DCGM (no Grace envelope field); " + meta, placeholder: "n/a (DCGM: rails only)" });
+      }
     }
     // Assumed rack overhead gets its own row so the measured per-GPU bar stays a measurement.
     if (gpuN > 0 && overheadPerGpu(point) > 0)
@@ -1261,7 +1277,7 @@ function renderTypePower(card, point) {
       rect.addEventListener("pointerleave", () => { tip.style.opacity = 0; });
       svg.appendChild(rect); acc += v;
     });
-    const val = svgEl("text", { class: "axis-text", x: x(acc) + 6, y: y + h / 2 + 3 }); val.textContent = fmtNum(r.total, 0) + " W"; svg.appendChild(val);
+    const val = svgEl("text", { class: "axis-text", x: x(acc) + 6, y: y + h / 2 + 3 }); val.textContent = r.placeholder && !r.segs.length ? r.placeholder : fmtNum(r.total, 0) + " W"; svg.appendChild(val);
     yCursor += rowH;
   });
 }
@@ -2032,7 +2048,7 @@ _SUMMARY_TABLE_HEADER = (
     '<tr><th>Run</th><th class="cg-perf cg-start">Output tok/s</th><th class="cg-perf">Tok/s/GPU</th>'
     '<th class="cg-perf">TPOT p50 (ms)</th><th class="cg-perf">TPOT p90 (ms)</th>'
     '<th class="cg-gpu cg-start">Total GPU watts</th><th class="cg-gpu">Watts per GPU</th>'
-    '<th class="cg-cpu cg-start">Total CPU watts</th><th class="cg-cpu">Watts per CPU socket</th><th class="cg-cpu">CPU watts per GPU</th>'
+    '<th class="cg-cpu cg-start">Total CPU watts</th><th class="cg-cpu">Watts per CPU socket</th><th class="cg-cpu">CPU rail W / socket</th><th class="cg-cpu">SysIO W / socket</th><th class="cg-cpu">Rails \u00f7 socket</th><th class="cg-cpu">CPU watts per GPU</th>'
     '<th class="cg-eff cg-start">Tok/s per GPU watt</th><th class="cg-eff">Tok/s per CPU watt</th>'
     '<th class="cg-eff">Tok/s per watt (GPU+CPU)</th></tr>'
 )
@@ -2073,6 +2089,9 @@ def _summary_rows_html(
             f"<td class='cg-gpu'>{_fmt(_per_gpu(ppw['gpu_avg_power_w'], ppw['num_gpus']), 0)}</td>"
             f"<td class='cg-cpu cg-start'>{_fmt(ppw['cpu_avg_power_w'], 0)}</td>"
             f"<td class='cg-cpu'>{_fmt(_per_gpu(ppw['cpu_avg_power_w'], _socket_count(r)), 0)}</td>"
+            f"<td class='cg-cpu'>{_fmt(_rail_per_socket(r, 'cpu_rail'), 1)}</td>"
+            f"<td class='cg-cpu'>{_fmt(_rail_per_socket(r, 'soc'), 1)}</td>"
+            f"<td class='cg-cpu'>{_rails_share_cell(r)}</td>"
             f"<td class='cg-cpu'>{_fmt(_per_gpu(ppw['cpu_avg_power_w'], ppw['num_gpus']), 1)}</td>"
             f"<td class='cg-eff cg-start'>{_fmt(ppw['output_tokens_per_second_per_gpu_watt'], 4)}</td>"
             f"<td class='cg-eff'>{_fmt(ppw['output_tokens_per_second_per_cpu_watt'], 4)}</td>"
@@ -2160,6 +2179,32 @@ def _socket_count(report: dict) -> int:
 
 def _per_gpu(total: float | None, num_gpus: int | None) -> float | None:
     return None if total is None or not num_gpus else total / num_gpus
+
+
+def _rail_per_socket(report: dict, rail: str) -> float | None:
+    """Window-average watts of one ACPI/DCGM component rail per socket, from the
+    per-node rails summed over nodes and divided by the sockets that reported.
+    None when no node recorded that rail."""
+    nodes = report.get("node_power") or []
+    tot = sum((n.get("cpu_rails_w") or {}).get(rail) or 0.0 for n in nodes)
+    socks = sum(n.get("socket_count") or 0 for n in nodes)
+    return tot / socks if tot > 0 and socks else None
+
+
+def _rails_share_cell(report: dict) -> str:
+    """``(rail + SysIO + DRAM) / socket envelope`` as a percentage. On DCGM runs the
+    socket figure *is* the CPU rail (no envelope field), so the share is
+    meaningless and the cell says so rather than printing 100%."""
+    nodes = report.get("node_power") or []
+    rails = sum(sum((n.get("cpu_rails_w") or {}).values()) for n in nodes)
+    env = sum(n.get("cpu_w") or 0.0 for n in nodes)
+    if not rails or not env:
+        return "n/a"
+    if env - sum((n.get("cpu_rails_w") or {}).get("cpu_rail") or 0.0 for n in nodes) < 0.5 * len(nodes):
+        return (
+            '<span title="DCGM reports the CPU rail only; no Grace socket envelope to compare against">rail only</span>'
+        )
+    return f"{100.0 * rails / env:.0f}%"
 
 
 # -- Power budgets per GPU type --------------------------------------------------
@@ -2474,6 +2519,9 @@ def _pareto_points(
                         f"{_fmt(_per_gpu(ppw['cpu_avg_power_w'], _socket_count(r)), 1)} W"
                         + (f" ({_socket_count(r)} sockets)" if _socket_count(r) else ""),
                     ),
+                    ("CPU rail watts per socket (avg)", f"{_fmt(_rail_per_socket(r, 'cpu_rail'), 1)} W"),
+                    ("SysIO watts per socket (avg)", f"{_fmt(_rail_per_socket(r, 'soc'), 1)} W"),
+                    ("Rails \u00f7 socket envelope", _rails_share_cell(r)),
                     ("CPU watts per GPU (avg)", f"{_fmt(_per_gpu(ppw['cpu_avg_power_w'], num_gpus), 1)} W"),
                     ("Total watts, GPU+CPU (avg)", f"{_fmt(combined_w, 0)} W"),
                     *basis_fields,
@@ -2552,7 +2600,9 @@ def _type_power_card_html(point: dict | None = None) -> str:
   </div>
   <p class="pareto-subtitle">Window-average watts for {what}, averaged over every device of that kind on nodes of the
   same worker role: one bar per GPU (mean across the role's GPUs) and one per CPU socket (mean across its sockets; drawn
-  as rails when recorded). The rack-overhead row is the budget's assumed per-GPU overhead, not a
+  as rails when recorded). Under each socket bar, the <b>\u2514 socket envelope / CPU rail / SysIO</b> rows show the same
+  figures side by side so the Grace socket total can be read against its rails (DCGM nodes report rails only, so
+  the envelope row reads n/a). The rack-overhead row is the budget's assumed per-GPU overhead, not a
   measurement. Click a legend key to hide or show that category.</p>
   <div class="chart-notices type-power-notices" hidden></div>
   <div class="type-power-legend legend"></div>
@@ -2603,7 +2653,7 @@ def _node_power_card_html(point: dict | None = None, *, by_type: bool = False) -
   <div class="norm-row">
     <span class="norm-label">Normalise:</span>
     <span class="granularity-toggle norm-toggle" title="Whole-node draw, or every segment divided by the node's GPU count (GPU watts per GPU, CPU watts per GPU, ...)">
-      <button type="button" class="gran-btn norm-btn on" data-norm="node">per node</button><button type="button" class="gran-btn norm-btn" data-norm="gpu">per GPU</button>
+      <button type="button" class="gran-btn norm-btn" data-norm="node">per node</button><button type="button" class="gran-btn norm-btn on" data-norm="gpu">per GPU</button>
     </span>
   </div>
   <p class="pareto-subtitle">{blurb}</p>
@@ -3233,8 +3283,8 @@ def _power_charts_html(
   <div class="chart-group-head">
     <p class="chart-panel-title">{html.escape(title)}</p>
     <span class="chart-group-tools">
-      <span class="granularity-toggle" title="Draw one line per device; sum each host's devices into one line per node; average the node lines of each chart (one line per node type); average every device in the chart (mean watts per GPU / per socket); divide every chart by the section's GPU count (GPU watts per GPU, CPU watts per GPU); or sum every device into one total line">
-        <button type="button" class="gran-btn" data-gran="device">per GPU / socket</button><button type="button" class="gran-btn" data-gran="node">per node</button><button type="button" class="gran-btn" data-gran="type">node average</button><button type="button" class="gran-btn on" data-gran="dev">device average</button><button type="button" class="gran-btn" data-gran="gpu">per GPU</button><button type="button" class="gran-btn" data-gran="total">total</button>
+      <span class="granularity-toggle" title="Draw one line per device; sum each host's devices into one line per node; average the node lines of each chart (one line per node type); divide every chart by the section's GPU count (GPU watts per GPU, CPU watts per GPU); average every device in the chart instead (GPU chart identical; CPU chart becomes watts per socket); or sum every device into one total line">
+        <button type="button" class="gran-btn" data-gran="device">per GPU / socket</button><button type="button" class="gran-btn" data-gran="node">per node</button><button type="button" class="gran-btn" data-gran="type">node average</button><button type="button" class="gran-btn on" data-gran="gpu">per GPU</button><button type="button" class="gran-btn" data-gran="dev">per socket</button><button type="button" class="gran-btn" data-gran="total">total</button>
       </span>
       <span class="zoom-hint">drag to zoom</span>
     </span>
