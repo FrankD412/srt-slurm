@@ -335,6 +335,40 @@ Valid types are `sglang`, `vllm`, `trtllm`, and `mocker`. Everything that is per
 
 The v1 spelling of this (`backend.type` plus the engine-wide keys under `backend:`) is documented in [legacy-v1.md](legacy-v1.md); `srtctl migrate` rewrites it.
 
+### TRT-LLM CPU and memory placement
+
+To place worker CPUs and memory on the NUMA node associated with each task's GPU:
+
+```yaml
+engine:
+  type: trtllm
+  numa_cpu_bind: true
+  numa_memory_bind: local
+```
+
+The launcher resolves the GPU through `CUDA_VISIBLE_DEVICES` and
+`SLURM_LOCALID`, applies its CPU mask, and sets `numactl --membind=<node>`
+before starting the worker. Allocations governed by this policy cannot fall
+back to another node. Insufficient local memory can cause allocation failure
+or OOM, even when another node has free memory. Existing or shared pages are
+not migrated. The container must provide `numactl`. Local mode requires
+`numa_cpu_bind: true`. The wrapper uses `CUDA_VISIBLE_DEVICES`; alternate
+cluster GPU visibility variables are not supported by this wrapper.
+
+`numa_memory_bind: false` keeps CPU binding without a memory policy change.
+`numa_memory_bind: true` uses `numactl -m 0,1` for any GPU type or worker mode.
+When omitted or null, this two-node policy applies only to `gb200`, `gb300`,
+and `vrnvl72` prefill and decode workers. Enabling CPU binding does not change
+these memory policies.
+
+In local mode, the launcher fails if the GPU's NUMA affinity cannot be resolved,
+its CPU list is missing or empty, or the memory policy cannot be applied.
+Without local mode, unknown GPU NUMA affinity skips CPU binding and retains
+the selected memory policy. When profiling in local mode, the outer `nsys`
+process also inherits the strict memory policy.
+
+See [the local-binding example](../examples/trtllm/trtllm-serve-agg-numa-local.yaml).
+
 ### vLLM DP launch mode
 
 vLLM data-parallel endpoints use one process per node by default. srtslurm derives whether each TP/PP replica is node-local or spans multiple nodes:
