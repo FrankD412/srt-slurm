@@ -144,8 +144,16 @@ selects measured requests; without it, the measurement window is not inferred.
 Phase-analysis records join the request log on phase, request ID, user,
 conversation and conversation index. Timing and HTTP-identity references remain
 separate. Missing analysis records are labeled as liveness-log timing. AgentPerf
-sessions group phase/user/conversation; agent nesting is not inferred. Prompts,
+streams explicitly marked `has_output=false` are unsuccessful even when HTTP
+`success=true`. If a phase-analysis record omits cache usage, the exactly matched
+request-log value is retained with its own source reference; an explicit null
+remains unknown. AgentPerf sessions group phase/user/conversation; agent nesting
+is not inferred. Prompts,
 response text and SSE payloads are excluded from the normalized dataset.
+
+Worker IDs can span multiple hosts, as in a two-node SGLang decode worker.
+The worker catalog retains all observed hosts; log samples, process bindings,
+and configuration references remain scoped to their recorded host and source.
 
 For metrics, `final.parquet` supersedes compacted Parquet shards. An Arrow tail
 is also read, with identical samples deduplicated within complete series
@@ -160,6 +168,11 @@ Worker logs can also supply metrics without Tachometer. The shared
 `LogMetricGenerator` interface normalizes these into the same series/catalog used
 by the metric UI. The Dynamo–TokenSpeed implementation supplies active decode
 batch size, configured batch limit, active KV pages and usable page pool size.
+The SGLang implementation supplies batch snapshots and per-request cache/timing
+events. Default second-resolution logs, optional fractional timestamps and rank
+prefixes, and batches with or without counters are supported. Batch and request
+events logged at the same timestamp remain separate in raw queries;
+the chart displays their median with an event-count label.
 See [metric sources, schema and log generators](dsight-log-metrics.md) for exact
 names, units, evidence and extension rules. Local log timestamps require
 `--iteration-timezone`; missing configuration stays unknown.
@@ -412,7 +425,8 @@ The implementation separates these responsibilities:
   Decoding has no clocks, joins, filesystem access or UI state.
 - `log_metrics/base.py` defines the `LogMetricGenerator` Protocol and immutable
   metric definitions/events. `log_metrics/tokenspeed.py` implements its
-  Dynamo–TokenSpeed dialect; `log_metrics/reader.py` normalizes all registered
+  Dynamo–TokenSpeed dialect, and `log_metrics/sglang.py` implements SGLang batch
+  snapshots and completed-request statistics. `log_metrics/reader.py` normalizes all registered
   generators into the shared metric schema and joins limits in their exact scope.
 - Source readers and `Importer` own UTC alignment, bounded imports, provenance,
   identity joins and auditing. `window.py` derives a source-only time envelope;
@@ -426,8 +440,8 @@ semantics. Reuse common identity and source readers. Add fixture tests for missi
 sources, unknown IDs and timing precision; use the optional-source browser matrix
 below. Introduce a new common observation kind only when existing kinds cannot
 represent the evidence. Do not infer IDs/ranks/timings to satisfy a shape.
-SGLang's existing NVTX and metrics remain supported; this does not claim a
-SGLang batch-log decoder or vLLM-specific vocabulary has been implemented.
+SGLang batch and request logs contribute metric observations, not GPU execution
+intervals or a client-request identity join. There is no vLLM-specific vocabulary.
 
 ## Development checks
 
