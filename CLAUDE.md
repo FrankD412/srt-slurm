@@ -28,6 +28,17 @@ uv run ruff check --fix src/srtctl/
 uv run ruff format src/srtctl/
 ```
 
+## Per-run Performance Analysis
+
+For **every Slurm run you launch or analyze**, write and maintain
+`<run_dir>/perf-analysis.md` in the actual job output directory on the cluster.
+Read and follow [the report requirements](docs/perf-analysis.md).
+
+Include TTFT p50/p95/p99, ITL p50/p99, throughput and the applicable agentic
+Pareto/SLO metrics, with units, sources and missing-data explanations. For a
+performance diagnosis, debugging task or improvement, explain how the metrics,
+files, DSight/dashboard views and skills advance the goal.
+
 ## Using DSight
 
 Before using DSight, read [docs/dsight.md](docs/dsight.md) and load the applicable
