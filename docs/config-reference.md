@@ -182,13 +182,13 @@ The `srtslurm.yaml` file can contain the following fields:
 | `preflight`                     | bool   | `false` skips the pre-submit path checks on every `apply` (default `true`) |
 | `reporting`                     | object | Status collector (`status`), log upload (`s3`) and failure analysis (`ai_analysis`); see below and [status-api-spec.md](status-api-spec.md) |
 
-**reporting.s3**: After a run, a small container on the head node uploads the log directory to `s3://<bucket>/<prefix>/<YYYY-MM-DD>/<job_id>/` (`endpoint_url` for MinIO or another S3-compatible store; credentials only through `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` in the submit shell, since the literal fields would land in the lockfile). Not everything is worth shipping: a benchmark run's directory is 250 MB to 2 GB on lustre, over 95% of it aiperf's per-interval scrape of the worker and DCGM `/metrics` endpoints, the same series tachometer already stores as parquet, stored twice (raw per concurrency, and reshaped again in `perf_dashboard_bundle/`). The upload therefore follows a policy:
+**reporting.s3**: After a run, a small container on the head node uploads the log directory to `s3://<bucket>/<prefix>/<YYYY-MM-DD>/<job_id>/` (`endpoint_url` for MinIO or another S3-compatible store; credentials only through `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` in the submit shell, since the literal fields would land in the lockfile). Not everything is worth shipping: a benchmark run's directory is 250 MB to 2 GB on lustre, over 95% of it aiperf's per-interval scrape of the worker and DCGM `/metrics` endpoints, the same series tachometer already stores as parquet. The upload therefore follows a policy:
 
 | Shipped as-is | Packed into `bundle.tar.zst` (`archive`) | Skipped (`exclude`) |
 |---|---|---|
-| config, lockfile, job JSON, sbatch script, git state, fingerprints, resource snapshot; sweep, worker, frontend, service and benchmark logs; results JSON, rollup, `profile_export_aiperf.*`; `perf_dashboard.html`; `tachometer/` parquet | `artifacts/**/profile_export.jsonl`, `sa-bench_*/**/profile_export.jsonl` (aiperf's per-request records, 13 to 40 MB raw, under 1 MB compressed) | `server_metrics_export.jsonl`, `server_metrics_export.json`, `gpu_telemetry_export.jsonl` and `inputs.json` under `artifacts/*/` and `sa-bench_*/*/` (the aiperf artifact roots; a same-named file from another benchmark type is not touched), `perf_dashboard_bundle/*`, `perf_dashboard.json` |
+| config, lockfile, job JSON, sbatch script, git state, fingerprints, resource snapshot; sweep, worker, frontend, service and benchmark logs; results JSON, rollup, `profile_export_aiperf.*`; `perf_dashboard.html` (if present); `tachometer/` parquet | `artifacts/**/profile_export.jsonl`, `sa-bench_*/**/profile_export.jsonl` (aiperf's per-request records, 13 to 40 MB raw, under 1 MB compressed) | `server_metrics_export.jsonl`, `server_metrics_export.json`, `gpu_telemetry_export.jsonl` and `inputs.json` under `artifacts/*/` and `sa-bench_*/*/` (the aiperf artifact roots; a same-named file from another benchmark type is not touched), `perf_dashboard_bundle/*`, `perf_dashboard.json` |
 
-`exclude` uses `aws s3 sync` pattern rules (relative to the log directory, `*` matches across directories); `archive` uses Python glob rules with `**`. Either list replaces its default when set; `exclude: []` ships the whole directory, `archive: []` makes no archive. The archive is built under `/tmp` in the container, so nothing is added to the log directory on the cluster. One caveat: with tachometer disabled, dropping the aiperf scrape leaves no engine-metrics record outside `perf_dashboard.html`; enable tachometer, or override `exclude`.
+`exclude` uses `aws s3 sync` pattern rules (relative to the log directory, `*` matches across directories); `archive` uses Python glob rules with `**`. Either list replaces its default when set; `exclude: []` ships the whole directory, `archive: []` makes no archive. The archive is built under `/tmp` in the container, so nothing is added to the log directory on the cluster. One caveat: with tachometer disabled, dropping the aiperf scrape leaves no uploaded engine-metrics time series for a later dashboard build; enable tachometer, or override `exclude`.
 
 ```yaml
 reporting:
@@ -232,16 +232,16 @@ This is useful for portable recipes that you want to share across clusters or ha
 
 | Field    | Type    | Required | Description                                                                 |
 | -------- | ------- | -------- | --------------------------------------------------------------------------- |
-| `schema` | integer | Yes      | Recipe layout version. `2` is the layout this document describes. Absent means `1`, the layout in [legacy-v1.md](legacy-v1.md). |
+| `schema` | integer | Yes      | Recipe layout version. `2` is the layout this document describes and the only one that loads. A recipe without the key is the pre-2.0 layout in [legacy-v1.md](legacy-v1.md) and is rejected. |
 
-Put the key first in the file, beside `base:` in an override file. Upgrade a recipe with `srtctl migrate -f recipe.yaml --in-place`, which preserves comments and key order and folds the legacy layout into `engine:`, `roles:`, `placement:`, `services:`, and `dynamo.source` (a directory is walked recursively). `srtctl migrate --verify -f <path>` migrates in memory and checks that the v1 and v2 documents resolve to the same config; CI runs it over the examples and the historical recipe corpus (golden equality).
+Put the key first in the file, beside `base:` in an override file. Upgrade a recipe with `srtctl migrate -f recipe.yaml --in-place`, which preserves comments and key order and folds the legacy layout into `engine:`, `roles:`, `placement:`, `services:`, and `dynamo.source` (a directory is walked recursively). A `schema: 2` recipe that still carries a pre-2.0 key (`backend:`, `infra:`, `resources.prefill_nodes`, `dynamo.hash`, ...) is rejected too; the error names the keys and `srtctl migrate` rewrites them.
 
 ```yaml
 schema: 2
 name: "deepseek-r1-benchmark"
 ```
 
-Schema 2 is stricter than schema 1 in two places: a `benchmark:` field the selected type does not read is a load error rather than a silent no-op (see [benchmark](#benchmark)), and `roles.<role>.nodes: 0` is rejected in favor of the explicit `colocate` (see [roles](#roles)).
+Two rules worth knowing: a `benchmark:` field the selected type does not read is a load error (see [benchmark](#benchmark)), and `roles.<role>.nodes: 0` is rejected in favor of the explicit `colocate` (see [roles](#roles)).
 
 ---
 
@@ -335,6 +335,40 @@ Valid types are `sglang`, `vllm`, `trtllm`, and `mocker`. Everything that is per
 
 The v1 spelling of this (`backend.type` plus the engine-wide keys under `backend:`) is documented in [legacy-v1.md](legacy-v1.md); `srtctl migrate` rewrites it.
 
+### TRT-LLM CPU and memory placement
+
+To place worker CPUs and memory on the NUMA node associated with each task's GPU:
+
+```yaml
+engine:
+  type: trtllm
+  numa_cpu_bind: true
+  numa_memory_bind: local
+```
+
+The launcher resolves the GPU through `CUDA_VISIBLE_DEVICES` and
+`SLURM_LOCALID`, applies its CPU mask, and sets `numactl --membind=<node>`
+before starting the worker. Allocations governed by this policy cannot fall
+back to another node. Insufficient local memory can cause allocation failure
+or OOM, even when another node has free memory. Existing or shared pages are
+not migrated. The container must provide `numactl`. Local mode requires
+`numa_cpu_bind: true`. The wrapper uses `CUDA_VISIBLE_DEVICES`; alternate
+cluster GPU visibility variables are not supported by this wrapper.
+
+`numa_memory_bind: false` keeps CPU binding without a memory policy change.
+`numa_memory_bind: true` uses `numactl -m 0,1` for any GPU type or worker mode.
+When omitted or null, this two-node policy applies only to `gb200`, `gb300`,
+and `vrnvl72` prefill and decode workers. Enabling CPU binding does not change
+these memory policies.
+
+In local mode, the launcher fails if the GPU's NUMA affinity cannot be resolved,
+its CPU list is missing or empty, or the memory policy cannot be applied.
+Without local mode, unknown GPU NUMA affinity skips CPU binding and retains
+the selected memory policy. When profiling in local mode, the outer `nsys`
+process also inherits the strict memory policy.
+
+See [the local-binding example](../examples/trtllm/trtllm-serve-agg-numa-local.yaml).
+
 ### vLLM DP launch mode
 
 vLLM data-parallel endpoints use one process per node by default. srtslurm derives whether each TP/PP replica is node-local or spans multiple nodes:
@@ -363,30 +397,44 @@ Do not set `data-parallel-size-local`, `data-parallel-start-rank`, `data-paralle
 
 ### TRT-LLM metrics publication
 
-With `frontend.type: dynamo`, prefill, decode, and aggregated TRT-LLM workers publish engine metrics by default using `--publish-metrics`, regardless of whether observability is enabled. Without observability, this does not enable KV events. `observability.enabled: true` retains its existing superset behavior: it additionally enables `--publish-events-and-metrics` when the combined setting is omitted or null. Explicitly requesting the combined flag also works without observability.
+With `frontend.type: dynamo`, prefill, decode, and aggregated TRT-LLM workers publish engine metrics by default using `--publish-metrics`, regardless of whether observability is enabled. `publish_events_and_metrics` is retained only for backward compatibility with older Dynamo builds. Observability does not enable this legacy flag automatically.
 
 ```yaml
 engine:
   type: trtllm
-  publish_metrics: true               # default
-  publish_events_and_metrics: null    # unset: inherit the defaults below
+  publish_metrics: true               # default: metrics only
+  publish_events_and_metrics: false   # use publish_metrics
 ```
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `publish_metrics` | bool | true | Pass `--publish-metrics` to Dynamo TRT-LLM workers; does not enable KV events |
-| `publish_events_and_metrics` | bool or null | unset | `false`: disable both publication flags; `true`: enable the combined flag; unset/null: inherit defaults |
+| `publish_metrics` | bool | true | Pass `--publish-metrics` unless the legacy combined flag is selected |
+| `publish_events_and_metrics` | bool or null | unset | `true`: pass only the legacy combined flag; `false` or unset/null: use `publish_metrics` |
 
-**An explicit `engine.publish_events_and_metrics: false` is a master opt-out:** neither publication flag is passed, even if `publish_metrics` is true or observability is enabled. This differs from omitting the combined setting, which keeps metrics on by default. Unset values remain null through config serialization so a saved config does not acquire an opt-out.
+The flags are mutually exclusive. Explicit `engine.publish_events_and_metrics: true` passes only `--publish-events-and-metrics`, even when `publish_metrics` is true. False, omitted, and null all select the metrics-only setting.
 
-| `publish_events_and_metrics` | Observability | Default publication flags |
+| `publish_events_and_metrics` | `publish_metrics` | Publication flag (with or without observability) |
 | --- | --- | --- |
-| omitted / null | disabled / omitted | `--publish-metrics` |
-| omitted / null | enabled | `--publish-metrics --publish-events-and-metrics` |
-| `false` | either | none |
-| `true` | either | `--publish-metrics --publish-events-and-metrics` |
+| omitted / null / `false` | `true` | `--publish-metrics` |
+| omitted / null / `false` | `false` | none |
+| `true` | either | `--publish-events-and-metrics` |
 
-**Compatibility:** the metrics-only flag requires a Dynamo build containing [ai-dynamo/dynamo#12162](https://github.com/ai-dynamo/dynamo/pull/12162) or equivalent support. Older builds (including Dynamo v1.4.2) reject the flag. Set `engine.publish_metrics: false` to omit only the new flag, including when observability is enabled; this does not disable a combined flag enabled by observability or the recipe. Set `engine.publish_events_and_metrics: false` to omit **both** flags. srt-slurm does not substitute the combined flag as an automatic compatibility fallback, because that would enable KV events. Omitting the flag does not override metrics-related environment variables supplied by the user. Metrics collection adds engine telemetry work; metrics-only does not mean zero overhead, but with the iteration-statistics default below the remaining cost is the per-request perf metrics.
+**Compatibility:** the metrics-only flag requires a Dynamo build containing [ai-dynamo/dynamo#12162](https://github.com/ai-dynamo/dynamo/pull/12162) or equivalent support. For older builds, set `engine.publish_events_and_metrics: true` to select the legacy flag, which also enables KV events. To omit both flags, set `engine.publish_metrics: false` and leave the legacy flag false or unset. Omitting the flag does not override metrics-related environment variables supplied by the user. Metrics collection adds engine telemetry work; metrics-only does not mean zero overhead, but with the iteration-statistics default below the remaining cost is the per-request perf metrics.
+
+**Migration from the previous publication behavior:** `engine.publish_events_and_metrics: false` previously omitted both publication flags. It now uses `publish_metrics`, which defaults to true. Recipes that used false to disable publication, especially on older Dynamo builds that reject `--publish-metrics`, must also set `engine.publish_metrics: false`. To publish metrics on those older builds, select `engine.publish_events_and_metrics: true` instead. Null remains accepted for existing serialized recipes and behaves the same as false.
+
+**KV events and observability:** `observability.enabled: true` no longer automatically enables TRT-LLM KV events. Router KV-event dashboard panels (`ro_kv_events_applied`, `ro_kv_event_warnings`, and `ro_kv_events_dropped`) require an explicit event-publication opt-in. On Dynamo builds supporting the independent controls, keep the default metrics-only flag and set `DYN_TRTLLM_PUBLISH_KV_EVENTS: "true"` in every worker role that should publish events:
+
+```yaml
+engine:
+  type: trtllm
+roles:
+  agg:
+    env:
+      DYN_TRTLLM_PUBLISH_KV_EVENTS: "true"
+```
+
+For disaggregated recipes, set the same environment variable under both `roles.prefill.env` and `roles.decode.env`. This uses Dynamo's [independent KV-event control](https://github.com/ai-dynamo/dynamo/blob/aacb1abae25204fa16a5c3cfeb1b748fc7252df0/components/src/dynamo/trtllm/backend_args.py#L179-L190); it does not require the legacy combined flag. Older builds without that control must use `engine.publish_events_and_metrics: true` to enable events and metrics together.
 
 **Iteration statistics default.** srtctl bakes `enable_iter_perf_stats: false` into every TRT-LLM engine section a recipe uses (prefill and decode, or aggregated), under both `frontend.type: dynamo` and `trtllm_serve`, creating the section when the recipe has none. This is a setdefault: an explicit `enable_iter_perf_stats: true` in the recipe wins, and `observability.enabled: true` keeps its own `true` because its expansion runs first. The default exists because `dynamo.trtllm` turns `--publish-metrics` into `enable_iter_perf_stats: true` in the engine arguments, and the engine YAML is merged over those arguments and wins on conflicts; without the explicit key every Dynamo worker collects TensorRT-LLM's per-iteration statistics (KV-cache stats and CUDA-event step timing on every executor loop). The request-level `trtllm_*` series (request latency, TTFT, TPOT, queue/prefill/decode time, token counters) do not need the key: they come from the per-request perf metrics, which `--publish-metrics` sets on the Dynamo path and `return_perf_metrics: true` sets for trtllm-serve. What the default drops is the iteration-level `trtllm_*` gauges (`trtllm_kv_cache_*`, running/waiting requests, iteration latency) and, on Dynamo, the `dynamo_component_kvstats_*` gauges, the router worker-load sample and the Planner's forward-pass metrics; set the key to `true` or enable `observability` to get them back. One visible effect to expect on a default run: the component dashboard's engine-tab KV-cache utilisation and hit-rate panels have no data, and the Dynamo bench dashboard's KV-utilisation series sits at the gauge's seeded 0 %, because both read gauges that only iteration statistics update. Engine sections whose `backend` is the legacy `tensorrt` engine are left alone: its `LlmArgs` rejects the key on containers older than TensorRT-LLM v1.3.0rc21, and that backend always collected the statistics anyway.
 
@@ -483,6 +531,7 @@ between the installed engine versions.
 | `workers` | int | Number of workers in the role |
 | `gpus` | int | GPUs per worker. Computed as `nodes * gpus_per_node / workers` when omitted; required on both roles when decode is colocated |
 | `env` | dict | Environment variables for every process of this role. Values support the per-worker `{node}` / `{node_id}` placeholders described under [environment](#environment) |
+| `srun_options` | dict | Additional options for this role's inference worker steps. Keys override the recipe's [srun_options](#srun_options) for these steps only |
 | `args` | dict | The engine's CLI flags for this role (`sglang` and `vllm` flags, the `trtllm` engine YAML, the mocker overrides). Any flag the engine accepts, kebab-case or snake_case, written as an ordinary YAML mapping. srtctl adds the topology flags itself (`disaggregation-mode`, ports, hosts, rank arguments); see [frontend](#frontend) for the keys each frontend owns |
 | `extra_args` | list[string] | TRT-LLM only: extra `trtllm-serve` CLI flags appended verbatim to the worker command (`frontend.type: trtllm_serve`). For the few options that configure the OpenAI server layer and have no engine YAML key, such as `--tool_parser` |
 | `kv_events` | bool or dict | Publish KV cache events for the Dynamo router; see below |
@@ -594,7 +643,7 @@ A relaunched worker registers with the Dynamo frontend as a new instance once th
 
 `examples/features/worker-restart.yaml` is a runnable version: two workers serving with no benchmark, so you can SIGKILL a worker step with `scancel --signal=KILL <job>.<step>` and watch the relaunch in the sweep log. Its header walks through the timeline of a real run.
 
-The v1 spelling of this section (`resources.prefill_nodes`, `resources.prefill_workers`, `resources.gpus_per_prefill`, `resources.prefill_critical`, `resources.prefill_restart`, `resources.decode_nodes: 0`, `backend.prefill_environment`, `backend.sglang_config.prefill`, `backend.prefill_extra_args`, `backend.kv_events_config`, and the `decode` and `aggregated` counterparts) is documented in [legacy-v1.md](legacy-v1.md); `srtctl migrate` rewrites it.
+The v1 spelling of this section (`resources.prefill_nodes`, `resources.prefill_workers`, `resources.gpus_per_prefill`, `resources.prefill_critical`, `resources.decode_nodes: 0`, `backend.prefill_environment`, `backend.sglang_config.prefill`, `backend.prefill_extra_args`, `backend.kv_events_config`, and the `decode` and `aggregated` counterparts) is documented in [legacy-v1.md](legacy-v1.md); `srtctl migrate` rewrites it.
 
 ---
 
@@ -969,7 +1018,7 @@ Only variables for roles present in the recipe are emitted. Entries follow logic
 
 Two caveats for `AIPERF_SERVER_METRICS_URLS`:
 
-- **Dynamo TRT-LLM worker URLs are advertised when engine metrics are enabled.** This is the default via `engine.publish_metrics: true` (`--publish-metrics`) when the combined setting is omitted; `engine.publish_events_and_metrics: true` also enables them. Explicit `engine.publish_events_and_metrics: false` suppresses both publication flags and worker URLs, regardless of the metrics-only setting. URLs are also omitted when no flag is enabled (for example, metrics-only false and the combined setting omitted without observability). This applies to built-in AIPerf and custom benchmarks, excluding sidecars, whose behavior is unchanged. Runtime-only metrics may still exist but do not constitute an engine-metrics capture. With `frontend.type: trtllm_serve` the gate is the worker's own engine config instead: its `/prometheus/metrics` URL is advertised when that role's `args.return_perf_metrics` is true (the srtctl default for trtllm_serve recipes; an explicit `false` drops the URL). KVBM URLs are unaffected; KVBM serves its own endpoint regardless of the flag.
+- **Dynamo TRT-LLM worker URLs are advertised when engine metrics are enabled.** This is the default via `engine.publish_metrics: true` (`--publish-metrics`) when the combined setting is omitted; `engine.publish_events_and_metrics: true` also enables them. False or unset uses `engine.publish_metrics` to decide whether to publish metrics and advertise worker URLs. URLs are omitted when metrics-only is false and the legacy combined flag is false or unset, including with observability enabled. This applies to built-in AIPerf and custom benchmarks, excluding sidecars, whose behavior is unchanged. Runtime-only metrics may still exist but do not constitute an engine-metrics capture. With `frontend.type: trtllm_serve` the gate is the worker's own engine config instead: its `/prometheus/metrics` URL is advertised when that role's `args.return_perf_metrics` is true (the srtctl default for trtllm_serve recipes; an explicit `false` drops the URL). KVBM URLs are unaffected; KVBM serves its own endpoint regardless of the flag.
 - **An explicit `AIPERF_SERVER_METRICS_URLS` in the recipe `environment:` wins.** Injection is skipped when the variable is already set, so a curated endpoint list is never clobbered.
 
 Values in `benchmark.env` are applied last and can explicitly override any automatically injected variable.
@@ -1583,7 +1632,7 @@ top-level `profiling` mode takes precedence. The serving container must provide 
 NVTX support. See [Observability capture](profiling.md#observability-capture)
 for timing, sampling, injection, and report-finalization settings.
 
-The component perf dashboard is **not** configured here. It is built in post-processing on every run; `enabled` decides which capture legs exist and therefore which tabs the page carries. See [Component Performance Dashboard](component-dashboard.md).
+The component perf dashboard is built explicitly after a run; `enabled` decides which capture legs exist and therefore which tabs a later build carries. Jobs do not automatically run dashboard ingestion or rendering. See [Component Performance Dashboard](component-dashboard.md).
 
 SGLang workers always receive `--enable-metrics` unless the recipe sets it: native
 `sglang.launch_server` serves `/metrics` only with the flag, and `dynamo.sglang`
@@ -1636,7 +1685,7 @@ Every exporter block accepts `container_image`, `port`, `command` and `binary`. 
 
 The pressure collector reports PSI only when the host exposes the corresponding `/proc/pressure` files; missing metrics indicate unavailable data. NUMA memory and allocation metrics retain the exported `node` label as `numa_node` in raw metric names, separately from host metadata. With `observability.enabled: true`, the existing local host sampler also records cumulative PSI stall totals in microseconds in its `psi` JSONL field. That optional sampler covers the sweep/orchestrator host only; it does not extend exporter placement to dedicated frontend or client nodes. Collector overhead has not been measured for this change.
 
-Tachometer writes its Parquet stream under `<log_dir>/<storage_subdir>/raw/scrape/` (the leaf is created by the scraper itself; srtctl pre-creates only the parent, because the scraper refuses a pre-existing storage directory), compacting to `final.parquet` there on shutdown. Intermediate files remain in `<log_dir>/<storage_subdir>/local` until shutdown compaction completes. Rows carry an epoch `timestamp_ns` column, so they join directly with AIPerf records and Dynamo spans; the post-processing ingest converts the Parquet into the dashboard's `server_metrics_export.jsonl`.
+Tachometer writes its Parquet stream under `<log_dir>/<storage_subdir>/raw/scrape/` (the leaf is created by the scraper itself; srtctl pre-creates only the parent, because the scraper refuses a pre-existing storage directory), compacting to `final.parquet` there on shutdown. Intermediate files remain in `<log_dir>/<storage_subdir>/local` until shutdown compaction completes. Rows carry an epoch `timestamp_ns` column, so they join directly with AIPerf records and Dynamo spans; explicit dashboard ingestion converts the Parquet into the dashboard's `server_metrics_export.jsonl`.
 
 The scraper runs as a best-effort process: if it dies (or the binary is missing at runtime), the benchmark continues and the loss is visible in `tachometer.out` and the sweep log. `srtctl validate-setup` still fails fast at submit time when `bin/tachometer-scraper` is absent.
 
@@ -2032,7 +2081,7 @@ sbatch_directives:
 
 ## srun_options
 
-Additional srun options for worker processes.
+Additional srun options for job steps.
 
 ```yaml
 srun_options:
@@ -2052,6 +2101,20 @@ srun_options:
 | `mem`             | "0"           | Memory per node                          |
 
 **Format**: Each option becomes `--{key}={value}` or `--{key}` if value is empty.
+
+`srun_options` applies to every srun step the job launches (workers, frontends, benchmark, telemetry). Set `roles.<role>.srun_options` to override individual keys for that role's inference worker steps. Other keys are inherited from the recipe's `srun_options`; non-worker steps keep the recipe options.
+
+```yaml
+roles:
+  prefill:
+    # ... node, GPU, and engine settings ...
+    srun_options:
+      mem: "64G"                     # Host memory per node in each prefill step
+  decode:
+    # ... node, GPU, and engine settings ...
+    srun_options:
+      mem: "32G"                     # Host memory per node in each decode step
+```
 
 ---
 

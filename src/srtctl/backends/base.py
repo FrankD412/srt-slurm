@@ -2,13 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Base types and protocols for backend configurations.
+Base classes and shared behavior for backend configurations.
 """
 
-from collections.abc import Sequence
+from abc import ABC, abstractmethod
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Optional
+
+from marshmallow import ValidationError, fields
 
 from srtctl.ports import DYN_SYSTEM_PORT_BASE
 
@@ -59,10 +62,62 @@ class SrunConfig:
     kill_on_bad_exit: bool = False
 
 
-class BackendProtocol(Protocol):
-    """Protocol that all backend configurations must implement.
+class RoleSettings(ABC):
+    """What an engine reads from one role of the recipe (``roles.<role>``).
 
-    This allows frozen dataclasses to act as backends by implementing these methods.
+    ``srtctl.core.schema.RoleConfig`` inherits this data contract. Keeping the
+    contract here lets the schema import engines without a cycle. Concrete
+    dataclasses supply the fields and defaults.
+    """
+
+    env: Mapping[str, str]
+    args: Mapping[str, Any]
+    extra_args: Sequence[str]
+    kv_events: bool | Mapping[str, Any] | None
+
+
+class BoundRolesField(fields.Field):
+    """Marshmallow field for an engine's ``roles``: bound by SrtConfig, never read from a recipe, never dumped."""
+
+    def _deserialize(self, value: Any, attr: str | None, data: Mapping[str, Any] | None, **kwargs: Any) -> Any:
+        raise ValidationError("roles are declared at the recipe's top level (roles.<role>), not on the engine")
+
+    def _serialize(self, value: Any, attr: str | None, obj: Any, **kwargs: Any) -> None:
+        return None
+
+
+def role_for_mode(roles: Mapping[str, RoleSettings], mode: str) -> RoleSettings | None:
+    """The role a worker mode runs under (``aggregated`` and ``agg`` are both the agg role)."""
+    return roles.get("agg" if mode == "aggregated" else mode)
+
+
+def role_args(roles: Mapping[str, RoleSettings], mode: str) -> dict[str, Any]:
+    """``roles.<role>.args`` for a worker mode, as a fresh dict; empty when the role is absent."""
+    role = role_for_mode(roles, mode)
+    return dict(role.args) if role is not None else {}
+
+
+def role_env(roles: Mapping[str, RoleSettings], mode: str) -> dict[str, str]:
+    """``roles.<role>.env`` for a worker mode, as a fresh dict; empty when the role is absent."""
+    role = role_for_mode(roles, mode)
+    return dict(role.env) if role is not None else {}
+
+
+def role_kv_events(roles: Mapping[str, RoleSettings], mode: str, defaults: Mapping[str, Any]) -> dict[str, Any] | None:
+    """``roles.<role>.kv_events`` for a worker mode over ``defaults``; None when the role publishes none."""
+    role = role_for_mode(roles, mode)
+    kv_events = role.kv_events if role is not None else None
+    if not kv_events:
+        return None
+    if kv_events is True:
+        return dict(defaults)
+    return {**defaults, **kv_events}
+
+
+class Backend(ABC):
+    """Abstract base class for backend configurations.
+
+    Concrete frozen dataclasses inherit optional defaults and implement the launch hooks.
     Each backend is responsible for:
     1. Allocating logical endpoints (serving units)
     2. Converting endpoints to physical processes
@@ -70,9 +125,10 @@ class BackendProtocol(Protocol):
     """
 
     @property
+    @abstractmethod
     def type(self) -> str:
         """Backend type identifier."""
-        ...
+        raise NotImplementedError
 
     @property
     def mooncake_kv_store(self) -> "MooncakeKVStoreConfig | VLLMMooncakeKVStoreConfig | None":
@@ -81,7 +137,7 @@ class BackendProtocol(Protocol):
         Set, it implies the mooncake-master service and the MOONCAKE_* worker
         environment from get_mooncake_worker_env.
         """
-        ...
+        return None
 
     @property
     def failover(self) -> "VLLMFailoverConfig | None":
@@ -90,29 +146,17 @@ class BackendProtocol(Protocol):
         Set, it implies the gms service and the per-worker environment from
         get_failover_environment.
         """
-        ...
+        return None
 
-    @property
-    def prefill_environment(self) -> dict[str, str]:
-        """Environment the recipe declares for prefill workers (roles.prefill.env), before engine defaults."""
-        ...
-
-    @property
-    def decode_environment(self) -> dict[str, str]:
-        """Environment the recipe declares for decode workers (roles.decode.env), before engine defaults."""
-        ...
-
-    @property
-    def aggregated_environment(self) -> dict[str, str]:
-        """Environment the recipe declares for aggregated workers (roles.agg.env), before engine defaults."""
-        ...
+    # Bound recipe roles; concrete dataclasses own the field and its serialization.
+    roles: Mapping[str, RoleSettings]
 
     def get_srun_config(self) -> SrunConfig:
         """Get srun configuration for this backend.
 
         Returns SrunConfig with MPI settings and launch strategy.
         """
-        ...
+        return SrunConfig()
 
     def fatal_log_patterns(self, mode: str) -> tuple[str, ...]:
         """Regular expressions that, printed in a worker's log, mean the engine is gone.
@@ -123,16 +167,17 @@ class BackendProtocol(Protocol):
         engine answer ``()``; an engine behind a launcher that keeps the step
         alive names the lines the launcher prints once the engine has died.
         """
-        ...
+        return ()
 
     def get_config_for_mode(self, mode: str) -> dict[str, Any]:
-        """Get config dict for a worker mode (prefill/decode/agg)."""
-        ...
+        """The role's engine arguments (``roles.<role>.args``) for a worker mode (prefill/decode/agg)."""
+        return role_args(self.roles, mode)
 
     def get_environment_for_mode(self, mode: str) -> dict[str, str]:
-        """Get environment variables for a worker mode."""
-        ...
+        """The role's environment (``roles.<role>.env``) for a worker mode, before engine defaults."""
+        return role_env(self.roles, mode)
 
+    @abstractmethod
     def allocate_endpoints(
         self,
         num_prefill: int,
@@ -146,8 +191,9 @@ class BackendProtocol(Protocol):
         spread_workers: bool = False,
     ) -> list["Endpoint"]:
         """Allocate logical endpoints based on resource requirements."""
-        ...
+        raise NotImplementedError
 
+    @abstractmethod
     def endpoints_to_processes(
         self,
         endpoints: list["Endpoint"],
@@ -157,8 +203,9 @@ class BackendProtocol(Protocol):
         dynamo_sidecar: bool = False,
     ) -> list["Process"]:
         """Convert logical endpoints to physical processes."""
-        ...
+        raise NotImplementedError
 
+    @abstractmethod
     def build_worker_command(
         self,
         process: "Process",
@@ -170,7 +217,7 @@ class BackendProtocol(Protocol):
         profiling: "ProfilingConfig | None" = None,
     ) -> list[str]:
         """Build command to start a worker process."""
-        ...
+        raise NotImplementedError
 
     def get_process_environment(self, process: "Process") -> dict[str, str]:
         """Get process-specific environment variables.
@@ -185,15 +232,15 @@ class BackendProtocol(Protocol):
         Returns:
             Dict of environment variable names to values.
         """
-        ...
+        return {}
 
     def get_mooncake_worker_env(self, infra_node_ip: str, local_hostname: str) -> dict[str, str]:
         """MOONCAKE_* environment for a worker; empty when mooncake_kv_store is None."""
-        ...
+        return {}
 
     def get_failover_environment(self, process: "Process", job_id: str) -> dict[str, str]:
         """Shadow engine recovery environment for a worker; empty when failover is None."""
-        ...
+        return {}
 
     def should_set_visible_devices(self) -> bool:
         """Whether the worker stage pins each process to its GPUs with the cluster's device mask.
@@ -202,8 +249,8 @@ class BackendProtocol(Protocol):
         ROCR_VISIBLE_DEVICES). True for engines that read the environment; an
         engine that takes its devices on the command line answers False.
         """
-        ...
+        return True
 
     def get_served_model_name(self, default: str) -> str:
         """Get served model name from backend config, or return default."""
-        ...
+        return default

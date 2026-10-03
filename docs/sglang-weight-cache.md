@@ -1,6 +1,6 @@
 # SGLang Fast Engine Recovery (weight cache daemon)
 
-SGLang's [weight cache daemon](https://www.lmsys.org/blog/2026-08-21-sglang-fast-recovery/) is a persistent GPU process that loads the model once, keeps the post-quantized, TP-sharded tensors in HBM, and hands CUDA IPC handles to any engine on the same GPU. An engine started with `--weight-cache-mode client` maps those tensors instead of reading the checkpoint, so its weight load takes well under a second regardless of model size. The rest of engine startup (CUDA graphs, kernel JIT, tokenizer) still runs.
+SGLang's [weight cache daemon](https://www.lmsys.org/blog/2026-08-21-sglang-fast-recovery/) is a persistent GPU process that loads the model once, keeps the post-quantized, TP-sharded tensors in HBM, and hands CUDA IPC handles to any engine on the same GPU. An engine started with `--weight-cache-mode client` maps those tensors instead of reading the checkpoint. The rest of engine startup (CUDA graphs, kernel JIT, tokenizer) still runs. The flags and limitations below follow [SGLang v0.5.20's implementation](https://github.com/sgl-project/sglang/tree/94602c9c2b7cbdb8efd5c52802dac6a1c180089e/python/sglang/srt/weight_cache).
 
 srtctl needs no code for this. The daemon is a [service](services.md) with `placement.per: worker`, the engine flag is an ordinary `roles.<role>.args` entry, and [`roles.<role>.restart`](config-reference.md#restart) is what relaunches a dead engine so the fast load pays off. `examples/features/sglang-weight-cache.yaml` is the runnable version.
 
@@ -12,7 +12,6 @@ What this gives you is a fast **restart**. It is not a standby: SGLang has no el
 - [What Runs](#what-runs)
 - [What srtctl Owns vs What You Set](#what-srtctl-owns-vs-what-you-set)
 - [Testing a Relaunch](#testing-a-relaunch)
-- [Validation](#validation)
 - [Limitations](#limitations)
 - [Troubleshooting](#troubleshooting)
 
@@ -106,25 +105,6 @@ Then watch:
 - the router's `/workers` on the head node: the worker's URL is unchanged, so it is back in rotation as soon as it answers.
 
 The daemon service's log shows nothing during a relaunch; the tensors stay mapped in the daemon regardless of how many engines come and go.
-
-## Validation
-
-Validated on sa-b200 (one B200 node, two TP2 Qwen3-0.6B workers behind the sglang-router, `examples/features/sglang-weight-cache.yaml`, `lmsysorg/sglang:nightly-dev-cu13-20260930-cae69be5`), job 17903 on 2026-09-30, with `roles.agg.restart: {policy: always, backoff_seconds: 5}`. Times are from the timestamps inside the step logs and `worker_restarts.json`.
-
-| Event | Observed |
-| --- | --- |
-| Daemon service start to `All 2 weight cache daemons on node 0 are ready` (container start, dist init, disk load, IPC export) | 80 s per worker, the two workers one after another; the disk load itself 5.9 s per rank, 228 tensors exported |
-| Engine `Load weight begin` to `Load weight end` through the daemon | 0.04 to 0.11 s (`Zero-copy: mapped 228 tensors`, `mem usage=0.00 GB`: the weights are the daemon's) |
-| Engines start to both `ready to roll` | 1 min 48 s (CUDA graph capture 35 s per engine dominates for this model) |
-| SIGKILL of worker 0's engine process to the supervisor's `relaunching agg_0 in 5s` | same second (`exited with code -9`) |
-| Kill to `Relaunched agg_0 as agg_0_<node>_r1` | 9 s (5 s backoff plus the srun) |
-| Relaunched engine: container start to `server_args` | 33 s (a new step is a new container) |
-| Relaunched engine: weights through the daemon | 0.11 s (`Loaded model via IPC (mode=client), total=0.10s`) |
-| Relaunched engine: CUDA graph capture | 35 s |
-| Kill to the relaunched engine serving (`ready_seconds` 110.7 from the relaunch) | 118 s; the crash log rotated to `<node>_agg_w0.out.1`, `worker_restarts.json` records `outcome: ready` |
-| Router `/workers` after the relaunch, and a completion through it | both workers healthy on their original URLs; answered |
-
-A 0.6B model makes the absolute saving on the weight load trivial, and what remains of the relaunch is container start-up and CUDA graph capture, which the daemon does not touch. The point of the run is that the mechanism holds end to end with a generic service and the stock restart policy. The blog's numbers for a 1T FP8 model are 495 s from disk versus 0.6 s through the daemon; on a model of that size the relaunch above would still take about two minutes instead of ten.
 
 ## Limitations
 
