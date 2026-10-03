@@ -2,7 +2,7 @@
 
 SGLang's [weight cache daemon](https://www.lmsys.org/blog/2026-08-21-sglang-fast-recovery/) is a persistent GPU process that loads the model once, keeps the post-quantized, TP-sharded tensors in HBM, and hands CUDA IPC handles to any engine on the same GPU. An engine started with `--weight-cache-mode client` maps those tensors instead of reading the checkpoint. The rest of engine startup (CUDA graphs, kernel JIT, tokenizer) still runs. The flags and limitations below follow [SGLang v0.5.20's implementation](https://github.com/sgl-project/sglang/tree/94602c9c2b7cbdb8efd5c52802dac6a1c180089e/python/sglang/srt/weight_cache).
 
-srtctl needs no code for this. The daemon is a [service](services.md) with `placement.per: worker`, the engine flag is an ordinary `roles.<role>.args` entry, and [`roles.<role>.restart`](config-reference.md#restart) is what relaunches a dead engine so the fast load pays off. `examples/features/sglang-weight-cache.yaml` is the runnable version.
+srtctl needs no code for this. The daemon is a [service](services.md) with `placement.per: worker`, the engine flag is an ordinary `roles.<role>.args` entry, and [`roles.<role>.restart`](topology.md#restart) is what relaunches a dead engine so the fast load pays off. `examples/features/sglang-weight-cache.yaml` is the runnable version.
 
 What this gives you is a fast **restart**. It is not a standby: SGLang has no election, so the blog's "active-standby" scenario is a deployment pattern, not a feature. A sub-second cutover to a parked engine is what [shadow engine recovery](shadow-engine-recovery.md) does for vLLM through Dynamo's GPU Memory Service.
 
@@ -60,18 +60,23 @@ services:
 
 ## What Runs
 
-Per worker on each of its nodes:
+For each single-node TP2 worker in the example:
 
-```
-step service_weight-cache_agg_0_<node>       (CUDA_VISIBLE_DEVICES of worker 0)   /dev/shm/sglang-wc/
-  python3 -m sglang.srt.weight_cache.daemon ... --tensor-parallel-size 2         +- <gpu-0-uuid>.sock  .ready
-    one daemon per TP rank: load from disk, export tensors as IPC handles ------> +- <gpu-1-uuid>.sock  .ready
-    prints "All 2 weight cache daemons on node 0 are ready"  (the readiness probe)
-                                                                                       ^ connect by own GPU UUID
-step agg_0_<node>                             (same CUDA_VISIBLE_DEVICES)              |
-  python3 -m sglang.launch_server ... --weight-cache-mode client  <---------------------+
-    Load weight end. elapsed=0.09 s   (fingerprint checked, tensors mapped, no disk read)
-  on exit: roles.agg.restart relaunches agg_0_<node>_r1; it maps the same tensors again
+```mermaid
+sequenceDiagram
+    participant S as srtctl supervisor
+    participant C as Per-worker weight-cache service
+    participant E as SGLang engine
+    S->>C: Launch in the worker's CUDA_VISIBLE_DEVICES
+    C->>C: Load weights into HBM, one daemon per TP rank
+    C-->>S: All 2 weight cache daemons on node 0 are ready
+    S->>E: Launch with --weight-cache-mode client
+    E->>C: Connect to GPU UUID sockets under /dev/shm/sglang-wc
+    C-->>E: Validate fingerprint and export CUDA IPC handles
+    E-->>S: Engine exits
+    S->>E: Relaunch after backoff, same node, GPUs and ports
+    E->>C: Reconnect to the same GPU UUID sockets
+    C-->>E: Map the same tensors without reading the checkpoint
 ```
 
 - **The service.** `placement.per: worker` gives one instance per worker on each of its nodes, pinned to that worker's device mask, so the daemon's device k and the engine's device k are the same GPU and derive the same UUID. `start: before_workers` puts it up before the engines and, at cleanup, stops it after them (shutdown tier 1). It is `critical` because an engine's liveness watchdog SIGKILLs the engine when its daemon PID disappears (the mapped pointers would dangle).
