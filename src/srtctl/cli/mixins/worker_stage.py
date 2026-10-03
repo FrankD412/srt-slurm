@@ -14,7 +14,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Any, Literal
 
-from srtctl.backends.vllm import VLLMFailoverConfig, VLLMProtocol
+from srtctl.backends.vllm import VLLMBackend, VLLMFailoverConfig
 from srtctl.core.fingerprint import generate_capture_script
 from srtctl.core.health import wait_for_health
 from srtctl.core.observability_nsys import wrap_observability_nsys
@@ -50,8 +50,8 @@ def worker_step_name(mode: str, index: int, node: str, attempt: int = 0, engine_
     return f"{name}_r{attempt}" if attempt else name
 
 
-# Dynamo runtime (Rust) log filter for worker containers; YAML prefill_environment /
-# decode_environment / aggregated_environment override via the merge below.
+# Dynamo runtime (Rust) log filter for worker containers; a recipe's roles.<role>.env
+# overrides it via the merge below.
 _DEFAULT_WORKER_DYN_LOG = "info,dynamo_runtime::pipeline::network::ingress::push_handler=warn"
 
 
@@ -78,7 +78,7 @@ class WorkerStageMixin:
     Requires:
         self.config: SrtConfig
         self.runtime: RuntimeContext
-        self.backend: BackendProtocol
+        self.backend: Backend
         self.backend_processes: list[Process]
     """
 
@@ -88,7 +88,7 @@ class WorkerStageMixin:
 
     def _apply_mooncake_process_config(self, process: "Process", environment: dict[str, str]) -> None:
         backend = self.config.backend_for_role(process.endpoint_mode)
-        if not isinstance(backend, VLLMProtocol):
+        if not isinstance(backend, VLLMBackend):
             return
         local_config = backend.build_mooncake_process_config(
             process, self.runtime.infra_node_ip, self.runtime.gpus_per_node
@@ -106,7 +106,7 @@ class WorkerStageMixin:
 
     @property
     def backend(self) -> Any:
-        """Access the backend config (implements BackendProtocol)."""
+        """Access the backend config (implements Backend)."""
         return self.config.backend
 
     @property
@@ -161,7 +161,7 @@ class WorkerStageMixin:
         """Log lines that fail a worker whose srun step outlives its engine.
 
         The backend names the lines its launcher prints once the engine has died
-        (``BackendProtocol.fatal_log_patterns``); the recipe adds its own through
+        (``Backend.fatal_log_patterns``); the recipe adds its own through
         ``health_check.extra_fatal_log_patterns`` or switches the watch off with
         ``health_check.fatal_log_markers: false``.
         """
@@ -416,7 +416,7 @@ class WorkerStageMixin:
             # The engine creates the lock file itself; its directory (also the GMS
             # socket dir) must exist. The gms service made it, but the engine step
             # should not depend on that after a relaunch.
-            assert isinstance(backend, VLLMProtocol)
+            assert isinstance(backend, VLLMBackend)
             worker_dir = backend.failover_worker_dir(self.runtime.job_id, process)
             bash_preamble = _append_preamble(bash_preamble, f"mkdir -p {shlex.quote(worker_dir)}")
 
@@ -441,7 +441,7 @@ class WorkerStageMixin:
             env_to_set=env_to_set,
             env_to_unset=env_to_unset,
             bash_preamble=bash_preamble,
-            srun_options=self.runtime.srun_options,
+            srun_options={**self.runtime.srun_options, **self.config.roles[mode].srun_options},
             srun_export_env=CONTAINER_REMAP_ROOT_EXPORT if installs_dynamo(self.config) else None,
             het_group=process.het_group,
             step_name=step_name,
@@ -454,7 +454,7 @@ class WorkerStageMixin:
             node=process.node,
             # roles.<role>.critical: false keeps the run alive when this worker
             # exits, for probes that kill workers on purpose.
-            critical=self.config.resources.worker_critical(mode),
+            critical=self.config.topology.worker_critical(mode),
             # SIGTERM reaches the engine through the step so it deregisters and
             # frees the GPUs cleanly; a signalled srun would SIGKILL it instead.
             terminate_timeout=(
@@ -636,7 +636,7 @@ class WorkerStageMixin:
         # Repeated hosts preserve each node's exact rank count and ordering.
         task_nodes = [p.node for p in endpoint_processes for _ in p.gpu_indices]
         task_counts = [len(p.gpu_indices) for p in endpoint_processes]
-        srun_options = dict(self.runtime.srun_options)
+        srun_options = {**self.runtime.srun_options, **self.config.roles[mode].srun_options}
         srun_options["ntasks-per-node"] = str(max(task_counts))
         if len(set(task_counts)) > 1:
             srun_options["distribution"] = "arbitrary"
@@ -683,7 +683,7 @@ class WorkerStageMixin:
             popen=proc,
             log_file=worker_log,
             node=leader.node,
-            critical=self.config.resources.worker_critical(mode),
+            critical=self.config.topology.worker_critical(mode),
             # Signal every MPI task; profiler wrappers stop capture before the app.
             terminate_timeout=(
                 self.config.observability.nsys.terminate_timeout if automatic_nsys else WORKER_TERMINATE_TIMEOUT_SECONDS
@@ -774,7 +774,7 @@ class WorkerStageMixin:
         """Hand the launched workers to the supervisor; roles with ``restart: never`` are skipped."""
         if not worker_procs:
             return  # nothing launched, nothing to supervise
-        supervisor.track(self.worker_endpoint_groups(), worker_procs.keys(), self.config.resources.worker_restart)
+        supervisor.track(self.worker_endpoint_groups(), worker_procs.keys(), self.config.topology.worker_restart)
 
     def start_all_workers(self) -> NamedProcesses:
         """Launch each role using its engine's existing launch strategy."""

@@ -12,54 +12,53 @@ and produces the expected artifact set that external harnesses observe.
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
+from unittest.mock import patch
 
+import pytest
 import yaml
 
+from srtctl.cli.do_sweep import SweepOrchestrator
 from srtctl.mock import MockOptions, run_mock_sweep
 
 MINIMAL_CONFIG = {
+    "schema": 2,
     "name": "mock-smoke",
     "model": {
         "path": "hf:fake/mock-model",
         "container": "nvcr.io/fake:latest",
         "precision": "fp8",
     },
-    "resources": {
-        "gpu_type": "h100",
-        "gpus_per_node": 8,
-        "agg_nodes": 1,
-        "agg_workers": 1,
-    },
+    "resources": {"gpu_type": "h100", "gpus_per_node": 8},
+    "roles": {"agg": {"nodes": 1, "workers": 1}},
     "benchmark": {"type": "custom", "command": "echo fake-benchmark"},
 }
 
 TRTLLM_AGGREGATE_CONFIG = {
+    "schema": 2,
     "name": "mock-trtllm-aggregate-sa-bench",
     "model": {
         "path": "hf:fake/mock-model",
         "container": "nvcr.io/fake:latest",
         "precision": "fp8",
     },
-    "resources": {
-        "gpu_type": "gb300",
-        "gpus_per_node": 4,
-        "agg_nodes": 2,
-        "agg_workers": 1,
-        "gpus_per_agg": 8,
-    },
+    "resources": {"gpu_type": "gb300", "gpus_per_node": 4},
     "frontend": {
         "type": "trtllm_serve",
         "enable_multiple_frontends": False,
     },
-    "backend": {
-        "type": "trtllm",
-        "trtllm_config": {
-            "aggregated": {
+    "engine": "trtllm",
+    "roles": {
+        "agg": {
+            "nodes": 2,
+            "workers": 1,
+            "gpus": 8,
+            "args": {
                 "tensor_parallel_size": 8,
                 "moe_expert_parallel_size": 8,
                 "pipeline_parallel_size": 1,
-            }
+            },
         },
     },
     "benchmark": {
@@ -80,6 +79,77 @@ def _write_config(tmp_path: Path) -> Path:
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text(yaml.dump(MINIMAL_CONFIG))
     return cfg
+
+
+@pytest.mark.parametrize("critical", [True, False])
+def test_mock_worker_restart_preserves_role_launch_settings_and_records_exhaustion(
+    tmp_path: Path, critical: bool
+) -> None:
+    config = deepcopy(MINIMAL_CONFIG)
+    config["engine"] = "sglang"
+    config["roles"]["agg"].update(
+        critical=critical,
+        env={"ROLE_SETTING": "kept"},
+        srun_options={"mem": "4G"},
+        restart={"policy": "on-failure", "max_restarts": 1, "backoff_seconds": 0},
+    )
+    config_path = tmp_path / "restart.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+    output_dir = tmp_path / "outputs" / "42042"
+    launches = []
+
+    def kill_and_reconcile(self, registry, stop_event, reporter):
+        reconcile = monitor.call_args.kwargs["reconcile"]
+        original = registry.get_process("agg_0_mock-node-01")
+        assert original is not None and original.supervised
+        original.popen.kill()
+        reconcile()
+        assert not registry.check_failures()
+        reconcile()
+        replacement = registry.get_process("agg_0_mock-node-01_r1")
+        assert replacement is not None and replacement.supervised
+        assert replacement.critical is critical
+        assert registry.get_process(original.name) is None
+
+        worker_launches = [launch for launch in launches if launch.get("step_name", "").startswith("agg_")]
+        assert len(worker_launches) == 2
+        first, second = worker_launches
+        for key in (
+            "command",
+            "nodelist",
+            "env_to_set",
+            "srun_options",
+            "output",
+            "container_image",
+            "container_mounts",
+        ):
+            assert second[key] == first[key]
+        assert second["env_to_set"]["ROLE_SETTING"] == "kept"
+        assert second["srun_options"]["mem"] == "4G"
+
+        replacement.popen.kill()
+        reconcile()
+        assert not replacement.supervised
+        assert registry.check_failures() is critical
+        return int(critical)
+
+    with (
+        patch("srtctl.cli.do_sweep.start_process_monitor") as monitor,
+        patch.object(SweepOrchestrator, "run_benchmark", kill_and_reconcile),
+    ):
+        exit_code = run_mock_sweep(
+            config_path=config_path,
+            output_dir=output_dir,
+            job_id="42042",
+            options=MockOptions(child_duration_s=600, phase_pause_s=0, on_srun=launches.append),
+        )
+
+    assert exit_code == int(critical)
+    restarts = json.loads((output_dir / "logs" / "worker_restarts.json").read_text())
+    assert restarts["total_restarts"] == 1
+    assert [event["outcome"] for event in restarts["events"]] == ["relaunched", "exhausted"]
+    lockfile = yaml.safe_load((output_dir / "recipe.lock.yaml").read_text())
+    assert lockfile["lock"]["worker_restarts"] == restarts
 
 
 def test_run_mock_sweep_produces_expected_artifacts(tmp_path: Path) -> None:
@@ -105,6 +175,29 @@ def test_run_mock_sweep_produces_expected_artifacts(tmp_path: Path) -> None:
     assert any((output_dir / "logs").glob("*_agg_w0.out")), "worker log written"
     assert any((output_dir / "logs").glob("*_frontend_*.out")), "frontend log written"
     assert (output_dir / "logs" / "benchmark.out").is_file()
+
+
+@pytest.mark.parametrize("benchmark_exit_code", [0, 7])
+def test_mock_sweep_does_not_prepare_or_render_dashboard(tmp_path: Path, benchmark_exit_code: int) -> None:
+    cfg = _write_config(tmp_path)
+    output_dir = tmp_path / "outputs" / "42046"
+
+    # Inject the benchmark outcome while exercising the real cleanup/postprocess path.
+    with (
+        patch.object(SweepOrchestrator, "run_benchmark", return_value=benchmark_exit_code),
+        patch("srtctl.analysis.perf_dashboard.build") as dashboard_build,
+    ):
+        exit_code = run_mock_sweep(
+            config_path=cfg,
+            output_dir=output_dir,
+            job_id="42046",
+            options=MockOptions(child_duration_s=0.05, phase_pause_s=0.01),
+        )
+
+    assert exit_code == benchmark_exit_code
+    assert (output_dir / "recipe.lock.yaml").is_file(), "post-processing still runs"
+    dashboard_build.assert_not_called()  # entry point for both dashboard ingestion and rendering
+    assert not list((output_dir / "logs").glob("perf_dashboard*"))
 
 
 def test_run_mock_sweep_drives_full_status_timeline(tmp_path: Path) -> None:

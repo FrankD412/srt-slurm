@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-from srtctl.backends.trtllm import TRTLLMProtocol
+from srtctl.backends.trtllm import TRTLLMBackend
 from srtctl.core.fingerprint import format_identity_verification, verify_identity
 from srtctl.core.health import wait_for_model
 from srtctl.core.ip_utils import url_host
@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from srtctl.core.runtime import RuntimeContext
     from srtctl.core.schema import SrtConfig
     from srtctl.core.topology import Endpoint, Process
-    from srtctl.frontends import FrontendProtocol
+    from srtctl.frontends import Frontend
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ def _get_health_expectations(
 
     The frontend knows what its readiness endpoint counts (Dynamo generate
     registrations, Router-expanded DP ranks, logical workers); see
-    ``FrontendProtocol.health_expectations``.
+    ``Frontend.health_expectations``.
     """
     frontend = get_frontend(config.frontend.type)
     n_prefill, n_decode, count_desc = frontend.health_expectations(config, backend_processes)
@@ -113,18 +113,16 @@ class BenchmarkStageMixin:
         raise NotImplementedError
 
     def _orchestrator_node(self) -> str:
-        """Node the frontend/orchestrator runs on (honors frontend.orchestrator_placement)."""
-        placement = getattr(self.config.frontend, "orchestrator_placement", "head")
+        """Node the frontend/orchestrator runs on (honors frontend.placement.node)."""
+        placement = self.config.frontend.placement.location
         if placement == "head":
             return self.runtime.nodes.head
         from srtctl.core.topology import placed_node
 
-        return placed_node(
-            self.backend_processes, placement, self.runtime.nodes.head, kind="frontend.orchestrator_placement"
-        )
+        return placed_node(self.backend_processes, placement, self.runtime.nodes.head, kind="frontend.placement.node")
 
     @property
-    def frontend(self) -> "FrontendProtocol | None":
+    def frontend(self) -> "Frontend | None":
         """The frontend implementation for ``frontend.type``; ``None`` for a services-only job."""
         if self.config.frontend.type == FRONTEND_NONE:
             return None
@@ -139,20 +137,18 @@ class BenchmarkStageMixin:
         return self._orchestrator_node()
 
     def _benchmark_node(self) -> str:
-        """Node the benchmark client runs on (honors benchmark.client_placement).
+        """Node the benchmark client runs on (honors benchmark.placement.node).
 
         ``nodes.bench`` equals ``nodes.head`` unless a dedicated client node was
-        carved out (benchmark.client_dedicated_node), in which case it points at
-        that reserved node instead.
+        carved out (benchmark.placement.node: dedicated), in which case it points
+        at that reserved node instead.
         """
-        placement = getattr(self.config.benchmark, "client_placement", "head")
+        placement = self.config.benchmark.placement.location
         if placement == "head":
             return self.runtime.nodes.bench
         from srtctl.core.topology import placed_node
 
-        return placed_node(
-            self.backend_processes, placement, self.runtime.nodes.head, kind="benchmark.client_placement"
-        )
+        return placed_node(self.backend_processes, placement, self.runtime.nodes.head, kind="benchmark.placement.node")
 
     def _logical_worker_endpoints(self) -> list[tuple[str, str, int]]:
         """Return ``(mode, IP, port)`` for every routable worker endpoint.
@@ -428,8 +424,7 @@ class BenchmarkStageMixin:
                 time.sleep(MANUAL_POLL_SECONDS)
             # The process monitor ticks faster than this loop and sets stop_event
             # itself when a critical process dies; a stop that follows such a
-            # failure is a failed run, not a clean shutdown (sa-b200 job 15405
-            # reported COMPLETED 0:0 after an exhausted worker restart policy).
+            # failure is a failed run, not a clean shutdown.
             # Read the recorded failures rather than scanning again: by now the
             # monitor's cleanup has SIGTERMed everything else too.
             if registry.has_failures:
@@ -742,9 +737,11 @@ class BenchmarkStageMixin:
             return {}
         backend = self.config.backend
         is_trtllm = self.config.backend_type == "trtllm"
+        # The combined setting also gates sidecar URL discovery; sidecars use
+        # native commands and do not consume dynamo_metrics_flags.
         dynamo_trtllm_metrics_disabled = (
             frontend.worker_launch == "dynamo"
-            and isinstance(backend, TRTLLMProtocol)
+            and isinstance(backend, TRTLLMBackend)
             and not (
                 (not self.config.dynamo.sidecar and backend.dynamo_metrics_flags) or backend.publish_events_and_metrics
             )
@@ -843,13 +840,13 @@ class BenchmarkStageMixin:
             if gpus_per_node is not None:
                 env["SRT_GPUS_PER_NODE"] = str(gpus_per_node)
             worker_nodes = getattr(getattr(self.runtime, "nodes", None), "worker", None)
-            if isinstance(worker_nodes, (list, tuple)):
+            if isinstance(worker_nodes, list | tuple):
                 env["SRT_WORKER_NODES"] = ",".join(worker_nodes)
         env["SRTCTL_FRONTEND_TYPE"] = self.config.frontend.type
 
         # Orchestrator endpoint for the benchmark command. When the client runs on
-        # a different node than the orchestrator (e.g. client_placement=last_decode
-        # with orchestrator_placement=first_decode), "localhost" is wrong — the
+        # a different node than the orchestrator (e.g. benchmark.placement.node: last_decode
+        # with frontend.placement.node: first_decode), "localhost" is wrong — the
         # command should target http://$SRT_FRONTEND_HOST:$SRT_FRONTEND_PORT.
         # A services-only job (frontend.type none) has no endpoint to point at.
         if self.config.frontend.type != "none":

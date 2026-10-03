@@ -8,7 +8,7 @@ import pytest
 from srtctl.core.health import (
     WorkerHealthResult,
     check_dynamo_health,
-    check_sglang_router_health,
+    check_static_router_health,
 )
 
 # ============================================================================
@@ -205,7 +205,7 @@ class TestSGLangRouterHealthDisaggregated:
             },
         }
 
-        result = check_sglang_router_health(response, expected_prefill=1, expected_decode=2)
+        result = check_static_router_health(response, expected_prefill=1, expected_decode=2)
 
         assert result.ready is True
         assert result.prefill_ready == 1
@@ -224,7 +224,7 @@ class TestSGLangRouterHealthDisaggregated:
             },
         }
 
-        result = check_sglang_router_health(response, expected_prefill=4, expected_decode=8)
+        result = check_static_router_health(response, expected_prefill=4, expected_decode=8)
 
         assert result.ready is True
         assert result.prefill_ready == 4
@@ -243,7 +243,7 @@ class TestSGLangRouterHealthDisaggregated:
             },
         }
 
-        result = check_sglang_router_health(response, expected_prefill=4, expected_decode=8)
+        result = check_static_router_health(response, expected_prefill=4, expected_decode=8)
 
         assert result.ready is True
         assert result.prefill_ready == 6
@@ -261,7 +261,7 @@ class TestSGLangRouterHealthDisaggregated:
             },
         }
 
-        result = check_sglang_router_health(response, expected_prefill=4, expected_decode=8)
+        result = check_static_router_health(response, expected_prefill=4, expected_decode=8)
 
         assert result.ready is False
         assert result.prefill_ready == 2
@@ -280,7 +280,7 @@ class TestSGLangRouterHealthDisaggregated:
             },
         }
 
-        result = check_sglang_router_health(response, expected_prefill=4, expected_decode=8)
+        result = check_static_router_health(response, expected_prefill=4, expected_decode=8)
 
         assert result.ready is False
         assert result.decode_ready == 3
@@ -299,7 +299,7 @@ class TestSGLangRouterHealthDisaggregated:
             },
         }
 
-        result = check_sglang_router_health(response, expected_prefill=2, expected_decode=4)
+        result = check_static_router_health(response, expected_prefill=2, expected_decode=4)
 
         assert result.ready is False
         assert result.prefill_ready == 0
@@ -325,7 +325,7 @@ class TestSGLangRouterHealthAggregated:
         }
 
         # Aggregated: expect 0 prefill, 4 decode (regular counts as decode)
-        result = check_sglang_router_health(response, expected_prefill=0, expected_decode=4)
+        result = check_static_router_health(response, expected_prefill=0, expected_decode=4)
 
         assert result.ready is True
         assert result.decode_ready == 4
@@ -344,7 +344,7 @@ class TestSGLangRouterHealthAggregated:
         }
 
         # Aggregated: expect 0 prefill, N decode
-        result = check_sglang_router_health(response, expected_prefill=0, expected_decode=4)
+        result = check_static_router_health(response, expected_prefill=0, expected_decode=4)
 
         assert result.ready is True
         assert result.decode_ready == 4
@@ -362,7 +362,7 @@ class TestSGLangRouterHealthAggregated:
         }
 
         # Both decode and regular should count
-        result = check_sglang_router_health(response, expected_prefill=0, expected_decode=4)
+        result = check_static_router_health(response, expected_prefill=0, expected_decode=4)
 
         assert result.ready is True
         assert result.decode_ready == 4  # 2 decode + 2 regular
@@ -375,7 +375,7 @@ class TestSGLangRouterHealthErrors:
         """Response missing 'stats' key."""
         response = {"workers": []}
 
-        result = check_sglang_router_health(response, expected_prefill=1, expected_decode=1)
+        result = check_static_router_health(response, expected_prefill=1, expected_decode=1)
 
         assert result.ready is False
         assert "stats" in result.message
@@ -384,7 +384,7 @@ class TestSGLangRouterHealthErrors:
         """Empty response dict."""
         response = {}
 
-        result = check_sglang_router_health(response, expected_prefill=1, expected_decode=1)
+        result = check_static_router_health(response, expected_prefill=1, expected_decode=1)
 
         assert result.ready is False
 
@@ -392,7 +392,7 @@ class TestSGLangRouterHealthErrors:
         """Missing count fields default to 0."""
         response = {"stats": {}}
 
-        result = check_sglang_router_health(response, expected_prefill=1, expected_decode=1)
+        result = check_static_router_health(response, expected_prefill=1, expected_decode=1)
 
         assert result.ready is False
         assert result.prefill_ready == 0
@@ -448,9 +448,9 @@ def _config(backend=None):
     """The recipe a probe may read: only the backend matters, and only the vLLM Router reads it (discovery mode)."""
     from types import SimpleNamespace
 
-    from srtctl.backends import VLLMProtocol
+    from srtctl.backends import VLLMBackend
 
-    return SimpleNamespace(backend=backend if backend is not None else VLLMProtocol())
+    return SimpleNamespace(backend=backend if backend is not None else VLLMBackend())
 
 
 class TestFrontendProbes:
@@ -523,7 +523,7 @@ class TestFrontendProbes:
 
     def test_vllm_router_discovery_mode_is_ready_on_the_routers_health(self, monkeypatch):
         """With a discovery connector the Router's /health, 503 until both roles registered, is the gate."""
-        from srtctl.backends import VLLMProtocol
+        from srtctl.backends import VLLMBackend
         from srtctl.core import health
         from srtctl.frontends import get_frontend
 
@@ -535,7 +535,7 @@ class TestFrontendProbes:
             return _http(next(statuses))
 
         monkeypatch.setattr(health.requests, "get", fake_get)
-        config = _config(backend=VLLMProtocol(connector="moriio"))
+        config = _config(backend=VLLMBackend(connector="moriio"))
         router = get_frontend("vllm-router")
         waiting = router.probe_ready("router", 8000, 1, 1, config)
         ready = router.probe_ready("router", 8000, 1, 1, config)

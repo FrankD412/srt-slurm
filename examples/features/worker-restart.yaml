@@ -4,11 +4,11 @@
 # (`benchmark.type: manual`) so you can kill a worker and watch it come back.
 # The agg role carries the policy here; prefill and decode take the same block.
 #
-# What happens when a worker dies (times from a real run, sa-b200 job 15405):
+# What happens when a worker dies (illustrative times from a real run):
 #
 #   t+0    kill the step from the login node:
-#            squeue --steps -j <job> -h -o "%i %j"      # e.g. 15405.6 agg_0_<node>
-#            scancel --signal=KILL 15405.6              # SIGKILL the engine
+#            squeue --steps -j <job> -h -o "%i %j"      # find agg_0_<node>
+#            scancel --signal=KILL <job>.<step>         # SIGKILL the engine
 #   t+5    sweep log: "Worker agg_0_<node> exited with code 137; relaunching agg_0 in 10s (restart 1/2)"
 #   t+10   frontend /health drops from 2 generate instances to 1 (the dead worker's lease expires)
 #   t+15   "Relaunched agg_0 as agg_0_<node>_r1 (restart 1/2); waiting up to 1800s for /health"
