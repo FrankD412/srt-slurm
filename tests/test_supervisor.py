@@ -426,10 +426,13 @@ def test_the_stop_event_cancels_a_pending_relaunch(tmp_path: Path) -> None:
     assert h.launcher.calls == []
 
 
-def test_a_failed_launch_hands_the_exited_steps_back(tmp_path: Path) -> None:
-    h = Harness(tmp_path, ON_FAILURE, launcher=FakeLauncher(fail=True))
+@pytest.mark.parametrize("critical", [True, False])
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_a_failed_launch_hands_the_exited_steps_back(tmp_path: Path, critical: bool, exit_code: int) -> None:
+    policy = RestartPolicy(policy="always", backoff_seconds=10)
+    h = Harness(tmp_path, policy, launcher=FakeLauncher(fail=True), critical=critical)
     old = h.steps["decode_1_node-b"]
-    old.exit(1)
+    old.exit(exit_code)
     h.tick()
     h.advance(10)
     h.tick()
@@ -438,7 +441,34 @@ def test_a_failed_launch_hands_the_exited_steps_back(tmp_path: Path) -> None:
     assert h.registry.get_process("decode_1_node-b") is old.managed
     assert old.managed.supervised is False
     assert h.supervisor.events[-1].outcome == "launch_failed"
-    assert h.registry.check_failures() is True
+    assert h.registry.check_failures() is critical
+
+
+@pytest.mark.parametrize("critical", [True, False])
+def test_a_partial_launch_stays_tracked_and_stops_across_ticks(tmp_path: Path, critical: bool) -> None:
+    h = Harness(tmp_path, ON_FAILURE, critical=critical)
+    partial = FakeStep("decode_1_node-b_r1", critical=critical)
+    partial.popen.terminate.side_effect = None  # This rank ignores SIGTERM.
+
+    def relaunch(processes, *, attempt):
+        yield partial.managed
+        assert h.registry.get_process(partial.managed.name) is partial.managed
+        raise RuntimeError("second rank failed to launch")
+
+    h.launcher.relaunch_endpoint = relaunch
+    h.steps["decode_1_node-b"].exit(1)
+    h.tick()
+    h.advance(10)
+    with patch("srtctl.core.processes.time.monotonic", return_value=1000):
+        h.tick()
+    assert h.supervisor.events[-1].outcome == "launch_failed"
+    assert partial.managed.is_running
+    assert h.registry.check_failures() is critical
+    with patch("srtctl.core.processes.time.monotonic", return_value=1002):
+        h.tick()
+    assert not partial.managed.is_running
+    assert h.registry.get_process(partial.managed.name) is partial.managed
+    assert h.registry.check_failures() is critical
 
 
 def test_readiness_probe_records_when_the_replacement_serves(tmp_path: Path) -> None:

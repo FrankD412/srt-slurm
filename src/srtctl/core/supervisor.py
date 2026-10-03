@@ -65,8 +65,8 @@ EndpointKey = tuple[str, int, int]
 class WorkerLauncher(Protocol):
     """What the supervisor needs from the worker stage to bring an endpoint back."""
 
-    def relaunch_endpoint(self, endpoint_processes: list[Process], *, attempt: int) -> list[ManagedProcess]:
-        """Launch every step of the endpoint again; ``attempt`` is 1 for the first relaunch."""
+    def relaunch_endpoint(self, endpoint_processes: list[Process], *, attempt: int) -> Iterable[ManagedProcess]:
+        """Yield steps as they launch; ``attempt`` is 1 for the first relaunch."""
         ...
 
     def worker_ready_probe(self, endpoint_processes: list[Process]) -> tuple[str, int] | None:
@@ -268,10 +268,10 @@ class WorkerSupervisor:
                 return
             now = self._clock()
             for state in self._endpoints.values():
+                state.stopping = [proc for proc in state.stopping if not proc.advance_stop()]
                 if state.settled:
                     continue
                 if state.due_at is not None:
-                    state.stopping = [proc for proc in state.stopping if not proc.advance_stop()]
                     if now >= state.due_at and not state.stopping:
                         self._relaunch(state, now)
                     continue
@@ -411,15 +411,23 @@ class WorkerSupervisor:
                 if state.pending is not None and state.pending.worker == proc.name:
                     state.pending.crash_log = str(rotated)
 
+        replacements: list[ManagedProcess] = []
         try:
-            replacements = self.launcher.relaunch_endpoint(state.processes, attempt=state.restarts)
-        except Exception:
-            # Put the exited steps back unsupervised so the role's critical flag
-            # decides the run's fate; nothing is running for this endpoint now.
+            for proc in self.launcher.relaunch_endpoint(state.processes, attempt=state.restarts):
+                proc.supervised = True
+                self.registry.add_process(proc)
+                replacements.append(proc)
+        except Exception as exc:
             logger.exception("Relaunch of %s failed; leaving it to the registry", state.label)
+            step_ids = list_step_ids() if any(proc.step_name for proc in replacements) else None
+            for proc in replacements:
+                proc.request_stop(step_ids)
+            state.stopping = [proc for proc in replacements if proc.is_running]
             for proc in old:
                 proc.supervised = False
                 self.registry.add_process(proc)
+                if proc.critical:
+                    self.registry.record_failure(proc.name, f"Relaunch of {state.label} failed: {exc}")
             if state.pending is not None:
                 state.pending.outcome = "launch_failed"
             state.due_at = None
@@ -427,9 +435,6 @@ class WorkerSupervisor:
             self._write()
             return
 
-        for proc in replacements:
-            proc.supervised = True
-            self.registry.add_process(proc)
         state.names = [proc.name for proc in replacements]
         state.due_at = None
         state.launched_at = now

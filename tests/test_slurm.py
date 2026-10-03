@@ -443,7 +443,7 @@ def test_relaunch_endpoint_follows_the_backend_launch_strategy(tmp_path: Path) -
         launch_per_endpoint=False, mpi=None, oversubscribe=False, cpu_bind=None, kill_on_bad_exit=False
     )
     with patches[0], patches[1] as mock_srun:
-        procs = mixin.relaunch_endpoint([leader, follower], attempt=1)
+        procs = list(mixin.relaunch_endpoint([leader, follower], attempt=1))
     assert [p.name for p in procs] == ["prefill_0_node-a_r1", "prefill_0_node-b_r1"]
     assert [call.kwargs["nodelist"] for call in mock_srun.call_args_list] == [["node-a"], ["node-b"]]
 
@@ -452,7 +452,7 @@ def test_relaunch_endpoint_follows_the_backend_launch_strategy(tmp_path: Path) -
         launch_per_endpoint=True, mpi="pmix", oversubscribe=False, cpu_bind=None, kill_on_bad_exit=True
     )
     with patches[0], patches[1] as mock_srun:
-        procs = mixin.relaunch_endpoint([leader, follower], attempt=3)
+        procs = list(mixin.relaunch_endpoint([leader, follower], attempt=3))
     assert [p.name for p in procs] == ["prefill_0_node-a_r3"]
     assert mock_srun.call_args.kwargs["nodelist"] == ["node-a", "node-b"]
     assert mock_srun.call_args.kwargs["step_name"] == "prefill_0_node-a_r3"
@@ -461,12 +461,24 @@ def test_relaunch_endpoint_follows_the_backend_launch_strategy(tmp_path: Path) -
 def test_worker_ready_probe_targets_the_port_the_frontend_health_checks(tmp_path: Path) -> None:
     mixin, leader = _remap_worker_mixin(tmp_path, frontend_type="dynamo", dynamo_install=False)
     leader.http_port = 8100
+    leader.is_leader = True
     with patch("srtctl.cli.mixins.worker_stage.get_hostname_ip", return_value="10.0.0.7"):
         assert mixin.worker_ready_probe([leader]) == ("10.0.0.7", 5000)  # DYN_SYSTEM_PORT under dynamo
         mixin.config.frontend.type = "sglang-router"
         assert mixin.worker_ready_probe([leader]) == ("10.0.0.7", 8100)  # the engine's own HTTP port
         leader.http_port = 0
         assert mixin.worker_ready_probe([leader]) is None
+
+
+@pytest.mark.parametrize("frontend_type", ["sglang", "vllm", "trtllm_serve"])
+def test_direct_worker_restart_probes_the_public_port(tmp_path: Path, frontend_type: str) -> None:
+    mixin, leader = _remap_worker_mixin(tmp_path, frontend_type=frontend_type, dynamo_install=False)
+    leader.endpoint_mode = "agg"
+    leader.is_leader = True
+    leader.http_port = 8100
+    mixin.runtime.frontend_port = 8180
+    with patch("srtctl.cli.mixins.worker_stage.get_hostname_ip", return_value="10.0.0.7"):
+        assert mixin.worker_ready_probe([leader]) == ("10.0.0.7", 8180)
 
 
 def test_track_workers_supervises_only_roles_with_a_restart_policy(tmp_path: Path) -> None:

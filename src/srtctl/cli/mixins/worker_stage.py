@@ -26,6 +26,8 @@ from srtctl.frontends import get_frontend
 from srtctl.services.implicit import discovery_env
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from srtctl.core.runtime import RuntimeContext
     from srtctl.core.schema import SrtConfig
     from srtctl.core.topology import Endpoint, Process
@@ -735,13 +737,15 @@ class WorkerStageMixin:
             grouped[(process.endpoint_mode, process.endpoint_index, getattr(process, "engine_id", 0))].append(process)
         return dict(grouped)
 
-    def relaunch_endpoint(self, endpoint_processes: list["Process"], *, attempt: int) -> list[ManagedProcess]:
-        """Launch one endpoint again the way ``start_all_workers`` launched it (WorkerLauncher protocol)."""
+    def relaunch_endpoint(self, endpoint_processes: list["Process"], *, attempt: int) -> "Iterable[ManagedProcess]":
+        """Yield each launched step so the supervisor tracks it before the next rank starts."""
         # The role's own engine decides the launch strategy (roles may run different engines).
         backend = self.config.backend_for_role(endpoint_processes[0].endpoint_mode)
         if backend.get_srun_config().launch_per_endpoint:
-            return [self.start_endpoint_worker(endpoint_processes, attempt=attempt)]
-        return [self.start_worker(process, endpoint_processes, attempt=attempt) for process in endpoint_processes]
+            yield self.start_endpoint_worker(endpoint_processes, attempt=attempt)
+        else:
+            for process in endpoint_processes:
+                yield self.start_worker(process, endpoint_processes, attempt=attempt)
 
     def worker_ready_probe(self, endpoint_processes: list["Process"]) -> tuple[str, int] | None:
         """Where a relaunched endpoint answers ``GET /health`` once it serves (WorkerLauncher protocol).
@@ -751,10 +755,13 @@ class WorkerStageMixin:
         registered); every other frontend talks to the engine's own HTTP port.
         """
         leader = endpoint_processes[0]
-        # The same registry lookup start_worker uses to decide whether DYN_SYSTEM_PORT is set.
-        dynamo_worker = get_frontend(self.config.frontend.type).worker_launch == "dynamo"
-        port = leader.sys_port if dynamo_worker else leader.http_port
-        if port <= 0:
+        frontend = get_frontend(self.config.frontend.type)
+        port = (
+            frontend.worker_ready_port(leader)
+            if frontend.worker_launch == "dynamo"
+            else frontend.worker_endpoint_port(leader, self.config, self.runtime)
+        )
+        if port is None or port <= 0:
             return None
         return get_hostname_ip(leader.node, self.runtime.network_interface), port
 
