@@ -2,9 +2,9 @@
 
 SGLang's [weight cache daemon](https://www.lmsys.org/blog/2026-08-21-sglang-fast-recovery/) is a persistent GPU process that loads the model once, keeps the post-quantized, TP-sharded tensors in HBM, and hands CUDA IPC handles to any engine on the same GPU. An engine started with `--weight-cache-mode client` maps those tensors instead of reading the checkpoint. The rest of engine startup (CUDA graphs, kernel JIT, tokenizer) still runs. The flags and limitations below follow [SGLang v0.5.20's implementation](https://github.com/sgl-project/sglang/tree/94602c9c2b7cbdb8efd5c52802dac6a1c180089e/python/sglang/srt/weight_cache).
 
-srtctl needs no code for this. The daemon is a [service](services.md) with `placement.per: worker`, the engine flag is an ordinary `roles.<role>.args` entry, and [`roles.<role>.restart`](topology.md#restart) is what relaunches a dead engine so the fast load pays off. `examples/features/sglang-weight-cache.yaml` is the runnable version.
+srtctl needs no code for this. The daemon is a [service](services.md) with `placement.per: worker`, the engine flag is an ordinary `roles.<role>.args` entry, and [`roles.<role>.restart`](topology.md#restart) is what relaunches a dead engine so the fast load pays off. The [complete example recipe](https://github.com/NVIDIA/srt-slurm/blob/main/examples/features/sglang-weight-cache.yaml) is the runnable version.
 
-What this gives you is a fast **restart**. It is not a standby: SGLang has no election, so the blog's "active-standby" scenario is a deployment pattern, not a feature. A sub-second cutover to a parked engine is what [shadow engine recovery](shadow-engine-recovery.md) does for vLLM through Dynamo's GPU Memory Service.
+What this gives you is a fast **restart**. It is not a standby: SGLang has no election, so the blog's "active-standby" scenario is a deployment pattern, not a feature. For takeover by a parked standby engine, see [shadow engine recovery](shadow-engine-recovery.md) for vLLM through Dynamo's GPU Memory Service.
 
 ## Table of Contents
 
@@ -19,7 +19,7 @@ What this gives you is a fast **restart**. It is not a standby: SGLang has no el
 
 ## Quick Start
 
-This is an excerpt of the weight-cache settings, not a complete recipe. Start from `examples/features/sglang-weight-cache.yaml`, which includes the required name, model path, precision, and resources, and resolve its model and container aliases in your cluster config. Each worker in this recipe fits on one node.
+This is an excerpt of the weight-cache settings, not a complete recipe. Start from the [complete example recipe](https://github.com/NVIDIA/srt-slurm/blob/main/examples/features/sglang-weight-cache.yaml), which includes the required name, model path, precision, and resources, and resolve its model and container aliases in your [cluster config](cluster-config.md). Each worker in this recipe fits on one node.
 
 ```yaml
 schema: 2
@@ -98,11 +98,10 @@ sequenceDiagram
 
 ## Testing a Relaunch
 
-Kill the engine process, not its step. From the login node:
+Kill the engine process, not its step. Use your job ID and the worker's node and allocated HTTP port from the sweep log's `Command:` line. From the login node:
 
 ```bash
-# the engine's srun step on the node (the port is in the sweep log's "Command:" line)
-srun --jobid <job> --overlap -w <node> -N1 bash -c 'pkill -9 -f "sglang.launch_server.*--port 6100"'
+srun --jobid <job> --overlap -w <node> -N1 bash -c 'pkill -9 -f "sglang.launch_server.*--port <worker-port>( |$)"'
 ```
 
 Then watch:
@@ -116,6 +115,7 @@ The daemon service's log shows nothing during a relaunch; the tensors stay mappe
 ## Limitations
 
 - Fast restart only. No standby engine and no cutover; see [shadow engine recovery](shadow-engine-recovery.md) for that on vLLM.
+- Restarts have a finite per-worker budget. Once it is exhausted, the role's `critical` setting decides whether the run fails; see [restart behavior](topology.md#restart) and the generated [RestartPolicy reference](schema-reference.md#restartpolicy) for configuration fields and defaults.
 - SGLang v0.5.19 or newer. Older builds hard-code `/tmp/sglang_weight_cache_rank*` paths, which a separate srun step cannot reach.
 - IPC-safe quantizations only: unquantized and block-wise FP8 as of v0.5.20. Per-tensor FP8, Marlin, AWQ/GPTQ and NVFP4 raise at daemon start.
 - Not with speculative decoding (`--speculative-algorithm`); the daemon does not export the draft model.
@@ -133,4 +133,4 @@ The daemon service's log shows nothing during a relaunch; the tensors stay mappe
 | engine log: `Daemon config mismatch` | the daemon's argv differs from the engine's (model, TP, dtype, quantization) | mirror the engine's flags in `services[].command` |
 | engine dies with `Weight cache daemon (pid=...) died while this engine holds its weights` | the service was stopped or crashed | keep `start: before_workers` (stopped after the engines) and `critical: true`; check the service log |
 | readiness probe times out while the daemons say `Listening on ...` | the pattern's rank or node count does not match the launcher's summary line | use the printed `All <n> weight cache daemons on node <k> are ready` text |
-| `already running (pid=...)` at daemon start | a live daemon from another job on the same GPU | nodes are exclusive under srtctl; if it happens, that daemon leaked from a job that was killed without cleanup; stop it by hand |
+| `already running (pid=...)` at daemon start | a live daemon already owns that GPU's socket | confirm which job owns the daemon before stopping it; remove a leaked daemon only after verifying its job has ended |
