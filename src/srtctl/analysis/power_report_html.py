@@ -2248,14 +2248,22 @@ class GpuPowerBudget:
 
 
 GPU_POWER_BUDGETS: dict[str, GpuPowerBudget] = {
-    # Source for every number: Kyle Liang (SemiAnalysis), Slack, Sep 2026 -- the
-    # "avg-per-GPU rack power" (static), "avg everything-else power" (overhead) and the
-    # amortised CPU-per-GPU figures used on SA's dashboard.
+    # Source for every number: SemiAnalysis rack-power table (Sarah McKenney / Kyle
+    # Liang, Slack, Sep 2026):
+    #                                                   GB300     VR NVL72
+    #   SA rack power (EDP), W                         152,640    240,000
+    #   per-GPU rack power (EDP / 72)        -> static   2,120      3,333
+    #   GPU power                                        1,400      2,300
+    #   1/2 CPU power                   -> CPU stand-in     50        100
+    #   rest of rack w/ measured GPU + CPU  -> overhead    670        833
+    #   rest of rack w/ measured GPU only                  720        933  (= overhead + CPU stand-in)
+    # The last row is what a run with no CPU measurement is charged: overhead plus the
+    # CPU stand-in, which is exactly how the projected basis composes them here.
     #
     # GB300 NVL72 compute tray: 4 GPUs + 2 Grace sockets.
     #   static   2,120 W/GPU  -> 8,480 W per 4-GPU node
-    #   overhead   670 W/GPU  ("avg everything-else power")
-    #   CPU stand-in when CPU collection failed: 50 W/GPU (amortised CPU power per GPU)
+    #   overhead   670 W/GPU
+    #   CPU stand-in when CPU collection failed: 50 W/GPU
     "gb300": GpuPowerBudget(
         static_node_w=8_480.0,
         gpus_per_node=4,
@@ -2264,15 +2272,15 @@ GPU_POWER_BUDGETS: dict[str, GpuPowerBudget] = {
         cpu_estimate_w_per_gpu=50.0,
     ),
     # VR NVL72 (Vera Rubin) compute tray, assumed 4 GPUs + 2 Vera sockets.
-    #   static   3,300 W/GPU  -> 13,200 W per 4-GPU node
-    #   overhead   900 W/GPU
+    #   static   3,333 W/GPU  (240,000 / 72) -> 13,333 W per 4-GPU node
+    #   overhead   833 W/GPU
     #   CPU stand-in: 100 W/GPU
     # No VR run has been reported yet, so the config.yaml ``gpu_type`` spelling is a
     # guess; ``GPU_TYPE_ALIASES`` maps the likely variants onto this entry.
     "vr200": GpuPowerBudget(
-        static_node_w=13_200.0,
+        static_node_w=240_000.0 / 72 * 4,
         gpus_per_node=4,
-        overhead_w_per_gpu=900.0,
+        overhead_w_per_gpu=833.0,
         sockets_per_node=2,
         cpu_estimate_w_per_gpu=100.0,
     ),
