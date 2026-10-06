@@ -146,6 +146,7 @@ class PowerTelemetrySession:
         self._mutation_disabled = False
         expected_device_list = list(expected_devices)
         self._expected_device_keys = frozenset(device.key for device in expected_device_list)
+        self._worker_hosts = frozenset(hostname for hostname, _ in self._expected_device_keys)
 
         self._manifest = PowerManifest(
             job_id=settings.job_id,
@@ -416,6 +417,9 @@ class PowerTelemetrySession:
                 sm_active=reading.sm_active,
             )
             for reading in (scrape.readings if scrape is not None else ())
+            # A worker node's exporter also reports the GPUs no worker uses; pool nodes keep every GPU.
+            if endpoint.hostname not in self._worker_hosts
+            or (endpoint.hostname, reading.gpu_index) in self._expected_device_keys
         ]
         return _EndpointResult(
             hostname=endpoint.hostname,

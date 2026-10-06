@@ -75,7 +75,9 @@ flight when shutdown starts plus the final bracketing scrape.
 `schema_version,timestamp_unix,scrape_seq,hostname,gpu_index,gpu_uuid,power_w`,
 one row per observation, `(scrape_seq, hostname, gpu_index)` unique. Rows are
 never interpolated, averaged, or role-attributed — role and heterogeneous
-group live once in the manifest topology.
+group live once in the manifest topology. An exporter can report every GPU on
+its node, so on a worker node the collector keeps only the GPUs that workers
+occupy. Service pool nodes keep every GPU.
 
 `manifest.json` records producer identity (version, git commit, exporter image
 and its SHA-256), the sample interval, expected and observed device sets, the
