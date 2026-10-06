@@ -240,10 +240,8 @@ def build_payload(t: Timings) -> dict[str, Any]:
 
 # --------------------------------------------------------------------------- page
 
-# Tokens and both palettes mirror src/srtctl/analysis/power_report_html.py (_CSS,
-# _SLOT_LIGHT / _SLOT_DARK) so the two reports read as one family. Unlike the
-# power report, this page defaults to dark and exposes an explicit toggle stored
-# in localStorage; the OS preference is not consulted.
+# Colour tokens for both themes. The page defaults to dark and exposes an
+# explicit toggle stored in localStorage; the OS preference is not consulted.
 _CSS = """
 :root[data-theme=dark] { color-scheme: dark;
   --page: #0d0d0d; --surface: #1a1a19; --ink-primary: #ffffff; --ink-secondary: #c3c2b7;
