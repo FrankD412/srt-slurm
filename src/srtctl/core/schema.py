@@ -48,7 +48,7 @@ from srtctl.backends import (
     VLLMBackend,
     VLLMMooncakeKVStoreConfig,
 )
-from srtctl.backends.base import RoleSettings
+from srtctl.backends.base import RoleSettings, WorkerMode
 from srtctl.core.formatting import (
     FormattablePath,
     FormattablePathField,
@@ -62,7 +62,7 @@ from srtctl.ports import DYNAMO_SIDECAR_GRPC_PORT
 from srtctl.services.config import ServiceConfig
 
 if TYPE_CHECKING:
-    from srtctl.core.topology import Endpoint, NodePortAllocator, Process, WorkerMode
+    from srtctl.core.topology import Endpoint, NodePortAllocator, Process
 
 logger = logging.getLogger(__name__)
 
@@ -3209,7 +3209,7 @@ class SrtConfig:
                     "for you."
                 )
 
-    def _profiling_worker_ranks(self, mode: Literal["prefill", "decode", "agg"]) -> set[int]:
+    def _profiling_worker_ranks(self, mode: WorkerMode) -> set[int]:
         """Derive selectable physical ranks from the configured worker layout."""
         from srtctl.core.topology import Endpoint
 
