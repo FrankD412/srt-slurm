@@ -3480,14 +3480,14 @@ def _point_charts_html(bundle: dict, *, run_label: str | None) -> dict[str, str]
             )
         phase_tps = _derive_phase_tps(r, origin=window[0])
         if phase_tps is not None:
-            extra = [
+            extra: list[tuple[str, list[dict]]] = [
                 ("Prefill throughput (input tok/s)", phase_tps[0]),
                 ("Decode throughput (output tok/s)", phase_tps[1]),
             ]
         else:  # no per-request export: fall back to aiperf's completion-attributed slices
             tps = _load_tps_series(r, origin=window[0])
             extra = [("Output throughput (tok/s, aiperf timeslices)", tps)] if tps else []
-        notices = list(bundle.get("coverage_warnings") or ())
+        notices: list[str] = [str(w) for w in (bundle.get("coverage_warnings") or ())]
         if phase_tps is None and r.get("benchmark_type") == "aiperf":
             notices.append(
                 "Prefill/decode throughput split unavailable: this run has no per-request export "
