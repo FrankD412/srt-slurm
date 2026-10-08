@@ -1101,6 +1101,21 @@ def test_power_variant_watts_measured_projected_static() -> None:
     assert (w["measured"], est) == (None, False)
 
 
+def test_power_variant_watts_prefers_the_reports_combined_average() -> None:
+    """The measured basis is the JSON's own combined_avg_power_w when present, so the
+    Pareto and power_energy_report.json cannot disagree on measured watts; the
+    gpu_w + cpu_w sum is only the fallback for payloads that predate that field."""
+    from srtctl.analysis.power_report_html import GPU_POWER_BUDGETS, _power_variant_watts
+
+    b = GPU_POWER_BUDGETS["gb300"]
+    w, est = _power_variant_watts(gpu_w=3_000.0, cpu_w=400.0, num_gpus=4, budget=b, combined_w=3_400.25)
+    assert w["measured"] == 3_400.25 and est is False
+    assert w["projected"] == 3_400.25 + b.overhead_w_per_gpu * 4
+    # combined None + CPU None -> estimate path, exactly as before
+    w, est = _power_variant_watts(gpu_w=3_000.0, cpu_w=None, num_gpus=4, budget=b, combined_w=None)
+    assert est is True and w["measured"] == 3_000.0 + b.cpu_estimate_w_per_gpu * 4
+
+
 def test_pareto_points_carry_basis_split_metrics_and_budget() -> None:
     from srtctl.analysis.power_report_html import GPU_POWER_BUDGETS
 

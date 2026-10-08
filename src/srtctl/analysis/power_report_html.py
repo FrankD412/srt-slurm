@@ -2311,12 +2311,20 @@ def _power_budget_for(gpu_type: str | None) -> GpuPowerBudget | None:
 
 
 def _power_variant_watts(
-    *, gpu_w: float | None, cpu_w: float | None, num_gpus: int | None, budget: GpuPowerBudget | None
+    *,
+    gpu_w: float | None,
+    cpu_w: float | None,
+    num_gpus: int | None,
+    budget: GpuPowerBudget | None,
+    combined_w: float | None = None,
 ) -> tuple[dict[str, float | None], bool]:
     """``({basis: total watts}, cpu_estimated)`` for one concurrency point.
 
-    ``measured`` is GPU + CPU; when the CPU leg is missing and the budget carries a
-    per-socket estimate, that estimate stands in and ``cpu_estimated`` is True (the
+    ``measured`` is the report's own ``combined_avg_power_w`` (``(gpu_J + cpu_J) /
+    duration``, None unless both legs were measured) when the caller passes it, so the
+    Pareto's measured basis is the very figure ``power_energy_report.json`` carries.
+    Only when that is None -- the CPU leg is missing -- and the budget has a per-GPU
+    CPU estimate does ``gpu_w + estimate`` stand in, with ``cpu_estimated`` True (the
     chart draws the point with a different marker). With neither, ``measured`` is
     None -- never silently GPU-only. ``projected`` adds the per-GPU overhead to
     ``measured``; ``static`` is the budget alone times the active GPU count.
@@ -2325,7 +2333,9 @@ def _power_variant_watts(
     if gpu_w is None or not num_gpus:
         return out, False
     estimated = False
-    if cpu_w is not None:
+    if combined_w is not None:
+        out["measured"] = combined_w
+    elif cpu_w is not None:
         out["measured"] = gpu_w + cpu_w
     elif budget is not None and budget.cpu_estimate_w_per_gpu is not None:
         out["measured"] = gpu_w + budget.cpu_estimate_w_per_gpu * num_gpus
@@ -2420,7 +2430,11 @@ def _pareto_points(
         duration = r["timing"]["computed"]["duration_seconds"]
         budget = _power_budget_for(gpu_type)
         variant_w, cpu_estimated = _power_variant_watts(
-            gpu_w=ppw["gpu_avg_power_w"], cpu_w=ppw["cpu_avg_power_w"], num_gpus=num_gpus, budget=budget
+            gpu_w=ppw["gpu_avg_power_w"],
+            cpu_w=ppw["cpu_avg_power_w"],
+            num_gpus=num_gpus,
+            budget=budget,
+            combined_w=ppw.get("combined_avg_power_w"),
         )
         basis_fields: list[tuple[str, str]] = []
         if cpu_estimated and budget is not None:
