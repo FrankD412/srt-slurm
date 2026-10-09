@@ -495,7 +495,7 @@ class TestCollection:
         assert {row.hostname for row in rows} == {"node-a", "node-b"}
         assert {row.scrape_seq for row in rows} == {0}
 
-    def test_idle_gpus_on_a_worker_node_are_not_recorded(self, tmp_path, exporters):
+    def test_idle_gpus_on_a_worker_node_are_recorded_without_invalidating(self, tmp_path, exporters):
         a = exporters(_body("a", count=2 * GPUS_PER_NODE))
         b = exporters(_body("b"))
         session = _session(tmp_path, _endpoints(("node-a", a.url), ("node-b", b.url)))
@@ -505,24 +505,27 @@ class TestCollection:
         outcome = session.stop_and_finalize()
 
         rows, _ = read_samples(session.power_dir / SAMPLES_FILENAME)
-        assert written == 2 * GPUS_PER_NODE
+        assert written == 3 * GPUS_PER_NODE
         assert {(row.hostname, row.gpu_index) for row in rows} == {
-            (node, index) for node in ("node-a", "node-b") for index in range(GPUS_PER_NODE)
+            *(("node-a", index) for index in range(2 * GPUS_PER_NODE)),
+            *(("node-b", index) for index in range(GPUS_PER_NODE)),
         }
         assert Reason.UNEXPECTED_DEVICE not in outcome.reason_codes
         assert Reason.EXPECTED_DEVICE_MISSING not in outcome.reason_codes
 
-    def test_a_node_without_workers_keeps_every_gpu(self, tmp_path, exporters):
+    def test_gpus_on_a_node_without_workers_invalidate_publication(self, tmp_path, exporters):
         a = exporters(_body("a"))
         pool = exporters(_body("p"))
         session = _session(tmp_path, _endpoints(("node-a", a.url), ("node-b", pool.url)), processes=_processes()[:1])
         session.initialize()
 
         session.collect_once()
-        session.stop_and_finalize()
+        outcome = session.stop_and_finalize()
 
         rows, _ = read_samples(session.power_dir / SAMPLES_FILENAME)
         assert {row.gpu_index for row in rows if row.hostname == "node-b"} == set(range(GPUS_PER_NODE))
+        assert Reason.UNEXPECTED_DEVICE in outcome.reason_codes
+        assert outcome.publication_valid is False
 
     def test_terminal_manifest_records_the_samples_digest(self, tmp_path, exporters):
         endpoint = exporters(_body("a"))
@@ -888,6 +891,29 @@ class TestPublication:
             power_dir=session.power_dir,
             result_root=session.power_dir.parent,
         )
+        assert report.ok is True, report.failures
+
+    def test_exclusive_node_with_idle_gpus_publishes(self, tmp_path, exporters):
+        """A B300 run using four of eight GPUs per node: the idle four are kept and the run publishes."""
+        a = exporters(_body("a", count=2 * GPUS_PER_NODE))
+        b = exporters(_body("b", count=2 * GPUS_PER_NODE))
+        session = _session(tmp_path, _endpoints(("node-a", a.url), ("node-b", b.url)), sample_interval_seconds=0.2)
+        session.initialize()
+        assert session.start_and_wait_for_readiness() is True
+
+        start = time.time()
+        time.sleep(0.6)
+        end = time.time()
+        self._write_window_and_result(session, start, end)
+
+        outcome = session.stop_and_finalize(allow_window_mutation=True)
+        manifest = _manifest(session)
+
+        assert outcome.publication_valid is True
+        assert outcome.reason_codes == ()
+        assert len(manifest["observed_devices"]) == 4 * GPUS_PER_NODE
+        assert len(manifest["window_validations"][0]["per_device_max_sample_gap_seconds"]) == 2 * GPUS_PER_NODE
+        report = validate_power_artifacts(power_dir=session.power_dir, result_root=session.power_dir.parent)
         assert report.ok is True, report.failures
 
     def test_digest_io_failure_is_not_reclassified_as_malformed(self, tmp_path, exporters):

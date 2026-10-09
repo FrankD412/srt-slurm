@@ -116,15 +116,21 @@ def validate_devices(
     expected: Sequence[ExpectedDevice],
     observed: Sequence[ObservedDevice],
 ) -> DeviceValidation:
-    """Require a non-empty expected set that exactly matches stable observations."""
+    """Require every expected device to be observed with a stable identity.
+
+    A worker node's exporter reports every GPU on the node, including the ones no
+    worker occupies. Those rows stay in ``samples.csv`` as evidence and do not
+    invalidate the run; a GPU is unexpected only on a node that hosts no worker.
+    """
     reasons: list[str] = []
 
     expected_keys = {device.key for device in expected}
     observed_keys = {device.key for device in observed}
+    worker_hosts = {hostname for hostname, _ in expected_keys}
 
     if not expected_keys or expected_keys - observed_keys:
         reasons.append(Reason.EXPECTED_DEVICE_MISSING)
-    if observed_keys - expected_keys:
+    if any(hostname not in worker_hosts for hostname, _ in observed_keys - expected_keys):
         reasons.append(Reason.UNEXPECTED_DEVICE)
     # NOTE: a UUID must map 1:1 to a device key, or one physical GPU is counted twice.
     if any(len(device.gpu_uuids) != 1 for device in observed):

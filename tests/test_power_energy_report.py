@@ -430,6 +430,26 @@ def test_load_gpu_roles_and_per_role_aggregation(tmp_path: Path) -> None:
     assert list(prefill_watts) == [100.0, 110.0]  # only gpu0, which is solely "prefill"
 
 
+def test_unoccupied_gpu_is_kept_per_device_but_not_in_node_energy(tmp_path: Path) -> None:
+    """An exclusive node also reports GPUs no worker occupies; they must not inflate node energy."""
+    gpu_csv = tmp_path / "samples.csv"
+    with gpu_csv.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            ["schema_version", "timestamp_unix", "scrape_seq", "hostname", "gpu_index", "gpu_uuid", "power_w"]
+        )
+        for timestamp in (10.0, 11.0):
+            writer.writerow([1, timestamp, 0, "node-a", 0, "GPU-a", 700.0])
+            writer.writerow([1, timestamp, 0, "node-a", 1, "GPU-idle", 90.0])
+
+    with_manifest = load_gpu_samples(gpu_csv, {("node-a", 0): {"decode"}})
+    without_manifest = load_gpu_samples(gpu_csv, None)
+
+    assert list(with_manifest.per_node["node-a"][1]) == [700.0, 700.0]
+    assert list(with_manifest.per_device[("node-a", 1)][1]) == [90.0, 90.0]
+    assert list(without_manifest.per_node["node-a"][1]) == [790.0, 790.0]
+
+
 # ---------------------------------------------------------------------------
 # Discovery + end-to-end
 # ---------------------------------------------------------------------------

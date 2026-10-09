@@ -675,6 +675,23 @@ class TestDeviceValidation:
         assert result.valid is False
         assert Reason.UNEXPECTED_DEVICE in result.reason_codes
 
+    def test_unoccupied_gpu_on_a_worker_node_is_valid(self):
+        """An exclusive node's exporter also reports the GPUs no worker occupies."""
+        rows = [*self._rows(), SampleRow(1000.0, 0, "node-a", 2, "GPU-a2", 90.0)]
+
+        result = validate_devices(self._expected(), derive_observed_devices(rows))
+
+        assert result.valid is True
+        assert result.reason_codes == ()
+
+    def test_unoccupied_gpu_does_not_hide_a_missing_worker_gpu(self):
+        rows = [*self._rows()[1:], SampleRow(1000.0, 0, "node-a", 2, "GPU-a2", 90.0)]
+
+        result = validate_devices(self._expected(), derive_observed_devices(rows))
+
+        assert result.valid is False
+        assert result.reason_codes == (Reason.EXPECTED_DEVICE_MISSING,)
+
     def test_changed_uuid_invalidates(self):
         rows = [*self._rows(), SampleRow(1001.0, 1, "node-a", 0, "GPU-swapped", 400.0)]
 
