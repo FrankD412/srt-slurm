@@ -44,18 +44,32 @@ from srtctl.backends import (
     MockerBackend,
     SGLangBackend,
     TileRTBackend,
+    TokenSpeedBackend,
     TRTLLMBackend,
     VLLMBackend,
     VLLMMooncakeKVStoreConfig,
 )
 from srtctl.backends.base import RoleSettings, WorkerMode
+from srtctl.backends.trtllm import (
+    trtllm_mooncake_block_only_key_problem,
+    trtllm_mooncake_role_key_problem,
+    trtllm_mooncake_store_config_problem,
+)
 from srtctl.core.formatting import (
     FormattablePath,
     FormattablePathField,
 )
 
-# Leaf module (stdlib-only imports), so this cannot cycle back into schema.
-from srtctl.core.power.contract import CONTAINER_LOG_DIR
+# Leaf modules (stdlib and prometheus-free imports), so these cannot cycle back into schema.
+from srtctl.core.power.contract import (
+    CONTAINER_LOG_DIR,
+    GPU_UTIL_METRIC,
+    SM_ACTIVE_METRIC,
+    TEMPERATURE_METRIC,
+    UTILIZATION_METRICS,
+    UtilizationMetric,
+)
+from srtctl.core.power.mapping import DCGM_POWER_MAPPING, PowerMetricMapping
 from srtctl.core.roles import COLOCATE, PER_ROLE_ENGINE_KEYS, ROLE_NAMES, ROLE_TO_MODE
 from srtctl.core.source import DynamoSourceConfig, is_commit_sha
 from srtctl.ports import DYNAMO_SIDECAR_GRPC_PORT
@@ -496,7 +510,16 @@ class BackendConfigField(fields.Field):
         if value is None:
             return SGLangBackend()
 
-        if isinstance(value, AtomBackend | SGLangBackend | TileRTBackend | TRTLLMBackend | VLLMBackend | MockerBackend):
+        if isinstance(
+            value,
+            AtomBackend
+            | SGLangBackend
+            | TileRTBackend
+            | TokenSpeedBackend
+            | TRTLLMBackend
+            | VLLMBackend
+            | MockerBackend,
+        ):
             return value
 
         if isinstance(value, str):
@@ -519,6 +542,8 @@ class BackendConfigField(fields.Field):
             return AtomBackend.Schema().load(value)
         elif backend_type == "tilert":
             return TileRTBackend.Schema().load(value)
+        elif backend_type == "tokenspeed":
+            return TokenSpeedBackend.Schema().load(value)
         elif backend_type == "sglang":
             schema = SGLangBackend.Schema()
             return schema.load(value)
@@ -533,7 +558,7 @@ class BackendConfigField(fields.Field):
             return schema.load(value)
         else:
             raise ValidationError(
-                f"Unknown engine type: {backend_type!r}. Supported types: atom, sglang, tilert, trtllm, vllm, mocker"
+                f"Unknown engine type: {backend_type!r}. Supported types: atom, sglang, tilert, tokenspeed, trtllm, vllm, mocker"
             )
 
     def _serialize(self, value: Any | None, attr: str | None, obj: Any, **kwargs) -> Any:
@@ -550,6 +575,8 @@ class BackendConfigField(fields.Field):
             return AtomBackend.Schema().dump(value)
         if isinstance(value, TileRTBackend):
             return TileRTBackend.Schema().dump(value)
+        if isinstance(value, TokenSpeedBackend):
+            return TokenSpeedBackend.Schema().dump(value)
         if isinstance(value, SGLangBackend):
             return SGLangBackend.Schema().dump(value)
         if isinstance(value, TRTLLMBackend):
@@ -802,7 +829,7 @@ class RoleConfig(RoleSettings):
     worker, its environment and engine arguments, and optionally its own engine and
     image. ``SrtConfig.topology`` derives the per-role counts the launch path reads;
     ``SrtConfig.backend`` binds the roles onto the engine, which reads ``env`` / ``args`` /
-    ``extra_args`` / ``kv_events`` from them.
+    ``extra_args`` / ``kv_events`` / ``mooncake_store_config`` from them.
     """
 
     # Nodes reserved for this role. `colocate` (decode only) reserves none and packs the
@@ -829,6 +856,9 @@ class RoleConfig(RoleSettings):
     container: str | None = None
     # `true` for the default ZMQ publisher, or a mapping with `publisher` / `topic`.
     kv_events: bool | dict[str, Any] | None = None
+    # TRT-LLM only: Mooncake client config keys for this role's workers (`role`, `global_segment_size`,
+    # ...), layered over the `mooncake-master` service's `options.store_config`. Pool-wide keys stay there.
+    mooncake_store_config: dict[str, Any] = field(default_factory=dict)
     # Run the native engine with a Dynamo sidecar (turns on `dynamo.sidecar`); every role must agree.
     sidecar: bool | None = field(
         default=None,
@@ -1179,6 +1209,10 @@ class BenchmarkConfig:
     # Custom dataset fields (sa-bench)
     dataset_name: str | None = None  # "random" (default) or "custom"
     dataset_path: str | None = None  # Container path to dataset file (mount via extra_mount)
+    # Host dir where sa-bench caches generated "random" datasets so repeated sweeps
+    # skip the (minutes-long) tokenize/decode prompt build. Mounted into the
+    # benchmark container by SABenchRunner.
+    dataset_cache_dir: str | None = None
     # AgentPerf benchmark fields (agentperf-client trajectory replay)
     agentperf_client_dir: str | None = None  # Container path to an agentperf-client checkout (mount via extra_mount)
     # Container path to the client's workload YAML (endpoint/model/concurrency injected)
@@ -1187,6 +1221,8 @@ class BenchmarkConfig:
     trace_file: str | None = None  # Path to trace JSONL file (container path, e.g., /traces/dataset.jsonl)
     custom_tokenizer: str | None = None  # Custom tokenizer class (e.g., "module.path.ClassName")
     use_chat_template: bool = True  # Pass --use-chat-template to benchmark (default: true)
+    # SA-Bench API path (see benchmark_serving.py --endpoint).
+    endpoint: str | None = None  # default: /v1/completions
     # SA-Bench Dynamo adapter: reuse a benchmark-scoped HTTP connection pool.
     # Opt-in to preserve the historical per-request ClientSession behavior.
     reuse_http_connections: bool = False
@@ -1271,6 +1307,9 @@ class ProfilingConfig:
 
     # Non-TRT-LLM behavior when cudaProfilerStop closes a capture range.
     capture_range_end: str = "stop"
+
+    # Adds detailed nvtx marker flag for vLLM
+    detailed_trace_annotation: bool = False
 
     # Optional paths prepended to LD_LIBRARY_PATH for the Nsight wrapper and
     # profiled worker, for containers that do not discover the host libcuda.
@@ -1513,6 +1552,77 @@ class ProfilingConfig:
 
 
 @dataclass(frozen=True)
+class GpuLabelsConfig:
+    """The labels that identify a GPU in every sample of a GPU exporter's scrape."""
+
+    # Label carrying the node-local GPU index srt-slurm allocates by.
+    index: str
+    # Label that is stable for one physical GPU across the run; recorded as `gpu_uuid`.
+    identity: str
+    # Labels marking logical sub-device samples (MIG instances, partitions); such samples are dropped.
+    instance: list[str] = field(default_factory=list)
+
+    Schema: ClassVar[type[Schema]] = Schema
+
+
+@dataclass(frozen=True)
+class GpuMetricConfig:
+    """One per-GPU metric in a GPU exporter's scrape."""
+
+    # Prometheus metric name.
+    metric: str
+
+    Schema: ClassVar[type[Schema]] = Schema
+
+
+@dataclass(frozen=True)
+class GpuPowerMetricConfig:
+    """The per-GPU power metric in a GPU exporter's scrape, in watts."""
+
+    # Prometheus metric name.
+    metric: str
+    # What the watts measure, recorded in the power manifest as `power_scope`.
+    scope: str
+
+    Schema: ClassVar[type[Schema]] = Schema
+
+
+@dataclass(frozen=True)
+class GpuMetricsConfig:
+    """The per-GPU metrics GPU power telemetry records from a GPU exporter.
+
+    `power` is required; the others are optional and their columns stay empty
+    when unset. Units are fixed by the artifact: `gpu_util` is a percent,
+    `sm_active` a 0-1 fraction, and `temperature` Celsius.
+    """
+
+    # Power draw in watts.
+    power: GpuPowerMetricConfig
+    # GPU utilization, percent.
+    gpu_util: GpuMetricConfig | None = None
+    # DCGM's SM-active fraction, 0-1; map only a metric with that meaning and range.
+    sm_active: GpuMetricConfig | None = None
+    # GPU temperature, Celsius.
+    temperature: GpuMetricConfig | None = None
+
+    Schema: ClassVar[type[Schema]] = Schema
+
+
+# DCGM, the default for exporter blocks that set neither `gpu_labels` nor `gpu_metrics`.
+DCGM_GPU_LABELS = GpuLabelsConfig(
+    index=DCGM_POWER_MAPPING.gpu_index_label,
+    identity=DCGM_POWER_MAPPING.gpu_identity_label,
+    instance=list(DCGM_POWER_MAPPING.instance_labels),
+)
+DCGM_GPU_METRICS = GpuMetricsConfig(
+    power=GpuPowerMetricConfig(metric=DCGM_POWER_MAPPING.power_metric, scope=DCGM_POWER_MAPPING.power_scope),
+    gpu_util=GpuMetricConfig(metric=GPU_UTIL_METRIC),
+    sm_active=GpuMetricConfig(metric=SM_ACTIVE_METRIC),
+    temperature=GpuMetricConfig(metric=TEMPERATURE_METRIC),
+)
+
+
+@dataclass(frozen=True)
 class TelemetryExporterConfig:
     """Configuration for a metrics exporter deployed on worker nodes.
 
@@ -1537,8 +1647,45 @@ class TelemetryExporterConfig:
     command: str | None = None
     # Host executable to run without a container; relative paths resolve against the srtctl checkout.
     binary: str | None = None
+    # GPU exporter kind: `dcgm` (built-in DCGM command, labels, metrics and tachometer
+    # scrape) or `custom` (any other exporter; set `command`, `gpu_labels` and
+    # `gpu_metrics`, and tachometer keeps its rows as served).
+    kind: Literal["dcgm", "custom"] = "dcgm"
+    # GPU power telemetry: labels identifying a GPU in the scrape; unset means DCGM (`gpu`, `UUID`).
+    gpu_labels: GpuLabelsConfig | None = None
+    # GPU power telemetry: per-GPU metrics to record; unset means DCGM.
+    gpu_metrics: GpuMetricsConfig | None = None
 
     Schema: ClassVar[type[Schema]] = Schema
+
+    def __post_init__(self) -> None:
+        if self.kind == "dcgm" and self.gpu_labels is not None:
+            raise ValidationError("`gpu_labels` needs `kind: custom`; a `kind: dcgm` exporter uses DCGM's labels")
+        if self.kind == "custom" and (
+            (self.command is None and self.binary is None) or self.gpu_labels is None or self.gpu_metrics is None
+        ):
+            raise ValidationError("a `kind: custom` GPU exporter needs `command`, `gpu_labels` and `gpu_metrics`")
+
+    @property
+    def power_mapping(self) -> PowerMetricMapping:
+        """How the power collector reads this exporter's scrape."""
+        labels = self.gpu_labels or DCGM_GPU_LABELS
+        metrics = self.gpu_metrics or DCGM_GPU_METRICS
+        contract = {metric.column: metric for metric in UTILIZATION_METRICS}
+        riders = (("gpu_util_pct", metrics.gpu_util), ("sm_active", metrics.sm_active))
+        return PowerMetricMapping(
+            power_metric=metrics.power.metric,
+            power_scope=metrics.power.scope,
+            gpu_index_label=labels.index,
+            gpu_identity_label=labels.identity,
+            utilization_metrics=tuple(
+                UtilizationMetric(column, rider.metric, contract[column].unit, contract[column].max_value)
+                for column, rider in riders
+                if rider is not None
+            ),
+            instance_labels=tuple(labels.instance),
+            temperature_metric=metrics.temperature.metric if metrics.temperature is not None else None,
+        )
 
 
 # Built-in exporter defaults (sweep path only; the --bash lifecycle keys on the
@@ -1700,7 +1847,11 @@ class NsysObservabilityConfig:
 
 @dataclass(frozen=True)
 class ObservabilityConfig:
-    """Observability configuration for OTEL tracing.
+    """Optional analytics capture and external OTEL export.
+
+    Dynamo stacks always enable native request-lifecycle OTEL tracing to a
+    managed local collector, independent of ``enabled`` and ``enable_otel``.
+    Other frontend stacks do not receive that collector or its environment.
 
     When enable_otel is True, OTEL environment variables (DYN_LOGGING_JSONL,
     OTEL_EXPORT_ENABLED, OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, OTEL_SERVICE_NAME)
@@ -1743,11 +1894,13 @@ class ObservabilityConfig:
     ``BenchmarkStageMixin``.)
 
     Attributes:
-        enabled: Master analytics knob. Default: False.
-        enable_otel: If True, inject OTEL environment variables into all workers
-            and frontends. Requires otel_endpoint to be set. Default: False.
-        otel_endpoint: OTEL collector endpoint (e.g. "http://10.0.0.1:4317").
-            Required when enable_otel is True.
+        enabled: Additional analytics (including nsys); does not gate Dynamo
+            lifecycle tracing or Tachometer. Default: False.
+        enable_otel: Export traces to an explicit endpoint and enable JSONL logs.
+            Not needed for default Dynamo lifecycle capture. Requires
+            otel_endpoint to be set. Default: False.
+        otel_endpoint: Explicit OTEL trace endpoint (e.g. "http://10.0.0.1:4317").
+            Used with enable_otel; overrides Dynamo's local trace destination.
         nsys: Automatic Nsight Systems capture, enabled with the master switch.
         tachometer: Native Tachometer capture configuration. Collects on every run,
             independent of ``enabled``, unless ``tachometer.enabled: false`` (see
@@ -1795,8 +1948,13 @@ class CpuPowerConfig:
 
     Attributes:
         enabled: Master switch for this leg. Default: False.
-        source: ``auto`` tries ACPI then DCGM and is best-effort; naming
-            ``acpi`` or ``dcgm`` explicitly makes that provider mandatory.
+        source: ``auto`` uses ACPI when some socket-total sensor reads a
+            positive value, else DCGM fields 1130+1132, else 1130 alone
+            (either DCGM rung accepted only if some socket reads a positive
+            1130; SysIO alone cannot vouch),
+            logging each step down; naming ``acpi`` or ``dcgm`` explicitly
+            makes that provider mandatory (it still proves itself, but exits
+            instead of stepping).
         sample_interval_seconds: Read period on each node, in seconds.
         startup_timeout_seconds: How long to wait for every node's collector
             to publish its ready marker before giving up on readiness.
@@ -1825,17 +1983,26 @@ class CpuPowerExporterConfig:
     containerized -- cpu-power-exporter is a bundled binary installed by
     make setup, launched directly on the bare worker host, with a fallback
     to the Python stdlib exporter when the binary is absent.
+
+    Attributes:
+        port: TCP port the per-node exporter listens on for ``/metrics``.
+        source: Power reading back-end passed through to the bundled Rust
+            binary's own ``--source`` flag (``auto`` | ``acpi`` | ``dcgm``).
+            ``auto`` tries ACPI first (the only source with the socket
+            envelope) and falls back to DCGM when no ACPI power_meter hwmon
+            sensors exist or no socket-total sensor reads positive on two
+            probes; DCGM watches fields 1130+1132 and falls back to 1130 alone
+            if this libdcgm refuses the pair, and is accepted only if some
+            socket reads a positive 1130. DCGM mode reports field 1130 = the
+            CPU rail (plus 1132 = SysIO), about half the ACPI envelope, and
+            the energy report flags such runs as "CPU rail only". Has no
+            effect when the Python stdlib fallback exporter is used instead of
+            the binary -- that fallback is ACPI-only.
     """
 
     # Port the exporter listens on and the head-node collector scrapes.
     port: int = 9405
     source: Literal["auto", "acpi", "dcgm"] = "auto"
-    """Power reading back-end passed through to the bundled Rust binary's own
-    ``--source`` flag (``auto`` | ``acpi`` | ``dcgm``). ``auto`` tries DCGM
-    first and falls back to ACPI when libdcgm.so is absent or reports no CPU
-    entities. Has no effect when the Python stdlib fallback exporter is used
-    instead of the binary -- that fallback is ACPI-only.
-    """
 
     Schema: ClassVar[type[Schema]] = Schema
 
@@ -1844,9 +2011,10 @@ class CpuPowerExporterConfig:
 class TelemetryConfig:
     """DCGM power telemetry for benchmark measurement windows."""
 
-    # Collect DCGM GPU power over each benchmark concurrency window.
+    # Collect GPU power over each benchmark concurrency window.
     enabled: bool = False
-    # DCGM exporter image, port, and optional command; required when `enabled`.
+    # GPU power exporter image, port, command, labels and metrics. When `enabled` with
+    # no exporter and no CPU leg, the cluster `default_gpu_exporter` is used.
     dcgm_exporter: TelemetryExporterConfig | None = None
     # Milliseconds between collector cycles. Replaces the retired
     # ``default_frequency``, which despite its name was a period in seconds
@@ -2339,15 +2507,20 @@ class DynamoConfig:
             return {}
         return {"DYNAMO_WHEEL_NAME": f"ai_dynamo-{version}-py3-none-any.whl", "DYNAMO_VERSION": version}
 
-    def get_install_commands(self) -> str:
+    def get_install_commands(self, *, serialize: bool = True) -> str:
         """Get the bash commands to install dynamo.
 
         The returned command is wrapped in a node-local flock + sentinel so
         that co-located srun tasks (``--ntasks-per-node > 1``, e.g. TRTLLM)
         install once per node instead of racing concurrent pip installs into
         the shared container site-packages. See ``_serialize_node_install``.
+
+        Pass ``serialize=False`` when baking the install into a container image:
+        there is a single task, and the sentinel would otherwise be captured in
+        the image and make every later job skip its own install.
         """
-        return _serialize_node_install(self._build_install_commands())
+        raw = self._build_install_commands()
+        return _serialize_node_install(raw) if serialize else raw
 
     def _build_install_commands(self) -> str:
         """Build the raw (unserialized) dynamo install command."""
@@ -2396,7 +2569,9 @@ class FrontendConfig:
 
     Attributes:
         type: Frontend type - "dynamo" (default); "sglang-router" (SGLang Model
-            Gateway), "vllm-router", "atomesh", and "tilert-router" (static routers); "sglang", "vllm", and
+            Gateway), "vllm-router", "smg" (Shepherd Model Gateway, any backend), "llm-d"
+            (llm-d Endpoint Picker behind Envoy, vLLM), "atomesh", and
+            "tilert-router" (static routers); "sglang", "vllm", and
             "trtllm_serve" (direct: the single aggregate worker binds the public
             port, no router process); "none" (services-only job: no router, no
             OpenAI endpoint, no worker-count health gate; requires no engine
@@ -2429,6 +2604,13 @@ class FrontendConfig:
             writes this mapping under the top-level ``worker_selection`` key in a
             generated router policy YAML and passes it to the Dynamo frontend via
             ``--router-policy-config``.
+        epp_config: llm-d Endpoint Picker configuration (``EndpointPickerConfig``:
+            ``plugins``, ``schedulingProfiles``, ...) for ``frontend.type: llm-d``.
+            srtctl writes it to a file with the ``file-discovery`` plugin and
+            ``dataLayer.discovery`` added, so the EPP reads the job's workers from
+            the endpoints file srtctl renders. Omitted, srtctl runs the scorers of
+            llm-d's no-Kubernetes guide (in prefill and decode profiles for a
+            prefill/decode job).
         args: CLI arguments passed to the frontend/router process
         env: Environment variables for frontend processes
         container_image: Optional router-specific image. Static routers use the
@@ -2448,6 +2630,7 @@ class FrontendConfig:
     nginx_session_affinity_header: str = "X-Dynamo-Session-ID"
     nginx_keepalive_timeout: str = "600s"
     worker_selection: dict[str, Any] | None = None
+    epp_config: dict[str, Any] | None = None
     args: dict[str, Any] | None = None
     env: dict[str, str] | None = None
     container_image: str | None = None
@@ -3049,16 +3232,18 @@ class SrtConfig:
         schema does not know individual frontends. ``none`` is the services-only
         job and is covered by ``_validate_services_only``.
         """
-        if self.frontend.type == "none":
-            return
         from srtctl.frontends import get_frontend, list_frontend_types
 
         try:
-            frontend = get_frontend(self.frontend.type)
+            frontend = None if self.frontend.type == "none" else get_frontend(self.frontend.type)
         except ValueError:
             raise ValidationError(
                 f"Unknown frontend.type {self.frontend.type!r}. Available: {', '.join(list_frontend_types())}"
             ) from None
+        if self.frontend.epp_config is not None and (frontend is None or not frontend.accepts_epp_config):
+            raise ValidationError(f"frontend.epp_config is not supported with frontend.type: {self.frontend.type}")
+        if frontend is None:
+            return
         required = frontend.required_backend
         incompatible = [
             f"{role}={backend.type}" for role, backend in self.active_role_backends() if backend.type != required
@@ -3144,6 +3329,10 @@ class SrtConfig:
         ``MooncakeConnector``), the master we launch is unused and workers fall
         back to the default transport — almost never what the user intends.
         """
+        self._validate_role_mooncake_store_config()
+        if isinstance(self.backend, TRTLLMBackend):
+            self._validate_trtllm_mooncake_store(self.backend)
+            return
         mooncake_cfg = self.backend.mooncake_kv_store
         if mooncake_cfg is None:
             return
@@ -3205,6 +3394,117 @@ class SrtConfig:
                     "one) so workers actually use the mooncake master srtslurm launches "
                     "for you."
                 )
+
+    def _validate_role_mooncake_store_config(self) -> None:
+        """``roles.<role>.mooncake_store_config`` is read by a TRT-LLM role's engine only."""
+        for role, spec in self.roles.items():
+            if spec.mooncake_store_config and not isinstance(self.role_backends.get(role, self.backend), TRTLLMBackend):
+                raise ValidationError(
+                    f"roles.{role}.mooncake_store_config is read by TRT-LLM only. For SGLang, set per-role Mooncake "
+                    "settings as MOONCAKE_* variables in roles.<role>.env; for vLLM, in the mooncake-master "
+                    "service's options.store_config."
+                )
+
+    def _validate_trtllm_mooncake_store(self, backend: TRTLLMBackend) -> None:
+        """TRT-LLM's Mooncake Store connector against the master srtslurm launches.
+
+        With a ``mooncake-master`` service, srtslurm renders each connector role's
+        client config and points ``MOONCAKE_CONFIG_PATH`` at it, which TRT-LLM reads
+        before its ``kv_connector_config.mooncake_store`` block. Everything checked
+        here would otherwise fail in every rank after the model has loaded.
+        """
+        store = backend.mooncake_kv_store
+        modes = backend.mooncake_store_modes()
+        role_keys = {
+            role: dict(spec.mooncake_store_config) for role, spec in self.roles.items() if spec.mooncake_store_config
+        }
+        if store is None:
+            if role_keys:
+                raise ValidationError(
+                    f"roles.{min(role_keys)}.mooncake_store_config needs a mooncake-master service: srtslurm writes "
+                    "it into the client config it renders for the master's pool"
+                )
+            self._validate_trtllm_own_mooncake_pool(backend, modes)
+            return
+        if any(s.enabled and s.type == "mooncake-master" and s.external for s in self.services):
+            raise ValidationError(
+                "an external mooncake-master is not supported for TRT-LLM: srtslurm renders each role's "
+                "master_server_address from the infra node, where nothing would be listening"
+            )
+        if not modes:
+            raise ValidationError(
+                "a mooncake-master service is configured but no roles.<role>.args.kv_connector_config resolves to "
+                "the Mooncake Store connector (connector: mooncake-store, with connector_module unset or "
+                "tensorrt_llm._torch.pyexecutor.connectors.mooncake_store), so no TRT-LLM worker would use the master."
+            )
+        for mode in modes:
+            if backend.get_config_for_mode(mode)["kv_connector_config"].get("mooncake_store") is not None:
+                raise ValidationError(
+                    f"roles.{mode}.args.kv_connector_config.mooncake_store is set, but with a mooncake-master "
+                    "service srtslurm gives this role its Mooncake client config through MOONCAKE_CONFIG_PATH, "
+                    "which TRT-LLM reads instead of that block. Remove the block and put its settings in the "
+                    "service's options.store_config or roles.<role>.mooncake_store_config (segment_size is "
+                    "global_segment_size there; pool, run_dir, and master_timeout have no equivalent)."
+                )
+        unused = sorted(set(role_keys) - set(modes))
+        if unused:
+            raise ValidationError(
+                f"roles.{unused[0]}.mooncake_store_config is set, but only {list(modes)} use the Mooncake Store "
+                "connector"
+            )
+        sources = {"mooncake-master options.store_config": store.store_config or {}}
+        sources.update({f"roles.{role}.mooncake_store_config": keys for role, keys in role_keys.items()})
+        for where, keys in sources.items():
+            problem = trtllm_mooncake_block_only_key_problem(keys)
+            if problem is None and where.startswith("roles."):
+                problem = trtllm_mooncake_role_key_problem(keys)
+            if problem is not None:
+                raise ValidationError(f"{where}: {problem}")
+        served_model_name = backend.get_served_model_name("<model directory name>")
+        for mode in modes:
+            problem = trtllm_mooncake_store_config_problem(
+                backend.build_mooncake_store_config(mode, "<infra_ip>", served_model_name)
+            )
+            if problem is not None:
+                raise ValidationError(f"Mooncake client config for roles.{mode}: {problem}")
+
+    def _validate_trtllm_own_mooncake_pool(self, backend: TRTLLMBackend, modes: tuple[WorkerMode, ...]) -> None:
+        """Connector roles without a mooncake-master service must find a client config themselves.
+
+        Every rank runs under trtllm-llmapi-launch, so a MOONCAKE_CONFIG_PATH that trtllm-serve
+        exports never reaches it: ranks read the config trtllm-serve rendered back from
+        ``mooncake_store.run_dir``, which one server claims for itself. ``dynamo.trtllm``
+        renders none; a Dynamo sidecar engine is ``tensorrt_llm.commands.serve`` and does.
+        """
+        from srtctl.frontends import get_frontend
+
+        workers = {
+            "prefill": self.topology.num_prefill,
+            "decode": self.topology.num_decode,
+            "agg": self.topology.num_agg,
+        }
+        run_dirs: dict[str, WorkerMode] = {}
+        for mode in modes:
+            if "MOONCAKE_CONFIG_PATH" in {**self.environment, **backend.get_environment_for_mode(mode)}:
+                continue
+            block = backend.get_config_for_mode(mode)["kv_connector_config"].get("mooncake_store")
+            run_dir = block.get("run_dir") if isinstance(block, Mapping) else None
+            serve_renders = self.dynamo.sidecar or get_frontend(self.frontend.type).worker_launch == "direct"
+            if not run_dir or not serve_renders:
+                raise ValidationError(
+                    f"roles.{mode}.args.kv_connector_config selects the mooncake-store connector, but its workers "
+                    "would not find a Mooncake client config. Declare a mooncake-master service: srtslurm then "
+                    "launches the master and gives this role its config through MOONCAKE_CONFIG_PATH. (Without "
+                    f"one, set MOONCAKE_CONFIG_PATH in roles.{mode}.env, or, when trtllm-serve runs the engine, "
+                    "a mooncake_store block with run_dir.)"
+                )
+            if workers[mode] > 1 or run_dir in run_dirs:
+                raise ValidationError(
+                    f"roles.{mode}.args.kv_connector_config.mooncake_store.run_dir {run_dir!r} would be shared by "
+                    "several servers, and TRT-LLM lets one live server own a run_dir. Give each role its own "
+                    "run_dir and one worker, or declare a mooncake-master service."
+                )
+            run_dirs[run_dir] = mode
 
     def _profiling_worker_ranks(self, mode: WorkerMode) -> set[int]:
         """Derive selectable physical ranks from the configured worker layout."""

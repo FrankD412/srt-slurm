@@ -24,6 +24,7 @@ def _runtime() -> SimpleNamespace:
     return SimpleNamespace(
         model_path=Path("/model"),
         is_hf_model=False,
+        worker_model_arg="/model",
         frontend_port=8000,
         network_interface="ib0",
         request_plane="nats",
@@ -426,7 +427,7 @@ def test_dp_size_one_is_not_a_distributed_launch_mode() -> None:
     backend = VLLMBackend(roles={"agg": RoleConfig(args={"data-parallel-size": 1})})
 
     assert backend.find_dp_modes() == []
-    assert backend._is_dp_mode("agg") is False
+    assert backend.is_dp_mode("agg") is False
 
 
 def test_router_validates_pcp_as_part_of_the_vllm_world_size() -> None:

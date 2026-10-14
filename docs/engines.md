@@ -13,8 +13,33 @@ and `default_sbatch_directives: {gres: "gpu:8"}`.
 Set `visible_devices_env: ROCR_VISIBLE_DEVICES` in the cluster profile for ROCm
 workers. GPU subsets then use only that mask, without applying a second mask to
 already-renumbered devices. Set `default_gpu_exporter: null` to disable the
-NVIDIA GPU exporter, or configure an exporter image, port, and command once for
-the cluster. Other telemetry is unchanged; an explicit recipe exporter wins.
+NVIDIA GPU exporter, or configure an exporter image, port, command and
+its `gpu_labels` and `gpu_metrics` once for the cluster. Other telemetry is unchanged; an explicit
+recipe exporter wins.
+
+```yaml
+visible_devices_env: ROCR_VISIBLE_DEVICES
+default_gpu_exporter:
+  container_image: "docker://rocm/device-metrics-exporter:v1.5.2"
+  command: "/home/amd/tools/entrypoint.sh"
+  port: 5000
+  kind: custom
+  gpu_labels:
+    index: gpu_id
+    identity: serial_number
+  gpu_metrics:
+    power:
+      metric: gpu_power_usage
+      scope: amd_device_metrics_exporter_gpu_power_usage
+    gpu_util:
+      metric: gpu_gfx_activity
+    temperature:
+      metric: gpu_junction_temperature
+```
+
+With this block a recipe that sets `telemetry: {enabled: true}` and nothing else
+under `telemetry` collects GPU power from the AMD exporter; see
+[GPU power telemetry](power-telemetry.md#gpu-exporter-labels-and-metrics).
 
 For vLLM builds without `--device-ids`, set `engine.set_visible_devices: true`.
 This is one explicit boolean, not automatic vLLM version detection. The default
@@ -119,7 +144,7 @@ Set `engine.dp_launch_mode: per_gpu` only when temporarily preserving the legacy
 
 When `TP x PP` fits on one node, srtslurm derives `--data-parallel-size-local` and `--data-parallel-start-rank`, then enables `--data-parallel-hybrid-lb` so every node-local process registers with the Dynamo frontend. When `TP x PP` is larger than the node-local GPU allocation, srtslurm instead derives the multi-node rendezvous arguments and makes every process except the global leader headless. For example, both DP4 x TP4 and DP2 x TP8 are selected automatically on four-GPU nodes.
 
-Do not set `data-parallel-size-local`, `data-parallel-start-rank`, `data-parallel-hybrid-lb`, or `headless` manually; srtslurm owns those values. The allocation must be regular: `DP x TP x PP` must match the endpoint GPU count, and a TP/PP replica must divide evenly within or across nodes.
+Do not set `data-parallel-size-local`, `data-parallel-start-rank`, `data-parallel-hybrid-lb`, or `headless` manually; srtslurm owns those values. Behind a router frontend, `data-parallel-external-lb: true` instead launches every DP rank as its own `vllm serve --data-parallel-rank <r>` on its own HTTP port, so the router addresses each rank ([llm-d](llm-d.md#routing-to-dp-ranks)). The allocation must be regular: `DP x TP x PP` must match the endpoint GPU count, and a TP/PP replica must divide evenly within or across nodes.
 
 ### TRT-LLM metrics publication
 
@@ -203,7 +228,67 @@ TRT-LLM endpoints also set `MASTER_ADDR` to the rank-zero node and use a distinc
 `MASTER_PORT` per endpoint. This overrides container hooks that infer rank zero
 from Slurm's sorted node list. Explicit recipe environment values take precedence.
 
+Every multi-node endpoint, uniform (two full nodes) or uneven, is launched with
+`--distribution=arbitrary` and one host per task in srt-slurm's node order, for
+example `--ntasks 8 --ntasks-per-node=4 --nodelist A,A,A,A,B,B,B,B` (the
+`--nodes` flag is omitted, as Slurm requires for this distribution). A plain
+`--nodelist` only names the nodes; Slurm may still order tasks by its own
+topology, which can put rank 0 on a node other than the `MASTER_ADDR` leader and
+stall the rendezvous. Single-node endpoints are unchanged. A `distribution` set in
+the cluster's or the role's `srun_options` is replaced for such an endpoint, with a
+warning in the job log.
+
 **Other TRT-LLM launch facts**: TRT-LLM supports prefill, decode, and aggregated roles, uses MPI-style launching (one srun per endpoint with all of its nodes) through `trtllm-llmapi-launch`, and sets `TRTLLM_EPLB_SHM_NAME` to a unique UUID per endpoint.
+
+### TRT-LLM DWDP prefill groups
+
+TRT-LLM's distributed-weight data-parallel prefill (DWDP, Kimi-K3 on GB300 / R200) runs
+N single-GPU `trtllm-serve` workers of one role as a single expert-sharded group:
+each worker keeps `num_experts_per_worker` experts resident and gathers the rest from
+its peers. The recipe spells it as N one-GPU workers whose engine args carry
+`dwdp_config`:
+
+```yaml
+roles:
+  prefill:
+    nodes: 4
+    workers: 16
+    gpus: 1
+    args:
+      tensor_parallel_size: 1
+      enable_attention_dp: true
+      dwdp_config:
+        dwdp_size: 16
+        num_groups: 1
+        num_experts_per_worker: 56
+        num_prefetch_experts: 56
+    extra_args: ["--server_role", "CONTEXT"]
+```
+
+Before loading weights the workers join a TCPStore rendezvous that TRT-LLM reads from
+the environment, so when a role's args have `dwdp_config` srtctl gives every worker of
+that role `TRTLLM_DWDP_RANK=<worker index>`, `TRTLLM_DWDP_MASTER_ADDR=<node of worker
+0>`, `TRTLLM_DWDP_MASTER_PORT=29600` and `TRTLLM_DWDP_RENDEZVOUS_TIMEOUT_S=3600`
+(the port and timeout, and the master address, can be pinned in the role env). The N
+processes would otherwise also share the model's `trust_remote_code` module cache and
+the CuTe DSL autotuner cache and race on them, so each worker gets a private `HOME`,
+`HF_MODULES_CACHE` and `TLLM_AUTOTUNER_CACHE_PATH` under
+`/logs/worker_priv/<role>_w<index>/` (created before the worker starts); a role env
+that sets any of the three keeps its value. `--server_role CONTEXT` is a plain
+`roles.prefill.extra_args` entry: TRT-LLM selects the single-copy FP4 MLA context
+cache from that flag and nothing else, so a DWDP prefill without it runs the two-copy
+cache (about 15% slower on Kimi-K3 R200). The group's N workers must fit the role's
+node count exactly as N x 1 GPU; a `dwdp_config` on a multi-GPU worker is left to
+TRT-LLM to reject.
+
+## TokenSpeed with Dynamo
+
+Use `engine: tokenspeed` with `frontend.type: dynamo` to launch
+`python3 -m dynamo.tokenspeed` workers, aggregated or prefill/decode. TokenSpeed flags
+go under `roles.<role>.args`; srtctl sets the model, host, ports and multi-node
+rendezvous. See [TokenSpeed](tokenspeed.md) and the
+[aggregated](https://github.com/NVIDIA/srt-slurm/blob/main/examples/tokenspeed/dynamo-agg.yaml) and
+[prefill/decode](https://github.com/NVIDIA/srt-slurm/blob/main/examples/tokenspeed/dynamo-disagg.yaml) recipes.
 
 ## ATOM with AToMesh
 

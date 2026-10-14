@@ -48,10 +48,12 @@ from srtctl.backends import (
     MockerBackend,
     SGLangBackend,
     TileRTBackend,
+    TokenSpeedBackend,
     TRTLLMBackend,
     VLLMBackend,
 )
 from srtctl.backends.sglang import MooncakeKVStoreConfig
+from srtctl.backends.trtllm import TRTLLMMooncakeKVStoreConfig
 from srtctl.backends.vllm import VLLMMooncakeKVStoreConfig
 from srtctl.benchmarks import SHARED_BENCHMARK_FIELDS, get_runner_class, list_benchmarks
 from srtctl.core.config import LEGACY_TOP_LEVEL_KEYS
@@ -77,6 +79,7 @@ BACKEND_TYPES: tuple[tuple[str, type], ...] = (
     ("atom", AtomBackend),
     ("sglang", SGLangBackend),
     ("tilert", TileRTBackend),
+    ("tokenspeed", TokenSpeedBackend),
     ("trtllm", TRTLLMBackend),
     ("vllm", VLLMBackend),
     ("mocker", MockerBackend),
@@ -102,7 +105,7 @@ _ENGINE_ROW = FieldDoc(
     type_label="str \\| mapping",
     default="optional when every role sets `engine`",
     description=(
-        "The engine type (`atom`, `sglang`, `tilert`, `trtllm`, `vllm`, `mocker`) as a string, or a mapping with `type` "
+        "The engine type (`atom`, `sglang`, `tilert`, `tokenspeed`, `trtllm`, `vllm`, `mocker`) as a string, or a mapping with `type` "
         "plus the engine-wide knobs listed under [Engine types](#engine-types)."
     ),
 )
@@ -384,6 +387,7 @@ INTERNAL_TOP_LEVEL: frozenset[str] = frozenset(LEGACY_TOP_LEVEL_KEYS)
 INTERNAL_CLASSES: frozenset[type] = frozenset(
     {
         MooncakeKVStoreConfig,
+        TRTLLMMooncakeKVStoreConfig,
         VLLMMooncakeKVStoreConfig,
     }
 )

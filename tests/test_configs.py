@@ -13,7 +13,6 @@ from srtctl.backends import SGLangBackend
 from srtctl.core.schema import PlacementConfig, SrtConfig, RoleConfig
 from srtctl.ports import (
     KV_EVENTS_PORT_BASE,
-    SGLANG_BOOTSTRAP_PORT_BASE,
     SGLANG_HTTP_PORT_BASE,
     SGLANG_HTTP_PORT_STRIDE,
     SGLANG_NCCL_PORT_BASE,
@@ -2004,7 +2003,8 @@ class TestVLLMPrefillDecodeColocation:
         assert prefill.node == decode.node == "node0"
         assert prefill.http_port == SGLANG_HTTP_PORT_BASE
         assert decode.http_port == SGLANG_HTTP_PORT_BASE + SGLANG_HTTP_PORT_STRIDE
-        assert prefill.bootstrap_port == SGLANG_BOOTSTRAP_PORT_BASE
+        # vLLM hands KV over its NIXL side channel; it has no bootstrap rendezvous.
+        assert prefill.bootstrap_port is None
 
         bound_ports = [
             port
@@ -2052,11 +2052,7 @@ class TestVLLMPrefillDecodeColocation:
         leader_ports = [
             port for process in prefill + decode for port in (process.http_port, process.bootstrap_port) if port
         ]
-        assert sorted(leader_ports) == [
-            SGLANG_HTTP_PORT_BASE,
-            SGLANG_HTTP_PORT_BASE + SGLANG_HTTP_PORT_STRIDE,
-            SGLANG_BOOTSTRAP_PORT_BASE,
-        ]
+        assert sorted(leader_ports) == [SGLANG_HTTP_PORT_BASE, SGLANG_HTTP_PORT_BASE + SGLANG_HTTP_PORT_STRIDE]
 
         prefill_actual_nixl_ports = {next(iter(p.nixl_port for p in prefill)) + p.node_rank for p in prefill}
         decode_actual_nixl_ports = {next(iter(p.nixl_port for p in decode)) + p.node_rank for p in decode}
@@ -2603,8 +2599,8 @@ class TestVLLMDataParallelMode:
                 "decode": RoleConfig(args={"tensor-parallel-size": 4}),
             }
         )
-        assert backend._is_dp_mode("prefill") is False
-        assert backend._is_dp_mode("decode") is False
+        assert backend.is_dp_mode("prefill") is False
+        assert backend.is_dp_mode("decode") is False
 
         # DP mode detected when data-parallel-size is set
         backend_dp = VLLMBackend(
@@ -2613,8 +2609,8 @@ class TestVLLMDataParallelMode:
                 "decode": RoleConfig(args={"data-parallel-size": 16, "enable-expert-parallel": True}),
             }
         )
-        assert backend_dp._is_dp_mode("prefill") is True
-        assert backend_dp._is_dp_mode("decode") is True
+        assert backend_dp.is_dp_mode("prefill") is True
+        assert backend_dp.is_dp_mode("decode") is True
         assert backend_dp._get_dp_size("prefill") == 16
 
     def test_dp_per_gpu_mode_creates_per_gpu_processes(self):
@@ -2689,7 +2685,7 @@ class TestVLLMDataParallelMode:
         assert {p.dp_rpc_port for p in processes} == {VLLM_DATA_PARALLEL_RPC_PORT}
         assert {p.het_group for p in processes} == {1}
         assert all(p.http_port > 0 for p in processes)
-        assert all(p.bootstrap_port is not None for p in processes)
+        assert all(p.bootstrap_port is None for p in processes)
 
     def test_dp_per_node_mode_allocates_non_overlapping_endpoint_ports(self):
         """Co-located per-node DP endpoints get disjoint coordination ranges."""
@@ -2943,6 +2939,29 @@ class TestVLLMDataParallelMode:
         assert processes[0].node == "node0"
         assert processes[0].gpu_indices == frozenset(range(8))
 
+    @pytest.mark.parametrize("frontend_type", ["vllm", "smg"])
+    def test_direct_multi_node_dp_serves_one_api_on_the_leader(self, frontend_type):
+        """A direct worker that no router expands owns every DP rank; only its leader node serves the API."""
+        from srtctl.backends import VLLMBackend
+        from srtctl.core.topology import Endpoint
+
+        backend = VLLMBackend(
+            roles={"agg": RoleConfig(args={"data-parallel-size": 16, "enable-expert-parallel": True})}
+        )
+        endpoint = Endpoint(
+            mode="agg",
+            index=0,
+            nodes=("node0", "node1"),
+            gpu_indices=frozenset(range(8)),
+            gpus_per_node=8,
+        )
+
+        processes = backend.endpoints_to_processes([endpoint], frontend_type=frontend_type)
+
+        assert [process.node for process in processes] == ["node0", "node1"]
+        assert processes[0].http_port > 0
+        assert processes[1].http_port == 0
+
     def test_direct_vllm_command_preserves_current_main_device_binding(self):
         """Direct vllm serve uses the public port and main's --device-ids binding."""
         from pathlib import Path
@@ -2973,6 +2992,7 @@ class TestVLLMDataParallelMode:
         runtime = MagicMock()
         runtime.model_path = Path("/model")
         runtime.is_hf_model = False
+        runtime.worker_model_arg = "/model"
         runtime.frontend_port = 9000
         runtime.network_interface = "eth0"
 
@@ -3011,6 +3031,7 @@ class TestVLLMDataParallelMode:
         runtime = MagicMock()
         runtime.model_path = Path("/model")
         runtime.is_hf_model = False
+        runtime.worker_model_arg = "/model"
         runtime.frontend_port = 8000
 
         with patch("srtctl.core.slurm.get_hostname_ip", return_value="10.0.0.1"):
@@ -3057,6 +3078,7 @@ class TestVLLMDataParallelMode:
         runtime = SimpleNamespace(
             model_path=Path("Qwen/Qwen3-0.6B"),
             is_hf_model=True,
+            worker_model_arg="Qwen/Qwen3-0.6B",
             frontend_port=8000,
             head_node_ip="10.20.30.40",
             network_interface="ib0",
@@ -3102,6 +3124,7 @@ class TestVLLMDataParallelMode:
         runtime = SimpleNamespace(
             model_path=Path("/model"),
             is_hf_model=False,
+            worker_model_arg="/model",
             frontend_port=8000,
             head_node_ip="10.0.0.1",
             network_interface=None,
@@ -3143,6 +3166,7 @@ class TestVLLMDataParallelMode:
         runtime = MagicMock()
         runtime.model_path = Path("/model")
         runtime.is_hf_model = False
+        runtime.worker_model_arg = "/model"
         runtime.frontend_port = 9000
         runtime.network_interface = "eth0"
 
@@ -3190,7 +3214,7 @@ class TestVLLMDataParallelMode:
         runtime.model_path = Path("/model")
         runtime.is_hf_model = False
         runtime.frontend_port = 8000
-        profiling = MagicMock(is_nsys=True, is_nsys_time=False)
+        profiling = MagicMock(is_nsys=True, is_nsys_time=False, detailed_trace_annotation=False)
         profiling._get_phase_config.return_value = SimpleNamespace(
             start_step=10,
             stop_step=25,
@@ -3506,7 +3530,9 @@ class TestVLLMDataParallelMode:
             gpus_per_node=4,
         )
         processes = backend.endpoints_to_processes([endpoint])
-        runtime = MagicMock(model_path=Path("/model"), is_hf_model=False, request_plane="tcp")
+        runtime = MagicMock(
+            model_path=Path("/model"), is_hf_model=False, worker_model_arg="/model", request_plane="tcp"
+        )
 
         with patch("srtctl.core.slurm.get_hostname_ip", return_value="10.0.0.1"):
             commands = [backend.build_worker_command(process, processes, runtime) for process in processes]
@@ -3537,7 +3563,9 @@ class TestVLLMDataParallelMode:
             gpus_per_node=4,
         )
         processes = backend.endpoints_to_processes([endpoint])
-        runtime = MagicMock(model_path=Path("/model"), is_hf_model=False, request_plane="tcp")
+        runtime = MagicMock(
+            model_path=Path("/model"), is_hf_model=False, worker_model_arg="/model", request_plane="tcp"
+        )
 
         with patch("srtctl.core.slurm.get_hostname_ip", side_effect=lambda node: f"10.0.0.{int(node[-1]) + 1}"):
             commands = [backend.build_worker_command(process, processes, runtime) for process in processes]
@@ -3615,7 +3643,9 @@ class TestVLLMDataParallelMode:
             gpus_per_node=4,
         )
         processes = backend.endpoints_to_processes([endpoint])
-        runtime = MagicMock(model_path=Path("/model"), is_hf_model=False, request_plane="tcp")
+        runtime = MagicMock(
+            model_path=Path("/model"), is_hf_model=False, worker_model_arg="/model", request_plane="tcp"
+        )
 
         with patch("srtctl.core.slurm.get_hostname_ip", return_value="10.0.0.1"):
             commands = [backend.build_worker_command(process, processes, runtime) for process in processes]
@@ -4093,6 +4123,21 @@ class TestHuggingFaceModelSupport:
 
         idx = cmd.index("--model")
         assert cmd[idx + 1] == "/model"
+
+    def test_vllm_uses_resolved_worker_model_path(self):
+        from unittest.mock import patch
+
+        from srtctl.backends import VLLMBackend
+
+        backend = VLLMBackend(connector=None)
+        process = self._make_process()
+        runtime = self._make_runtime(is_hf=False)
+        runtime.worker_model_arg = "/srtctl-model-cache/snapshots/revision"
+
+        with patch("srtctl.core.slurm.get_hostname_ip", return_value="10.0.0.1"):
+            cmd = backend.build_worker_command(process=process, endpoint_processes=[process], runtime=runtime)
+
+        assert cmd[cmd.index("--model") + 1] == "/srtctl-model-cache/snapshots/revision"
 
     # --- SGLang ---
 
@@ -4647,6 +4692,7 @@ class TestDirectVllmMultiNode:
         runtime = MagicMock()
         runtime.model_path = Path("/model")
         runtime.is_hf_model = False
+        runtime.worker_model_arg = "/model"
         runtime.frontend_port = 9000
         runtime.network_interface = "eth0"
 

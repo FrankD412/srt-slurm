@@ -18,6 +18,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeVar
 
 if TYPE_CHECKING:
+    from srtctl.backends.base import WorkerMode
     from srtctl.core.health import WorkerHealthResult
     from srtctl.core.processes import ManagedProcess
     from srtctl.core.runtime import RuntimeContext
@@ -57,6 +58,9 @@ class Frontend(ABC):
     #: ``SrtConfig._validate_frontend`` enforces it at config load.
     required_backend: ClassVar[str | None] = None
 
+    #: Whether ``frontend.epp_config`` configures this frontend; ``_validate_frontend`` rejects it otherwise.
+    accepts_epp_config: ClassVar[bool] = False
+
     #: Role that accepts the public request's model name; None uses decode/agg/prefill order.
     model_name_role: ClassVar[str | None] = None
 
@@ -89,12 +93,20 @@ class Frontend(ABC):
         """
         raise NotImplementedError
 
-    #: Path where this frontend's workers and router serve Prometheus metrics.
+    #: Path where this frontend's router (or its direct endpoint) serves Prometheus metrics.
     metrics_path: ClassVar[str] = "/metrics"
+
+    def worker_metrics_path(self, backend: Any, mode: "WorkerMode") -> str | None:
+        """Path a worker of ``mode`` serves Prometheus metrics at on ``worker_metrics_port``.
+
+        A direct worker is the engine's own server, so ``backend.prometheus_metrics_path``,
+        or ``backend.grpc_metrics_path`` when the mode's workers serve gRPC.
+        """
+        return backend.grpc_metrics_path if backend.is_grpc_mode(mode) else backend.prometheus_metrics_path
 
     @abstractmethod
     def worker_metrics_port(self, process: "Process", runtime: "RuntimeContext") -> int | None:
-        """Port on ``process.node`` serving Prometheus metrics at ``metrics_path`` for this rank.
+        """Port on ``process.node`` serving Prometheus metrics at ``worker_metrics_path`` for this rank.
 
         ``None`` when the rank serves none: a follower of a native multi-node
         server, or a layout the frontend does not scrape. Every rank of a Dynamo
@@ -170,6 +182,23 @@ class Frontend(ABC):
     def implied_services(self, config: Any) -> list["EffectiveService"]:
         """Services this frontend needs that the recipe did not name (Dynamo: its discovery plane)."""
         return []
+
+    def proxied_worker_modes(self, config: Any) -> frozenset[str]:
+        """Worker modes reached through a per-worker proxy.
+
+        ``worker_processes`` allocates ``Process.proxy_port`` for each routable
+        worker of these modes; the frontend must imply the service that binds it.
+        """
+        return frozenset()
+
+    def kv_events_subscriber(
+        self, process: "Process", runtime: "RuntimeContext", model_name: str
+    ) -> tuple[str, int, str] | None:
+        """KV-event destination ``(host, port, topic)``, or ``None`` to leave direct workers unconfigured.
+
+        Backends must compensate for any engine-added rank offset to reach this port.
+        """
+        return None
 
     def frontend_metrics_port(self, frontend_args: dict[str, Any] | None) -> int | None:
         """Port of a Prometheus listener separate from the routing port, or ``None`` when metrics share it."""

@@ -27,8 +27,6 @@ from srtctl.core.power.contract import (
     FATAL_LIFECYCLE_REASONS,
     MANIFEST_FILENAME,
     MAX_SAMPLE_GAP_SECONDS,
-    POWER_METRIC,
-    POWER_SCOPE,
     POWER_UNIT,
     PRODUCER,
     SAMPLES_FILENAME,
@@ -269,15 +267,14 @@ def _check_wire_contract(manifest: dict[str, Any]) -> list[str]:
 
     for key, expected in (
         ("producer", PRODUCER),
-        ("source_metric", POWER_METRIC),
         ("unit", POWER_UNIT),
-        ("power_scope", POWER_SCOPE),
         ("timestamp_source", CLOCK_SOURCE),
     ):
         if manifest.get(key) != expected:
             failures.append(f"{key} is {manifest.get(key)!r}, expected {expected!r}")
 
-    for key in ("producer_version", "job_id", "run_name"):
+    # The exporter config chooses the power metric, so any recorded metric and scope is valid.
+    for key in ("producer_version", "job_id", "run_name", "source_metric", "power_scope"):
         value = manifest.get(key)
         if not (isinstance(value, str) and value):
             failures.append(f"{key} is not a non-empty string")

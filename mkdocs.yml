@@ -73,6 +73,8 @@ nav:
           - Frontends and Dynamo: frontends.md
           - SGLang Router: sglang-router.md
           - vLLM Router: vllm-router.md
+          - Shepherd Model Gateway: smg.md
+          - llm-d Router: llm-d.md
       - Benchmarks:
           - Benchmarks: benchmarks.md
           - Accuracy Benchmarks: accuracy.md
@@ -86,6 +88,7 @@ nav:
       - Workloads:
           - Native Sidecars: sidecars.md
           - TileRT: tilert.md
+          - TokenSpeed: tokenspeed.md
           - Shadow Engine Recovery: shadow-engine-recovery.md
           - SGLang Fast Engine Recovery: sglang-weight-cache.md
           - Miles RL Post-Training: miles.md
